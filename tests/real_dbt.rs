@@ -13,7 +13,6 @@ use testcontainers_modules::{
 };
 use uuid::Uuid;
 
-const PROJECT_SLUG: &str = "jaffle-it";
 const ENVIRONMENT_SLUG: &str = "dev";
 
 #[tokio::test]
@@ -636,6 +635,16 @@ impl RealProject {
         self.path().to_str().expect("utf8 path")
     }
 
+    fn project_slug(&self) -> String {
+        format!(
+            "jaffle-it-{}",
+            self.path()
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        )
+    }
+
     fn seed(&self) {
         let mut command = Command::new("dbt");
         command.args([
@@ -742,7 +751,7 @@ fn run_dbtx(database_url: &str, project: &RealProject, args: &[&str]) -> Output 
     let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx"));
     command.args(args);
     command.env("DBTX_DATABASE_URL", database_url);
-    command.env("DBTX_PROJECT_SLUG", PROJECT_SLUG);
+    command.env("DBTX_PROJECT_SLUG", project.project_slug());
     command.env("DBTX_ENVIRONMENT_SLUG", ENVIRONMENT_SLUG);
     command.current_dir(project.path());
     command.output().expect("run dbtx")
@@ -822,6 +831,9 @@ fn copy_dir_all(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("create dst");
     for entry in fs::read_dir(src).expect("read src") {
         let entry = entry.expect("dir entry");
+        if should_skip_copy(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         let file_type = entry.file_type().expect("file type");
         let target = dst.join(entry.file_name());
         if file_type.is_dir() {
@@ -830,6 +842,10 @@ fn copy_dir_all(src: &Path, dst: &Path) {
             fs::copy(entry.path(), target).expect("copy file");
         }
     }
+}
+
+fn should_skip_copy(name: &str) -> bool {
+    matches!(name, "target" | "logs" | "warehouse.duckdb" | ".git")
 }
 
 fn integration_lock() -> &'static Mutex<()> {
