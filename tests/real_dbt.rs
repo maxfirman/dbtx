@@ -1,4 +1,5 @@
 use sqlx::{PgPool, Row};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -186,6 +187,100 @@ async fn dbtx_replay_rebuilds_real_current_state() {
     assert_eq!(rebuilt_count, 1);
 }
 
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_ls_reports_modified_model_after_file_change() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+    ));
+
+    project.append_to_file(
+        "models/staging/stg_customers.sql",
+        "\n-- dbtx integration modified marker\n",
+    );
+
+    let modified = modified_unique_ids(db.url(), &project);
+    assert!(
+        modified.contains("model.jaffle_shop_project.stg_customers"),
+        "expected stg_customers to be reported as modified, got: {modified:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+    ));
+
+    project.append_to_file(
+        "models/staging/stg_orders.sql",
+        "\n-- dbtx integration modified upstream marker\n",
+    );
+    project.replace_in_file(
+        "models/marts/orders.sql",
+        "select * from customer_order_count\n",
+        "select *, missing_dbtx_column from customer_order_count\n",
+    );
+
+    let modified_before = modified_unique_ids(db.url(), &project);
+    assert!(
+        modified_before.contains("model.jaffle_shop_project.stg_orders"),
+        "expected stg_orders to be modified before rerun, got: {modified_before:?}"
+    );
+    assert!(
+        modified_before.contains("model.jaffle_shop_project.orders"),
+        "expected orders to be modified before rerun, got: {modified_before:?}"
+    );
+
+    let failed_run = run_dbtx(
+        db.url(),
+        &project,
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "--select",
+            "stg_orders orders",
+        ],
+    );
+    assert_failure(&failed_run);
+
+    let modified_after = modified_unique_ids(db.url(), &project);
+    assert!(
+        !modified_after.contains("model.jaffle_shop_project.stg_orders"),
+        "expected successful upstream model to be removed from modified set, got: {modified_after:?}"
+    );
+    assert!(
+        modified_after.contains("model.jaffle_shop_project.orders"),
+        "expected failed downstream model to remain modified, got: {modified_after:?}"
+    );
+}
+
 struct RealProject {
     temp_dir: TempDir,
 }
@@ -218,6 +313,24 @@ impl RealProject {
         command.current_dir(self.path());
         let output = command.output().expect("run dbt seed");
         assert_success(&output);
+    }
+
+    fn append_to_file(&self, relative_path: &str, content: &str) {
+        let path = self.path().join(relative_path);
+        let mut existing = fs::read_to_string(&path).expect("read file");
+        existing.push_str(content);
+        fs::write(path, existing).expect("write file");
+    }
+
+    fn replace_in_file(&self, relative_path: &str, from: &str, to: &str) {
+        let path = self.path().join(relative_path);
+        let existing = fs::read_to_string(&path).expect("read file");
+        let updated = existing.replace(from, to);
+        assert_ne!(
+            existing, updated,
+            "expected replacement to modify file {relative_path}"
+        );
+        fs::write(path, updated).expect("write file");
     }
 }
 
@@ -311,6 +424,45 @@ fn assert_success(output: &Output) {
             stderr
         );
     }
+}
+
+fn assert_failure(output: &Output) {
+    assert!(
+        !output.status.success(),
+        "expected command to fail but it succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn modified_unique_ids(database_url: &str, project: &RealProject) -> std::collections::BTreeSet<String> {
+    let output = run_dbtx(
+        database_url,
+        project,
+        &[
+            "ls",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "-s",
+            "state:modified",
+            "--output",
+            "json",
+        ],
+    );
+    assert_success(&output);
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| {
+            value
+                .get("unique_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .collect()
 }
 
 fn jaffle_fixture_dir() -> PathBuf {

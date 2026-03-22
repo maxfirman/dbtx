@@ -64,12 +64,19 @@ impl ManifestSnapshot {
 
     pub fn reconstruct(
         raw_manifest: Value,
+        successful_nodes: &BTreeMap<String, Value>,
         current_nodes: &[CurrentNodeState],
         edges: &[ManifestEdge],
     ) -> Value {
         let mut raw_manifest = raw_manifest;
 
         if let Some(nodes) = raw_manifest.get_mut("nodes").and_then(Value::as_object_mut) {
+            for (unique_id, raw_node) in successful_nodes {
+                if nodes.contains_key(unique_id) {
+                    nodes.insert(unique_id.clone(), raw_node.clone());
+                }
+            }
+
             for patch in current_nodes {
                 let Some(node) = nodes.get_mut(&patch.unique_id).and_then(Value::as_object_mut) else {
                     continue;
@@ -225,6 +232,7 @@ fn json_map_from_edges(map: BTreeMap<String, Vec<String>>) -> Value {
 mod tests {
     use super::{CurrentNodeState, ManifestEdge, ManifestSnapshot};
     use serde_json::json;
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -278,6 +286,7 @@ mod tests {
 
         let reconstructed = ManifestSnapshot::reconstruct(
             raw,
+            &BTreeMap::new(),
             &[CurrentNodeState {
                 unique_id: "model.pkg.a".to_string(),
                 materialized: Some("table".to_string()),
@@ -309,6 +318,7 @@ mod tests {
 
         let reconstructed = ManifestSnapshot::reconstruct(
             raw,
+            &BTreeMap::new(),
             &[],
             &[ManifestEdge {
                 parent_unique_id: "model.pkg.parent".to_string(),
@@ -324,5 +334,29 @@ mod tests {
             reconstructed["child_map"]["model.pkg.parent"],
             json!(["model.pkg.child"])
         );
+    }
+
+    #[test]
+    fn reconstruct_replaces_node_with_last_successful_version() {
+        let raw = json!({
+            "nodes": {
+                "model.pkg.a": {
+                    "raw_code": "new code",
+                    "checksum": {"checksum":"new"}
+                }
+            }
+        });
+
+        let successful_nodes = BTreeMap::from([(
+            "model.pkg.a".to_string(),
+            json!({
+                "raw_code": "old code",
+                "checksum": {"checksum":"old"}
+            }),
+        )]);
+
+        let reconstructed = ManifestSnapshot::reconstruct(raw, &successful_nodes, &[], &[]);
+        assert_eq!(reconstructed["nodes"]["model.pkg.a"]["raw_code"], "old code");
+        assert_eq!(reconstructed["nodes"]["model.pkg.a"]["checksum"]["checksum"], "old");
     }
 }

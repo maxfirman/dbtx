@@ -5,6 +5,7 @@ use crate::manifest::{CurrentNodeState, ManifestEdge, ManifestSnapshot, Reconstr
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -430,6 +431,7 @@ impl Db {
         .await?;
 
         if let Some(node) = event.normalized_node_event() {
+            let promote_manifest_state = matches!(node.status.as_deref(), Some("success" | "pass"));
             let resource_type = node.resource_type.clone();
             let node_name = node.node_name.clone();
             let node_path = node.node_path.clone();
@@ -443,6 +445,25 @@ impl Db {
             let started_at = node.started_at;
             let finished_at = node.finished_at;
             let execution_time_seconds = node.execution_time_seconds;
+            let promoted_materialized = promote_manifest_state
+                .then(|| materialized.clone())
+                .flatten();
+            let promoted_relation_database = promote_manifest_state
+                .then(|| relation_database.clone())
+                .flatten();
+            let promoted_relation_schema = promote_manifest_state
+                .then(|| relation_schema.clone())
+                .flatten();
+            let promoted_relation_alias = promote_manifest_state
+                .then(|| relation_alias.clone())
+                .flatten();
+            let promoted_relation_name = promote_manifest_state
+                .then(|| relation_name.clone())
+                .flatten();
+            let promoted_checksum = promote_manifest_state
+                .then(|| node_checksum.clone())
+                .flatten();
+            let last_success_at = promote_manifest_state.then_some(finished_at).flatten();
 
             sqlx::query(
                 r#"
@@ -532,15 +553,16 @@ impl Db {
             .bind(resource_type)
             .bind(node_name)
             .bind(node_path)
-            .bind(materialized)
-            .bind(relation_database)
-            .bind(relation_schema)
-            .bind(relation_alias)
-            .bind(relation_name)
-            .bind(node_checksum)
+            .bind(promoted_materialized)
+            .bind(promoted_relation_database)
+            .bind(promoted_relation_schema)
+            .bind(promoted_relation_alias)
+            .bind(promoted_relation_name)
+            .bind(promoted_checksum)
             .bind(started_at)
             .bind(finished_at)
             .bind(execution_time_seconds)
+            .bind(last_success_at)
             .execute(&self.pool)
             .await?;
         }
@@ -654,37 +676,86 @@ impl Db {
 
         sqlx::query(
             r#"
+            WITH latest_execution AS (
+                SELECT DISTINCT ON (ne.unique_id)
+                    r.project_id,
+                    r.environment_id,
+                    ne.unique_id,
+                    ne.run_id,
+                    ne.status,
+                    ne.resource_type,
+                    ne.node_name,
+                    ne.node_path,
+                    ne.started_at,
+                    ne.finished_at,
+                    ne.execution_time_seconds
+                FROM node_executions ne
+                JOIN runs r ON r.run_id = ne.run_id
+                WHERE r.project_id = $1
+                  AND r.environment_id = $2
+                ORDER BY ne.unique_id, r.id DESC
+            ),
+            latest_success AS (
+                SELECT DISTINCT ON (ne.unique_id)
+                    ne.unique_id,
+                    ne.materialized,
+                    ne.relation_database,
+                    ne.relation_schema,
+                    ne.relation_alias,
+                    ne.relation_name,
+                    ne.checksum,
+                    ne.finished_at
+                FROM node_executions ne
+                JOIN runs r ON r.run_id = ne.run_id
+                WHERE r.project_id = $1
+                  AND r.environment_id = $2
+                  AND ne.status = 'success'
+                ORDER BY ne.unique_id, r.id DESC
+            ),
+            latest_state AS (
+                SELECT DISTINCT ON (ne.unique_id)
+                    ne.unique_id,
+                    ne.materialized,
+                    ne.relation_database,
+                    ne.relation_schema,
+                    ne.relation_alias,
+                    ne.relation_name,
+                    ne.checksum
+                FROM node_executions ne
+                JOIN runs r ON r.run_id = ne.run_id
+                WHERE r.project_id = $1
+                  AND r.environment_id = $2
+                ORDER BY ne.unique_id, r.id DESC
+            )
             INSERT INTO current_node_state (
                 project_id, environment_id, unique_id, last_run_id, status, resource_type,
                 node_name, node_path, materialized, relation_database, relation_schema,
                 relation_alias, relation_name, checksum, started_at, finished_at,
                 execution_time_seconds, last_success_at, updated_at
             )
-            SELECT DISTINCT ON (ne.unique_id)
-                r.project_id,
-                r.environment_id,
-                ne.unique_id,
-                ne.run_id,
-                ne.status,
-                ne.resource_type,
-                ne.node_name,
-                ne.node_path,
-                ne.materialized,
-                ne.relation_database,
-                ne.relation_schema,
-                ne.relation_alias,
-                ne.relation_name,
-                ne.checksum,
-                ne.started_at,
-                ne.finished_at,
-                ne.execution_time_seconds,
-                CASE WHEN ne.status = 'success' THEN ne.finished_at END,
+            SELECT
+                le.project_id,
+                le.environment_id,
+                le.unique_id,
+                le.run_id,
+                le.status,
+                le.resource_type,
+                le.node_name,
+                le.node_path,
+                COALESCE(ls.materialized, state.materialized),
+                COALESCE(ls.relation_database, state.relation_database),
+                COALESCE(ls.relation_schema, state.relation_schema),
+                COALESCE(ls.relation_alias, state.relation_alias),
+                COALESCE(ls.relation_name, state.relation_name),
+                COALESCE(ls.checksum, state.checksum),
+                le.started_at,
+                le.finished_at,
+                le.execution_time_seconds,
+                ls.finished_at,
                 NOW()
-            FROM node_executions ne
-            JOIN runs r ON r.run_id = ne.run_id
-            WHERE r.project_id = $1
-              AND r.environment_id = $2
-            ORDER BY ne.unique_id, r.id DESC
+            FROM latest_execution le
+            LEFT JOIN latest_success ls ON ls.unique_id = le.unique_id
+            LEFT JOIN latest_state state ON state.unique_id = le.unique_id
             "#,
         )
         .bind(project_id)
@@ -779,7 +850,44 @@ impl Db {
         })
         .collect::<Vec<_>>();
 
-        let reconstructed = ManifestSnapshot::reconstruct(manifest_json.0, &current_nodes, &edges);
+        let successful_nodes = sqlx::query(
+            r#"
+            WITH latest_success AS (
+                SELECT DISTINCT ON (ne.unique_id)
+                    ne.unique_id,
+                    ne.run_id
+                FROM node_executions ne
+                JOIN runs r ON r.run_id = ne.run_id
+                WHERE r.project_id = $1
+                  AND r.environment_id = $2
+                  AND ne.status = 'success'
+                ORDER BY ne.unique_id, r.id DESC
+            )
+            SELECT
+                ls.unique_id,
+                ms.manifest -> 'nodes' -> ls.unique_id AS raw_node
+            FROM latest_success ls
+            JOIN manifest_snapshots ms ON ms.run_id = ls.run_id
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .filter_map(|row| {
+            let unique_id: String = row.get("unique_id");
+            let raw_node: Option<sqlx::types::Json<Value>> = row.get("raw_node");
+            raw_node.map(|raw_node| (unique_id, raw_node.0))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+        let reconstructed = ManifestSnapshot::reconstruct(
+            manifest_json.0,
+            &successful_nodes,
+            &current_nodes,
+            &edges,
+        );
         Ok(Some(ReconstructedManifest::write(&reconstructed).await?))
     }
 
