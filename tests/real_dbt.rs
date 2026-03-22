@@ -387,7 +387,7 @@ impl TestDatabase {
 
 fn init_dbtx_schema(database_url: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_dbtx"))
-        .arg("init")
+        .args(["state", "init"])
         .env("DBTX_DATABASE_URL", database_url)
         .output()
         .expect("run dbtx init");

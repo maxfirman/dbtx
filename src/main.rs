@@ -6,7 +6,7 @@ mod event;
 mod manifest;
 
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{Cli, Command, StateCommand};
 use config::RuntimeConfig;
 use db::Db;
 use error::AppResult;
@@ -25,12 +25,14 @@ async fn run() -> AppResult<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Init { database_url } => {
-            let config = RuntimeConfig::from_optional_database_url(database_url)?;
-            let db = Db::connect(&config.database_url).await?;
-            db.init().await?;
-            println!("Initialized dbtx database schema.");
-        }
+        Command::State(state_command) => match state_command {
+            StateCommand::Init { database_url } => {
+                let config = RuntimeConfig::from_optional_database_url(database_url)?;
+                let db = Db::connect(&config.database_url).await?;
+                db.init().await?;
+                println!("Initialized dbtx database schema.");
+            }
+        },
         Command::Run { args } => {
             if is_help_request(&args) {
                 exit_with_dbt_help("run")?;

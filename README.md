@@ -4,7 +4,7 @@
 
 Phase 1 supports:
 
-- `dbtx init`
+- `dbtx state init`
 - `dbtx run ...`
 - `dbtx ls ...`
 - `dbtx replay --run-id <uuid>`

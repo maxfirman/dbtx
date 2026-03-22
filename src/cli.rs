@@ -12,11 +12,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    #[command(about = "Initialize the dbtx database schema")]
-    Init {
-        #[arg(long, env = "DBTX_DATABASE_URL")]
-        database_url: Option<String>,
-    },
+    #[command(subcommand)]
+    State(StateCommand),
     #[command(
         about = "Run dbt and persist execution state",
         trailing_var_arg = true,
@@ -42,10 +39,30 @@ pub enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum StateCommand {
+    #[command(about = "Initialize the dbtx database schema")]
+    Init {
+        #[arg(long, env = "DBTX_DATABASE_URL")]
+        database_url: Option<String>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{Cli, Command, StateCommand};
     use clap::Parser;
+
+    #[test]
+    fn state_init_accepts_database_url() {
+        let cli = Cli::parse_from(["dbtx", "state", "init", "--database-url", "postgres://example"]);
+        match cli.command {
+            Command::State(StateCommand::Init { database_url }) => {
+                assert_eq!(database_url.as_deref(), Some("postgres://example"));
+            }
+            _ => panic!("expected state init command"),
+        }
+    }
 
     #[test]
     fn run_accepts_passthrough_args() {
