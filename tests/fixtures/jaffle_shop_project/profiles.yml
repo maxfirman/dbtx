@@ -1,0 +1,13 @@
+jaffle_shop_project:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: dummy_account
+      user: dummy_user
+      password: dummy_pass
+      role: dummy_role
+      database: dummy_db
+      warehouse: dummy_wh
+      schema: dummy_schema
+      threads: 1

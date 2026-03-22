@@ -1,0 +1,62 @@
+# dbtx
+
+`dbtx` is a Rust wrapper around `dbt-fusion` that persists run state to PostgreSQL.
+
+Phase 1 supports:
+
+- `dbtx init`
+- `dbtx run ...`
+- `dbtx ls ...`
+- `dbtx replay --run-id <uuid>`
+
+## Configuration
+
+- `DBTX_DATABASE_URL`: PostgreSQL connection string
+- `DBTX_DBT_PATH`: optional path to the `dbt` executable, defaults to `dbt`
+- `DBTX_PROJECT_SLUG`: optional override for project identity
+- `DBTX_ENVIRONMENT_SLUG`: optional override for environment identity
+
+## Examples
+
+Initialize the schema:
+
+```bash
+DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- init
+```
+
+Run dbt with state capture:
+
+```bash
+DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- run --target dev --select orders+
+```
+
+Replay projections:
+
+```bash
+DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- replay --run-id <uuid>
+```
+
+List nodes using reconstructed state:
+
+```bash
+DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- ls --select orders+
+```
+
+## Real Integration Tests
+
+The repo includes ignored integration tests that run against:
+
+- a real dbt Fusion CLI
+- the vendored jaffle shop demo fixture under `tests/fixtures/jaffle_shop_project`
+- DuckDB as the warehouse
+- PostgreSQL for `dbtx` state, started automatically with `testcontainers` by default
+
+Run them with:
+
+```bash
+cargo test --test real_dbt -- --ignored
+```
+
+Optional override:
+
+- `DBTX_TEST_DATABASE_URL`: PostgreSQL URL for the integration test database; if unset, the tests start an ephemeral Postgres container automatically
