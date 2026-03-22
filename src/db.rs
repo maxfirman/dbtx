@@ -212,9 +212,11 @@ impl Db {
         let mut sequence_no: i64 = 0;
         let mut dbt_version: Option<String> = None;
         while let Some(line) = reader.next_line().await? {
-            println!("{line}");
             sequence_no += 1;
             if let Some(event) = LogEvent::parse(&line) {
+                if let Some(rendered) = event.render_text_line() {
+                    println!("{rendered}");
+                }
                 if dbt_version.is_none() && event.info.name == "MainReportVersion" {
                     dbt_version = event
                         .data
@@ -225,6 +227,7 @@ impl Db {
                 self.persist_log_event(run_id, project_id, environment_id, sequence_no, &event)
                     .await?;
             } else {
+                println!("{line}");
                 self.persist_raw_line(run_id, sequence_no, &line).await?;
             }
         }

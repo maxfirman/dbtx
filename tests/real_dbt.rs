@@ -30,6 +30,27 @@ async fn dbtx_run_persists_real_jaffle_state() {
         &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str(), "--select", "stg_customers"],
     );
     assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("dbt-fusion 2.0.0-preview."),
+        "expected dbt version line in stdout, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("   Loading profiles.yml"),
+        "expected text-mode loading line in stdout, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Succeeded ["),
+        "expected model result line in stdout, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Finished 'run' successfully"),
+        "expected execution summary in stdout, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"info\":"),
+        "expected rendered text output rather than raw json, got: {stdout}"
+    );
 
     let run_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
         .fetch_one(db.pool())
@@ -174,7 +195,6 @@ impl RealProject {
         let temp_dir = TempDir::new().expect("temp dir");
         copy_dir_all(&jaffle_fixture_dir(), temp_dir.path());
         clean_runtime_artifacts(temp_dir.path());
-        write_duckdb_profile(temp_dir.path());
         Self { temp_dir }
     }
 
@@ -187,16 +207,16 @@ impl RealProject {
     }
 
     fn seed(&self) {
-        let output = Command::new("dbt")
-            .args([
-                "seed",
-                "--project-dir",
-                self.path_str(),
-                "--profiles-dir",
-                self.path_str(),
-            ])
-            .output()
-            .expect("run dbt seed");
+        let mut command = Command::new("dbt");
+        command.args([
+            "seed",
+            "--project-dir",
+            self.path_str(),
+            "--profiles-dir",
+            self.path_str(),
+        ]);
+        command.current_dir(self.path());
+        let output = command.output().expect("run dbt seed");
         assert_success(&output);
     }
 }
@@ -309,23 +329,6 @@ fn clean_runtime_artifacts(project_dir: &Path) {
             fs::remove_file(path).expect("remove file");
         }
     }
-}
-
-fn write_duckdb_profile(project_dir: &Path) {
-    let contents = format!(
-        r#"jaffle_shop_project:
-  target: dev
-  outputs:
-    dev:
-      type: duckdb
-      path: {path}
-      schema: main
-      threads: 4
-"#,
-        path = project_dir.join("warehouse.duckdb").display()
-    );
-
-    fs::write(project_dir.join("profiles.yml"), contents).expect("write profiles");
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) {
