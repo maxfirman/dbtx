@@ -79,6 +79,120 @@ async fn dbtx_run_persists_real_jaffle_state() {
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_build_persists_real_jaffle_state() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+
+    let output = run_dbtx(
+        db.url(),
+        &project,
+        &["build", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+    );
+    assert_success(&output);
+
+    let status: String = sqlx::query("SELECT terminal_status FROM runs ORDER BY id DESC LIMIT 1")
+        .fetch_one(db.pool())
+        .await
+        .expect("build run row")
+        .get("terminal_status");
+    let command: String = sqlx::query("SELECT command FROM runs ORDER BY id DESC LIMIT 1")
+        .fetch_one(db.pool())
+        .await
+        .expect("build command row")
+        .get("command");
+    let model_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM current_node_state WHERE resource_type = 'model'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("model count");
+
+    assert_eq!(command, "build");
+    assert_eq!(status, "success");
+    assert!(model_count >= 6, "expected build to persist multiple models, got {model_count}");
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_seed_persists_seed_state() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+
+    let output = run_dbtx(
+        db.url(),
+        &project,
+        &["seed", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+    );
+    assert_success(&output);
+
+    let command: String = sqlx::query("SELECT command FROM runs ORDER BY id DESC LIMIT 1")
+        .fetch_one(db.pool())
+        .await
+        .expect("seed command row")
+        .get("command");
+    let seed_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM current_node_state WHERE resource_type = 'seed'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("seed node count");
+
+    assert_eq!(command, "seed");
+    assert_eq!(seed_count, 6);
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_test_persists_test_state() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+    ));
+
+    let output = run_dbtx(
+        db.url(),
+        &project,
+        &["test", "--project-dir", project.path_str(), "--profiles-dir", project.path_str(), "--select", "stg_customers"],
+    );
+    assert_success(&output);
+
+    let command: String = sqlx::query("SELECT command FROM runs ORDER BY id DESC LIMIT 1")
+        .fetch_one(db.pool())
+        .await
+        .expect("test command row")
+        .get("command");
+    let test_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM node_executions ne JOIN runs r ON r.run_id = ne.run_id WHERE r.command = 'test' AND ne.resource_type = 'test'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("test node count");
+
+    assert_eq!(command, "test");
+    assert!(test_count >= 1, "expected persisted test node executions, got {test_count}");
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
 async fn dbtx_ls_uses_real_project_and_does_not_write_runs() {
     let _guard = integration_lock()
         .lock()
@@ -141,6 +255,87 @@ async fn dbtx_ls_uses_real_project_and_does_not_write_runs() {
 
     assert_eq!(runs_after, runs_before);
     assert_eq!(events_after, events_before);
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_ls_without_prior_state_succeeds() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+
+    let output = run_dbtx(
+        db.url(),
+        &project,
+        &[
+            "ls",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "--select",
+            "stg_customers",
+            "--output",
+            "json",
+        ],
+    );
+    assert_success(&output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"unique_id\":\"model.jaffle_shop_project.stg_customers\""),
+        "expected model in stdout, got: {stdout}"
+    );
+
+    let runs_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+        .fetch_one(db.pool())
+        .await
+        .expect("runs count");
+    let events_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run_events")
+        .fetch_one(db.pool())
+        .await
+        .expect("events count");
+
+    assert_eq!(runs_count, 0);
+    assert_eq!(events_count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_ls_state_modified_without_prior_state_returns_all_node_types() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+
+    let modified = modified_unique_ids(db.url(), &project);
+    assert!(
+        modified.contains("model.jaffle_shop_project.stg_customers"),
+        "expected clean-state modified selector to include models, got: {modified:?}"
+    );
+    assert!(
+        modified.contains("seed.jaffle_shop_project.raw_customers"),
+        "expected clean-state modified selector to include seeds, got: {modified:?}"
+    );
+    assert!(
+        modified.contains("test.jaffle_shop_project.not_null_stg_customers_customer_id.e2cfb1f9aa"),
+        "expected clean-state modified selector to include tests, got: {modified:?}"
+    );
+
+    let runs_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+        .fetch_one(db.pool())
+        .await
+        .expect("runs count");
+    assert_eq!(runs_count, 0);
 }
 
 #[tokio::test]
@@ -279,6 +474,30 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
         modified_after.contains("model.jaffle_shop_project.orders"),
         "expected failed downstream model to remain modified, got: {modified_after:?}"
     );
+
+    let failed_run_id: uuid::Uuid = sqlx::query("SELECT run_id FROM runs ORDER BY id DESC LIMIT 1")
+        .fetch_one(db.pool())
+        .await
+        .expect("failed run row")
+        .get("run_id");
+
+    sqlx::query("DELETE FROM current_node_state")
+        .execute(db.pool())
+        .await
+        .expect("delete current state before replay");
+
+    let replay_output = run_dbtx(db.url(), &project, &["replay", "--run-id", &failed_run_id.to_string()]);
+    assert_success(&replay_output);
+
+    let modified_after_replay = modified_unique_ids(db.url(), &project);
+    assert!(
+        !modified_after_replay.contains("model.jaffle_shop_project.stg_orders"),
+        "expected successful upstream model to stay out of modified set after replay, got: {modified_after_replay:?}"
+    );
+    assert!(
+        modified_after_replay.contains("model.jaffle_shop_project.orders"),
+        "expected failed downstream model to remain modified after replay, got: {modified_after_replay:?}"
+    );
 }
 
 struct RealProject {
@@ -396,7 +615,7 @@ fn init_dbtx_schema(database_url: &str) {
 
 async fn reset_db(pool: &PgPool) {
     sqlx::query(
-        "TRUNCATE current_node_state, manifest_edges, manifest_nodes, manifest_snapshots, node_executions, run_events, runs, environments, projects CASCADE",
+        "TRUNCATE promoted_manifest_nodes, promoted_manifest_meta, current_node_state, manifest_edges, manifest_nodes, manifest_snapshots, node_executions, run_events, runs, environments, projects CASCADE",
     )
     .execute(pool)
     .await

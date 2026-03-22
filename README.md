@@ -5,8 +5,11 @@
 Phase 1 supports:
 
 - `dbtx state init`
+- `dbtx build ...`
 - `dbtx run ...`
 - `dbtx ls ...`
+- `dbtx test ...`
+- `dbtx seed ...`
 - `dbtx replay --run-id <uuid>`
 
 ## Configuration
@@ -21,13 +24,19 @@ Phase 1 supports:
 Initialize the schema:
 
 ```bash
-DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- init
+DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- state init
 ```
 
 Run dbt with state capture:
 
 ```bash
 DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- run --target dev --select orders+
+```
+
+Build dbt resources with state capture:
+
+```bash
+DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- build --target dev
 ```
 
 Replay projections:

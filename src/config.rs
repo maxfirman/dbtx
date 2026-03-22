@@ -14,7 +14,10 @@ pub struct InvocationContext {
     pub project_slug: String,
     pub environment_slug: String,
     pub project_dir: PathBuf,
+    pub profiles_dir: PathBuf,
     pub target_path: PathBuf,
+    pub is_full_graph_run: bool,
+    pub wants_state_modified: bool,
     pub dbt_args: Vec<OsString>,
 }
 
@@ -51,6 +54,9 @@ impl InvocationContext {
         let project_dir = parse_path_option(args, "--project-dir")
             .map(|path| absolutize(&current_dir, &path))
             .unwrap_or(current_dir.clone());
+        let profiles_dir = parse_path_option(args, "--profiles-dir")
+            .map(|path| absolutize(&current_dir, &path))
+            .unwrap_or_else(|| current_dir.clone());
         let target_path = parse_path_option(args, "--target-path")
             .map(|path| absolutize(&current_dir, &path))
             .unwrap_or_else(|| project_dir.join("target"));
@@ -67,6 +73,14 @@ impl InvocationContext {
                 .or_else(|| env::var("DBT_TARGET").ok())
                 .unwrap_or_else(|| "default".to_string())
         });
+        let is_full_graph_run = !has_any_option(
+            args,
+            &["--select", "-s", "--exclude", "-x", "--selector"],
+        );
+        let wants_state_modified = args.iter().any(|arg| {
+            let value = arg.to_string_lossy();
+            value.contains("state:modified")
+        });
 
         let mut dbt_args = args.to_vec();
         if inject_json_logging {
@@ -79,7 +93,10 @@ impl InvocationContext {
             project_slug,
             environment_slug,
             project_dir,
+            profiles_dir,
             target_path,
+            is_full_graph_run,
+            wants_state_modified,
             dbt_args,
         })
     }
@@ -94,6 +111,10 @@ fn has_option(args: &[OsString], flag: &str) -> bool {
         let value = value.to_string_lossy();
         value == flag || value.starts_with(&format!("{flag}="))
     })
+}
+
+fn has_any_option(args: &[OsString], flags: &[&str]) -> bool {
+    flags.iter().any(|flag| has_option(args, flag))
 }
 
 fn parse_string_option(args: &[OsString], flag: &str) -> Option<String> {
@@ -134,15 +155,22 @@ mod tests {
         let args = vec![
             OsString::from("--project-dir"),
             OsString::from("/tmp/example"),
+            OsString::from("--profiles-dir"),
+            OsString::from("/tmp/profiles"),
             OsString::from("--target"),
             OsString::from("prod"),
             OsString::from("--target-path=artifacts"),
+            OsString::from("--select"),
+            OsString::from("state:modified"),
         ];
 
         let ctx = InvocationContext::from_args(&args, true).expect("context should build");
         assert_eq!(ctx.project_slug, "example");
         assert_eq!(ctx.environment_slug, "prod");
+        assert_eq!(ctx.profiles_dir, std::path::PathBuf::from("/tmp/profiles"));
         assert!(ctx.target_path.ends_with("artifacts"));
+        assert!(!ctx.is_full_graph_run);
+        assert!(ctx.wants_state_modified);
         assert!(ctx.dbt_args.iter().any(|arg| arg == "--log-format"));
     }
 

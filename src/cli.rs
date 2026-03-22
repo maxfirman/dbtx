@@ -15,6 +15,15 @@ pub enum Command {
     #[command(subcommand)]
     State(StateCommand),
     #[command(
+        about = "Build dbt resources and persist execution state",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    Build {
+        #[arg()]
+        args: Vec<OsString>,
+    },
+    #[command(
         about = "Run dbt and persist execution state",
         trailing_var_arg = true,
         allow_hyphen_values = true
@@ -29,6 +38,24 @@ pub enum Command {
         allow_hyphen_values = true
     )]
     Ls {
+        #[arg()]
+        args: Vec<OsString>,
+    },
+    #[command(
+        about = "Execute dbt tests and persist execution state",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    Test {
+        #[arg()]
+        args: Vec<OsString>,
+    },
+    #[command(
+        about = "Load dbt seeds and persist execution state",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    Seed {
         #[arg()]
         args: Vec<OsString>,
     },
@@ -80,6 +107,21 @@ mod tests {
     }
 
     #[test]
+    fn build_accepts_passthrough_args() {
+        let cli = Cli::parse_from(["dbtx", "build", "--target", "prod", "--select", "orders+"]);
+        match cli.command {
+            Command::Build { args } => {
+                let args: Vec<String> = args
+                    .into_iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(args, vec!["--target", "prod", "--select", "orders+"]);
+            }
+            _ => panic!("expected build command"),
+        }
+    }
+
+    #[test]
     fn ls_accepts_passthrough_args() {
         let cli = Cli::parse_from(["dbtx", "ls", "--output", "json", "--select", "orders+"]);
         match cli.command {
@@ -91,6 +133,36 @@ mod tests {
                 assert_eq!(args, vec!["--output", "json", "--select", "orders+"]);
             }
             _ => panic!("expected ls command"),
+        }
+    }
+
+    #[test]
+    fn test_accepts_passthrough_args() {
+        let cli = Cli::parse_from(["dbtx", "test", "--select", "orders"]);
+        match cli.command {
+            Command::Test { args } => {
+                let args: Vec<String> = args
+                    .into_iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(args, vec!["--select", "orders"]);
+            }
+            _ => panic!("expected test command"),
+        }
+    }
+
+    #[test]
+    fn seed_accepts_passthrough_args() {
+        let cli = Cli::parse_from(["dbtx", "seed", "--full-refresh"]);
+        match cli.command {
+            Command::Seed { args } => {
+                let args: Vec<String> = args
+                    .into_iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(args, vec!["--full-refresh"]);
+            }
+            _ => panic!("expected seed command"),
         }
     }
 }

@@ -33,6 +33,15 @@ async fn run() -> AppResult<()> {
                 println!("Initialized dbtx database schema.");
             }
         },
+        Command::Build { args } => {
+            if is_help_request(&args) {
+                exit_with_dbt_help("build")?;
+            }
+            let config = RuntimeConfig::from_env()?;
+            let db = Db::connect(&config.database_url).await?;
+            db.init().await?;
+            db.persisting_invocation("build", &config, &args).await?;
+        }
         Command::Run { args } => {
             if is_help_request(&args) {
                 exit_with_dbt_help("run")?;
@@ -40,7 +49,7 @@ async fn run() -> AppResult<()> {
             let config = RuntimeConfig::from_env()?;
             let db = Db::connect(&config.database_url).await?;
             db.init().await?;
-            db.run_invocation(&config, &args).await?;
+            db.persisting_invocation("run", &config, &args).await?;
         }
         Command::Ls { args } => {
             if is_help_request(&args) {
@@ -49,6 +58,24 @@ async fn run() -> AppResult<()> {
             let config = RuntimeConfig::from_env()?;
             let db = Db::connect(&config.database_url).await?;
             db.ls_invocation(&config, &args).await?;
+        }
+        Command::Test { args } => {
+            if is_help_request(&args) {
+                exit_with_dbt_help("test")?;
+            }
+            let config = RuntimeConfig::from_env()?;
+            let db = Db::connect(&config.database_url).await?;
+            db.init().await?;
+            db.persisting_invocation("test", &config, &args).await?;
+        }
+        Command::Seed { args } => {
+            if is_help_request(&args) {
+                exit_with_dbt_help("seed")?;
+            }
+            let config = RuntimeConfig::from_env()?;
+            let db = Db::connect(&config.database_url).await?;
+            db.init().await?;
+            db.persisting_invocation("seed", &config, &args).await?;
         }
         Command::Replay { run_id } => {
             let config = RuntimeConfig::from_env()?;

@@ -66,7 +66,6 @@ impl ManifestSnapshot {
         raw_manifest: Value,
         successful_nodes: &BTreeMap<String, Value>,
         current_nodes: &[CurrentNodeState],
-        edges: &[ManifestEdge],
     ) -> Value {
         let mut raw_manifest = raw_manifest;
 
@@ -113,19 +112,29 @@ impl ManifestSnapshot {
             }
         }
 
-        if !edges.is_empty() {
+        if let Some(nodes) = raw_manifest.get("nodes").and_then(Value::as_object) {
             let mut parent_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
             let mut child_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-            for edge in edges {
-                parent_map
-                    .entry(edge.child_unique_id.clone())
-                    .or_default()
-                    .push(edge.parent_unique_id.clone());
-                child_map
-                    .entry(edge.parent_unique_id.clone())
-                    .or_default()
-                    .push(edge.child_unique_id.clone());
+            for (unique_id, node) in nodes {
+                let parents = node
+                    .get("depends_on")
+                    .and_then(|depends_on| depends_on.get("nodes"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+
+                parent_map.insert(unique_id.clone(), parents.clone());
+
+                for parent in parents {
+                    child_map
+                        .entry(parent)
+                        .or_default()
+                        .push(unique_id.clone());
+                }
             }
 
             raw_manifest["parent_map"] = json_map_from_edges(parent_map);
@@ -142,6 +151,42 @@ impl ReconstructedManifest {
         let path = temp_dir.path().join("manifest.json");
         fs::write(path, serde_json::to_vec(manifest)?).await?;
         Ok(Self { temp_dir })
+    }
+
+    pub async fn write_empty_state(project_name: &str, adapter_type: &str) -> AppResult<Self> {
+        let manifest = serde_json::json!({
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+                "dbt_version": "0.0.0",
+                "generated_at": "1970-01-01T00:00:00Z",
+                "invocation_id": "00000000-0000-0000-0000-000000000000",
+                "invocation_started_at": null,
+                "env": {},
+                "project_name": project_name,
+                "project_id": "dbtx-empty-state",
+                "user_id": null,
+                "send_anonymous_usage_stats": null,
+                "adapter_type": adapter_type,
+                "quoting": null
+            },
+            "nodes": {},
+            "sources": {},
+            "macros": {},
+            "docs": {},
+            "exposures": {},
+            "groups": {},
+            "group_map": {},
+            "metrics": {},
+            "selectors": {},
+            "semantic_models": {},
+            "saved_queries": {},
+            "unit_tests": {},
+            "disabled": {},
+            "parent_map": {},
+            "child_map": {},
+            "functions": {}
+        });
+        Self::write(&manifest).await
     }
 }
 
@@ -230,7 +275,7 @@ fn json_map_from_edges(map: BTreeMap<String, Vec<String>>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{CurrentNodeState, ManifestEdge, ManifestSnapshot};
+    use super::{CurrentNodeState, ManifestSnapshot};
     use serde_json::json;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
@@ -296,7 +341,6 @@ mod tests {
                 relation_name: Some("new.rel".to_string()),
                 checksum: Some("new".to_string()),
             }],
-            &[],
         );
 
         let node = &reconstructed["nodes"]["model.pkg.a"];
@@ -311,7 +355,18 @@ mod tests {
     #[test]
     fn reconstruct_overwrites_edge_maps_when_edges_present() {
         let raw = json!({
-            "nodes": {},
+            "nodes": {
+                "model.pkg.child": {
+                    "depends_on": {
+                        "nodes": ["model.pkg.parent"]
+                    }
+                },
+                "model.pkg.parent": {
+                    "depends_on": {
+                        "nodes": []
+                    }
+                }
+            },
             "parent_map": {"old": ["x"]},
             "child_map": {"x": ["old"]}
         });
@@ -320,10 +375,6 @@ mod tests {
             raw,
             &BTreeMap::new(),
             &[],
-            &[ManifestEdge {
-                parent_unique_id: "model.pkg.parent".to_string(),
-                child_unique_id: "model.pkg.child".to_string(),
-            }],
         );
 
         assert_eq!(
@@ -355,7 +406,7 @@ mod tests {
             }),
         )]);
 
-        let reconstructed = ManifestSnapshot::reconstruct(raw, &successful_nodes, &[], &[]);
+        let reconstructed = ManifestSnapshot::reconstruct(raw, &successful_nodes, &[]);
         assert_eq!(reconstructed["nodes"]["model.pkg.a"]["raw_code"], "old code");
         assert_eq!(reconstructed["nodes"]["model.pkg.a"]["checksum"]["checksum"], "old");
     }

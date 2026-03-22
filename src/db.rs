@@ -1,12 +1,13 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
-use crate::manifest::{CurrentNodeState, ManifestEdge, ManifestSnapshot, ReconstructedManifest};
+use crate::manifest::{CurrentNodeState, ManifestSnapshot, ReconstructedManifest};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -35,12 +36,14 @@ CREATE TABLE IF NOT EXISTS runs (
     dbt_invocation_id UUID,
     command TEXT NOT NULL,
     args JSONB NOT NULL,
+    is_full_graph_run BOOLEAN NOT NULL DEFAULT FALSE,
     dbt_version TEXT,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at TIMESTAMPTZ,
     exit_code INTEGER,
     terminal_status TEXT
 );
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS is_full_graph_run BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS run_events (
     id BIGSERIAL PRIMARY KEY,
@@ -130,9 +133,30 @@ CREATE TABLE IF NOT EXISTS current_node_state (
     PRIMARY KEY (project_id, environment_id, unique_id)
 );
 
+CREATE TABLE IF NOT EXISTS promoted_manifest_meta (
+    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    environment_id BIGINT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+    source_run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    base_manifest JSONB NOT NULL,
+    promoted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (project_id, environment_id)
+);
+
+CREATE TABLE IF NOT EXISTS promoted_manifest_nodes (
+    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    environment_id BIGINT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+    unique_id TEXT NOT NULL,
+    source_run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    checksum TEXT,
+    raw_node JSONB NOT NULL,
+    promoted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (project_id, environment_id, unique_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_project_env ON runs(project_id, environment_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, sequence_no);
 CREATE INDEX IF NOT EXISTS idx_node_executions_run ON node_executions(run_id);
+CREATE INDEX IF NOT EXISTS idx_promoted_manifest_nodes_scope ON promoted_manifest_nodes(project_id, environment_id);
 "#;
 
 pub struct Db {
@@ -153,8 +177,9 @@ impl Db {
         Ok(())
     }
 
-    pub async fn run_invocation(
+    pub async fn persisting_invocation(
         &self,
+        subcommand: &str,
         config: &RuntimeConfig,
         incoming_args: &[OsString],
     ) -> AppResult<()> {
@@ -162,7 +187,18 @@ impl Db {
         let run_id = Uuid::new_v4();
         let reconstructed_manifest = self
             .load_reconstructed_manifest(&ctx.project_slug, &ctx.environment_slug)
-            .await?;
+            .await?
+            .or(if ctx.wants_state_modified {
+                Some(
+                    ReconstructedManifest::write_empty_state(
+                        &read_dbt_project_name(&ctx.project_dir),
+                        &read_adapter_type(&ctx.profiles_dir),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            });
         let dbt_args = append_invocation_id(
             append_state_dir(ctx.dbt_args.clone(), reconstructed_manifest.as_ref()),
             run_id,
@@ -179,18 +215,20 @@ impl Db {
 
         sqlx::query(
             r#"
-            INSERT INTO runs (run_id, project_id, environment_id, dbt_invocation_id, command, args)
-            VALUES ($1, $2, $3, $1, 'run', $4)
+            INSERT INTO runs (run_id, project_id, environment_id, dbt_invocation_id, command, args, is_full_graph_run)
+            VALUES ($1, $2, $3, $1, $4, $5, $6)
             "#,
         )
         .bind(run_id)
         .bind(project_id)
         .bind(environment_id)
+        .bind(subcommand)
         .bind(args_json)
+        .bind(ctx.is_full_graph_run)
         .execute(&self.pool)
         .await?;
 
-        let mut child = spawn_dbt_child(&config.dbt_path, "run", &dbt_args, &ctx.project_dir)?;
+        let mut child = spawn_dbt_child(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir)?;
 
         let stdout = child
             .stdout
@@ -268,6 +306,8 @@ impl Db {
 
         if let Ok(manifest) = manifest_result {
             self.persist_manifest(run_id, &manifest).await?;
+            self.promote_manifest_state(run_id, project_id, environment_id, ctx.is_full_graph_run && status.success())
+                .await?;
         }
 
         self.rebuild_current_state(project_id, environment_id).await?;
@@ -287,7 +327,18 @@ impl Db {
         let ctx = InvocationContext::from_args(incoming_args, false)?;
         let reconstructed_manifest = self
             .load_reconstructed_manifest(&ctx.project_slug, &ctx.environment_slug)
-            .await?;
+            .await?
+            .or(if ctx.wants_state_modified {
+                Some(
+                    ReconstructedManifest::write_empty_state(
+                        &read_dbt_project_name(&ctx.project_dir),
+                        &read_adapter_type(&ctx.profiles_dir),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            });
         let dbt_args = append_state_dir(ctx.dbt_args.clone(), reconstructed_manifest.as_ref());
         let status = self
             .execute_passthrough_command(&config.dbt_path, "ls", &dbt_args, &ctx.project_dir)
@@ -317,60 +368,10 @@ impl Db {
         let project_id: i64 = row.get("project_id");
         let environment_id: i64 = row.get("environment_id");
 
-        sqlx::query(
-            r#"
-            DELETE FROM current_node_state
-            WHERE project_id = $1 AND environment_id = $2
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_id)
-        .execute(&self.pool)
-        .await?;
-
-        let inserted = sqlx::query(
-            r#"
-            INSERT INTO current_node_state (
-                project_id, environment_id, unique_id, last_run_id, status, resource_type,
-                node_name, node_path, materialized, relation_database, relation_schema,
-                relation_alias, relation_name, checksum, started_at, finished_at,
-                execution_time_seconds, last_success_at, updated_at
-            )
-            SELECT DISTINCT ON (ne.unique_id)
-                r.project_id,
-                r.environment_id,
-                ne.unique_id,
-                ne.run_id,
-                ne.status,
-                ne.resource_type,
-                ne.node_name,
-                ne.node_path,
-                ne.materialized,
-                ne.relation_database,
-                ne.relation_schema,
-                ne.relation_alias,
-                ne.relation_name,
-                ne.checksum,
-                ne.started_at,
-                ne.finished_at,
-                ne.execution_time_seconds,
-                CASE WHEN ne.status = 'success' THEN ne.finished_at END,
-                NOW()
-            FROM node_executions ne
-            JOIN runs r ON r.run_id = ne.run_id
-            WHERE r.project_id = $1
-              AND r.environment_id = $2
-              AND r.id <= $3
-            ORDER BY ne.unique_id, r.id DESC
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_id)
-        .bind(run_pk)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(inserted.rows_affected())
+        self.rebuild_promoted_manifest_state_up_to(project_id, environment_id, Some(run_pk))
+            .await?;
+        self.rebuild_current_state_up_to(project_id, environment_id, Some(run_pk))
+            .await
     }
 
     async fn ensure_environment(&self, project_slug: &str, environment_slug: &str) -> AppResult<(i64, i64)> {
@@ -524,7 +525,7 @@ impl Db {
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $9, $10, $11,
                     $12, $13, $14, $15, $16,
-                    $17, CASE WHEN $5 = 'success' THEN $16 END, NOW()
+                    $17, $18, NOW()
                 )
                 ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE SET
                     last_run_id = EXCLUDED.last_run_id,
@@ -662,7 +663,176 @@ impl Db {
         Ok(())
     }
 
+    async fn promote_manifest_state(
+        &self,
+        run_id: Uuid,
+        project_id: i64,
+        environment_id: i64,
+        promote_base_manifest: bool,
+    ) -> AppResult<()> {
+        if promote_base_manifest {
+            sqlx::query(
+                r#"
+                INSERT INTO promoted_manifest_meta (project_id, environment_id, source_run_id, base_manifest)
+                SELECT $2, $3, $1, manifest
+                FROM manifest_snapshots
+                WHERE run_id = $1
+                ON CONFLICT (project_id, environment_id) DO UPDATE SET
+                    source_run_id = EXCLUDED.source_run_id,
+                    base_manifest = EXCLUDED.base_manifest,
+                    promoted_at = NOW()
+                "#,
+            )
+            .bind(run_id)
+            .bind(project_id)
+            .bind(environment_id)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO promoted_manifest_nodes (
+                project_id, environment_id, unique_id, source_run_id, checksum, raw_node
+            )
+            SELECT
+                $2,
+                $3,
+                ne.unique_id,
+                ne.run_id,
+                ne.checksum,
+                ms.manifest -> 'nodes' -> ne.unique_id
+            FROM node_executions ne
+            JOIN manifest_snapshots ms ON ms.run_id = ne.run_id
+            WHERE ne.run_id = $1
+              AND ne.status = 'success'
+              AND ms.manifest -> 'nodes' -> ne.unique_id IS NOT NULL
+            ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE SET
+                source_run_id = EXCLUDED.source_run_id,
+                checksum = EXCLUDED.checksum,
+                raw_node = EXCLUDED.raw_node,
+                promoted_at = NOW()
+            "#,
+        )
+        .bind(run_id)
+        .bind(project_id)
+        .bind(environment_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     async fn rebuild_current_state(&self, project_id: i64, environment_id: i64) -> AppResult<()> {
+        self.rebuild_current_state_up_to(project_id, environment_id, None)
+            .await?;
+        Ok(())
+    }
+
+    async fn rebuild_promoted_manifest_state_up_to(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        max_run_pk: Option<i64>,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            DELETE FROM promoted_manifest_nodes
+            WHERE project_id = $1 AND environment_id = $2
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM promoted_manifest_meta
+            WHERE project_id = $1 AND environment_id = $2
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .execute(&self.pool)
+        .await?;
+
+        let base_run = sqlx::query(
+            r#"
+            SELECT r.run_id
+            FROM runs r
+            JOIN manifest_snapshots ms ON ms.run_id = r.run_id
+            WHERE r.project_id = $1
+              AND r.environment_id = $2
+              AND r.terminal_status = 'success'
+              AND r.is_full_graph_run = TRUE
+              AND ($3::BIGINT IS NULL OR r.id <= $3)
+            ORDER BY r.id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(max_run_pk)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(base_run) = base_run {
+            let run_id: Uuid = base_run.get("run_id");
+            self.promote_manifest_state(run_id, project_id, environment_id, true)
+                .await?;
+        }
+
+        sqlx::query(
+            r#"
+            WITH latest_success AS (
+                SELECT DISTINCT ON (ne.unique_id)
+                    ne.unique_id,
+                    ne.run_id,
+                    ne.checksum
+                FROM node_executions ne
+                JOIN runs r ON r.run_id = ne.run_id
+                WHERE r.project_id = $1
+                  AND r.environment_id = $2
+                  AND ne.status = 'success'
+                  AND ($3::BIGINT IS NULL OR r.id <= $3)
+                ORDER BY ne.unique_id, r.id DESC
+            )
+            INSERT INTO promoted_manifest_nodes (
+                project_id, environment_id, unique_id, source_run_id, checksum, raw_node
+            )
+            SELECT
+                $1,
+                $2,
+                ls.unique_id,
+                ls.run_id,
+                ls.checksum,
+                ms.manifest -> 'nodes' -> ls.unique_id
+            FROM latest_success ls
+            JOIN manifest_snapshots ms ON ms.run_id = ls.run_id
+            WHERE ms.manifest -> 'nodes' -> ls.unique_id IS NOT NULL
+            ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE SET
+                source_run_id = EXCLUDED.source_run_id,
+                checksum = EXCLUDED.checksum,
+                raw_node = EXCLUDED.raw_node,
+                promoted_at = NOW()
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(max_run_pk)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn rebuild_current_state_up_to(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        max_run_pk: Option<i64>,
+    ) -> AppResult<u64> {
         sqlx::query(
             r#"
             DELETE FROM current_node_state
@@ -674,7 +844,7 @@ impl Db {
         .execute(&self.pool)
         .await?;
 
-        sqlx::query(
+        let inserted = sqlx::query(
             r#"
             WITH latest_execution AS (
                 SELECT DISTINCT ON (ne.unique_id)
@@ -693,6 +863,7 @@ impl Db {
                 JOIN runs r ON r.run_id = ne.run_id
                 WHERE r.project_id = $1
                   AND r.environment_id = $2
+                  AND ($3::BIGINT IS NULL OR r.id <= $3)
                 ORDER BY ne.unique_id, r.id DESC
             ),
             latest_success AS (
@@ -709,6 +880,7 @@ impl Db {
                 JOIN runs r ON r.run_id = ne.run_id
                 WHERE r.project_id = $1
                   AND r.environment_id = $2
+                  AND ($3::BIGINT IS NULL OR r.id <= $3)
                   AND ne.status = 'success'
                 ORDER BY ne.unique_id, r.id DESC
             ),
@@ -725,6 +897,7 @@ impl Db {
                 JOIN runs r ON r.run_id = ne.run_id
                 WHERE r.project_id = $1
                   AND r.environment_id = $2
+                  AND ($3::BIGINT IS NULL OR r.id <= $3)
                 ORDER BY ne.unique_id, r.id DESC
             )
             INSERT INTO current_node_state (
@@ -760,10 +933,11 @@ impl Db {
         )
         .bind(project_id)
         .bind(environment_id)
+        .bind(max_run_pk)
         .execute(&self.pool)
         .await?;
 
-        Ok(())
+        Ok(inserted.rows_affected())
     }
 
     async fn load_reconstructed_manifest(
@@ -771,21 +945,17 @@ impl Db {
         project_slug: &str,
         environment_slug: &str,
     ) -> AppResult<Option<ReconstructedManifest>> {
-        let snapshot_row = sqlx::query(
+        let base_row = sqlx::query(
             r#"
             SELECT
-                r.run_id,
-                r.project_id,
-                r.environment_id,
-                ms.manifest
-            FROM runs r
-            JOIN projects p ON p.id = r.project_id
-            JOIN environments e ON e.id = r.environment_id
-            JOIN manifest_snapshots ms ON ms.run_id = r.run_id
+                pmm.project_id,
+                pmm.environment_id,
+                pmm.base_manifest
+            FROM promoted_manifest_meta pmm
+            JOIN projects p ON p.id = pmm.project_id
+            JOIN environments e ON e.id = pmm.environment_id
             WHERE p.slug = $1
               AND e.slug = $2
-            ORDER BY r.id DESC
-            LIMIT 1
             "#,
         )
         .bind(project_slug)
@@ -793,14 +963,13 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?;
 
-        let Some(snapshot_row) = snapshot_row else {
+        let Some(base_row) = base_row else {
             return Ok(None);
         };
 
-        let snapshot_run_id: Uuid = snapshot_row.get("run_id");
-        let project_id: i64 = snapshot_row.get("project_id");
-        let environment_id: i64 = snapshot_row.get("environment_id");
-        let manifest_json: sqlx::types::Json<Value> = snapshot_row.get("manifest");
+        let project_id: i64 = base_row.get("project_id");
+        let environment_id: i64 = base_row.get("environment_id");
+        let base_manifest: sqlx::types::Json<Value> = base_row.get("base_manifest");
 
         let current_nodes = sqlx::query(
             r#"
@@ -833,41 +1002,14 @@ impl Db {
         })
         .collect::<Vec<_>>();
 
-        let edges = sqlx::query(
+        let promoted_nodes = sqlx::query(
             r#"
-            SELECT parent_unique_id, child_unique_id
-            FROM manifest_edges
-            WHERE run_id = $1
-            "#,
-        )
-        .bind(snapshot_run_id)
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(|row| ManifestEdge {
-            parent_unique_id: row.get("parent_unique_id"),
-            child_unique_id: row.get("child_unique_id"),
-        })
-        .collect::<Vec<_>>();
-
-        let successful_nodes = sqlx::query(
-            r#"
-            WITH latest_success AS (
-                SELECT DISTINCT ON (ne.unique_id)
-                    ne.unique_id,
-                    ne.run_id
-                FROM node_executions ne
-                JOIN runs r ON r.run_id = ne.run_id
-                WHERE r.project_id = $1
-                  AND r.environment_id = $2
-                  AND ne.status = 'success'
-                ORDER BY ne.unique_id, r.id DESC
-            )
             SELECT
-                ls.unique_id,
-                ms.manifest -> 'nodes' -> ls.unique_id AS raw_node
-            FROM latest_success ls
-            JOIN manifest_snapshots ms ON ms.run_id = ls.run_id
+                unique_id,
+                raw_node
+            FROM promoted_manifest_nodes
+            WHERE project_id = $1
+              AND environment_id = $2
             "#,
         )
         .bind(project_id)
@@ -877,16 +1019,15 @@ impl Db {
         .into_iter()
         .filter_map(|row| {
             let unique_id: String = row.get("unique_id");
-            let raw_node: Option<sqlx::types::Json<Value>> = row.get("raw_node");
-            raw_node.map(|raw_node| (unique_id, raw_node.0))
+            let raw_node: sqlx::types::Json<Value> = row.get("raw_node");
+            Some((unique_id, raw_node.0))
         })
         .collect::<BTreeMap<_, _>>();
 
         let reconstructed = ManifestSnapshot::reconstruct(
-            manifest_json.0,
-            &successful_nodes,
+            base_manifest.0,
+            &promoted_nodes,
             &current_nodes,
-            &edges,
         );
         Ok(Some(ReconstructedManifest::write(&reconstructed).await?))
     }
@@ -980,4 +1121,35 @@ fn null_if_empty(value: &str) -> Option<&str> {
     } else {
         Some(value)
     }
+}
+
+fn read_dbt_project_name(project_dir: &Path) -> String {
+    read_yaml_scalar(&project_dir.join("dbt_project.yml"), "name")
+        .unwrap_or_else(|| {
+            project_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
+fn read_adapter_type(profiles_dir: &Path) -> String {
+    read_yaml_scalar(&profiles_dir.join("profiles.yml"), "type")
+        .unwrap_or_else(|| "duckdb".to_string())
+}
+
+fn read_yaml_scalar(path: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    content.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return None;
+        }
+        let prefix = format!("{key}:");
+        trimmed
+            .strip_prefix(&prefix)
+            .map(|value| value.trim().trim_matches('"').trim_matches('\'').to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
