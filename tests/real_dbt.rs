@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use sqlx::{PgPool, Row};
 use serde_json::Value;
 use std::fs;
@@ -377,7 +379,7 @@ async fn dbtx_ls_state_modified_without_prior_state_returns_all_node_types() {
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn dbtx_full_run_does_not_leave_sources_in_state_modified() {
+async fn dbtx_full_run_clears_state_modified() {
     let _guard = integration_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -396,8 +398,59 @@ async fn dbtx_full_run_does_not_leave_sources_in_state_modified() {
 
     let modified = modified_unique_ids(db.url(), &project);
     assert!(
-        !modified.iter().any(|unique_id| unique_id.starts_with("source.")),
-        "expected sources to stay out of state:modified after full run, got: {modified:?}"
+        modified.is_empty(),
+        "expected state:modified to be empty after full run, got: {modified:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_build_state_modified_clears_modified_set() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+    ));
+
+    project.append_to_file(
+        "models/staging/stg_customers.sql",
+        "\n-- dbtx build state:modified marker\n",
+    );
+
+    let modified_before = modified_unique_ids(db.url(), &project);
+    assert!(
+        modified_before.contains("model.jaffle_shop_project.stg_customers"),
+        "expected modified model before state:modified build, got: {modified_before:?}"
+    );
+
+    let output = run_dbtx(
+        db.url(),
+        &project,
+        &[
+            "build",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "-s",
+            "state:modified",
+        ],
+    );
+    assert_success(&output);
+
+    let modified_after = modified_unique_ids(db.url(), &project);
+    assert!(
+        modified_after.is_empty(),
+        "expected state:modified to be empty after build -s state:modified, got: {modified_after:?}"
     );
 }
 

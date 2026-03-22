@@ -8,6 +8,8 @@ pub enum AppError {
     Io(#[from] io::Error),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("migration error: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("dbt invocation failed with exit code {0}")]

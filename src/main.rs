@@ -27,59 +27,20 @@ async fn run() -> AppResult<()> {
     match cli.command {
         Command::State(state_command) => match state_command {
             StateCommand::Init { database_url } => {
-                let config = RuntimeConfig::from_optional_database_url(database_url)?;
-                let db = Db::connect(&config.database_url).await?;
-                db.init().await?;
+                let _db =
+                    connect_initialized_db(&RuntimeConfig::from_optional_database_url(database_url)?)
+                        .await?;
                 println!("Initialized dbtx database schema.");
             }
         },
-        Command::Build { args } => {
-            if is_help_request(&args) {
-                exit_with_dbt_help("build")?;
-            }
-            let config = RuntimeConfig::from_env()?;
-            let db = Db::connect(&config.database_url).await?;
-            db.init().await?;
-            db.persisting_invocation("build", &config, &args).await?;
-        }
-        Command::Run { args } => {
-            if is_help_request(&args) {
-                exit_with_dbt_help("run")?;
-            }
-            let config = RuntimeConfig::from_env()?;
-            let db = Db::connect(&config.database_url).await?;
-            db.init().await?;
-            db.persisting_invocation("run", &config, &args).await?;
-        }
-        Command::Ls { args } => {
-            if is_help_request(&args) {
-                exit_with_dbt_help("ls")?;
-            }
-            let config = RuntimeConfig::from_env()?;
-            let db = Db::connect(&config.database_url).await?;
-            db.ls_invocation(&config, &args).await?;
-        }
-        Command::Test { args } => {
-            if is_help_request(&args) {
-                exit_with_dbt_help("test")?;
-            }
-            let config = RuntimeConfig::from_env()?;
-            let db = Db::connect(&config.database_url).await?;
-            db.init().await?;
-            db.persisting_invocation("test", &config, &args).await?;
-        }
-        Command::Seed { args } => {
-            if is_help_request(&args) {
-                exit_with_dbt_help("seed")?;
-            }
-            let config = RuntimeConfig::from_env()?;
-            let db = Db::connect(&config.database_url).await?;
-            db.init().await?;
-            db.persisting_invocation("seed", &config, &args).await?;
-        }
+        Command::Build { args } => handle_persisting_command("build", args).await?,
+        Command::Run { args } => handle_persisting_command("run", args).await?,
+        Command::Ls { args } => handle_passthrough_command("ls", args).await?,
+        Command::Test { args } => handle_persisting_command("test", args).await?,
+        Command::Seed { args } => handle_persisting_command("seed", args).await?,
         Command::Replay { run_id } => {
             let config = RuntimeConfig::from_env()?;
-            let db = Db::connect(&config.database_url).await?;
+            let db = connect_db(&config).await?;
             let updated = db.replay_projection(run_id).await?;
             println!("Rebuilt current state for {updated} nodes.");
         }
@@ -99,4 +60,32 @@ fn exit_with_dbt_help(subcommand: &str) -> AppResult<()> {
         .arg("--help")
         .status()?;
     std::process::exit(status.code().unwrap_or(0));
+}
+
+async fn handle_persisting_command(subcommand: &str, args: Vec<OsString>) -> AppResult<()> {
+    if is_help_request(&args) {
+        exit_with_dbt_help(subcommand)?;
+    }
+    let config = RuntimeConfig::from_env()?;
+    let db = connect_initialized_db(&config).await?;
+    db.persisting_invocation(subcommand, &config, &args).await
+}
+
+async fn handle_passthrough_command(subcommand: &str, args: Vec<OsString>) -> AppResult<()> {
+    if is_help_request(&args) {
+        exit_with_dbt_help(subcommand)?;
+    }
+    let config = RuntimeConfig::from_env()?;
+    let db = connect_db(&config).await?;
+    db.ls_invocation(&config, &args).await
+}
+
+async fn connect_db(config: &RuntimeConfig) -> AppResult<Db> {
+    Db::connect(&config.database_url).await
+}
+
+async fn connect_initialized_db(config: &RuntimeConfig) -> AppResult<Db> {
+    let db = connect_db(config).await?;
+    db.init().await?;
+    Ok(db)
 }

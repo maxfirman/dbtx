@@ -183,8 +183,7 @@ fn render_generic_message(msg: &str, use_color: bool) -> Option<String> {
         return Some(rendered);
     }
 
-    if msg.starts_with("error:") {
-        let rest = &msg["error:".len()..];
+    if let Some(rest) = msg.strip_prefix("error:") {
         return Some(format!(
             "{}{}",
             style("error:", &[AnsiStyle::Red, AnsiStyle::Bold], use_color),
@@ -305,9 +304,10 @@ fn colorize_summary_counts(input: &str, use_color: bool) -> String {
                 style(segment, &[AnsiStyle::Green, AnsiStyle::Bold], use_color)
             } else if segment.ends_with(" error") || segment.ends_with(" errors") {
                 style(segment, &[AnsiStyle::Red, AnsiStyle::Bold], use_color)
-            } else if segment.ends_with(" warning") || segment.ends_with(" warnings") {
-                style(segment, &[AnsiStyle::Yellow, AnsiStyle::Bold], use_color)
-            } else if segment.ends_with(" skipped") {
+            } else if segment.ends_with(" warning")
+                || segment.ends_with(" warnings")
+                || segment.ends_with(" skipped")
+            {
                 style(segment, &[AnsiStyle::Yellow, AnsiStyle::Bold], use_color)
             } else {
                 style(segment, &[AnsiStyle::White, AnsiStyle::Bold], use_color)

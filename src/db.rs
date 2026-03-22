@@ -3,8 +3,9 @@ use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::manifest::{CurrentNodeState, ManifestSnapshot, ReconstructedManifest};
 use serde_json::Value;
+use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{Executor, PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
@@ -13,154 +14,22 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use uuid::Uuid;
 
-const SCHEMA_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS projects (
-    id BIGSERIAL PRIMARY KEY,
-    slug TEXT NOT NULL UNIQUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS environments (
-    id BIGSERIAL PRIMARY KEY,
-    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    slug TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(project_id, slug)
-);
-
-CREATE TABLE IF NOT EXISTS runs (
-    id BIGSERIAL PRIMARY KEY,
-    run_id UUID NOT NULL UNIQUE,
-    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    environment_id BIGINT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-    dbt_invocation_id UUID,
-    command TEXT NOT NULL,
-    args JSONB NOT NULL,
-    is_full_graph_run BOOLEAN NOT NULL DEFAULT FALSE,
-    dbt_version TEXT,
-    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    finished_at TIMESTAMPTZ,
-    exit_code INTEGER,
-    terminal_status TEXT
-);
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS is_full_graph_run BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS run_events (
-    id BIGSERIAL PRIMARY KEY,
-    run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-    sequence_no BIGINT NOT NULL,
-    event_name TEXT,
-    event_code TEXT,
-    unique_id TEXT,
-    payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(run_id, sequence_no)
-);
-
-CREATE TABLE IF NOT EXISTS node_executions (
-    run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-    unique_id TEXT NOT NULL,
-    resource_type TEXT,
-    node_name TEXT,
-    node_path TEXT,
-    materialized TEXT,
-    status TEXT,
-    relation_database TEXT,
-    relation_schema TEXT,
-    relation_alias TEXT,
-    relation_name TEXT,
-    checksum TEXT,
-    started_at TIMESTAMPTZ,
-    finished_at TIMESTAMPTZ,
-    execution_time_seconds DOUBLE PRECISION,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (run_id, unique_id)
-);
-
-CREATE TABLE IF NOT EXISTS manifest_snapshots (
-    run_id UUID PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
-    manifest JSONB NOT NULL,
-    manifest_size_bytes BIGINT NOT NULL,
-    checksum TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS manifest_nodes (
-    run_id UUID NOT NULL REFERENCES manifest_snapshots(run_id) ON DELETE CASCADE,
-    unique_id TEXT NOT NULL,
-    resource_type TEXT,
-    name TEXT,
-    package_name TEXT,
-    original_file_path TEXT,
-    tags JSONB NOT NULL,
-    fqn JSONB NOT NULL,
-    config JSONB NOT NULL,
-    checksum TEXT,
-    database_name TEXT,
-    schema_name TEXT,
-    alias TEXT,
-    relation_name TEXT,
-    PRIMARY KEY (run_id, unique_id)
-);
-
-CREATE TABLE IF NOT EXISTS manifest_edges (
-    run_id UUID NOT NULL REFERENCES manifest_snapshots(run_id) ON DELETE CASCADE,
-    parent_unique_id TEXT NOT NULL,
-    child_unique_id TEXT NOT NULL,
-    PRIMARY KEY (run_id, parent_unique_id, child_unique_id)
-);
-
-CREATE TABLE IF NOT EXISTS current_node_state (
-    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    environment_id BIGINT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-    unique_id TEXT NOT NULL,
-    last_run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-    status TEXT,
-    resource_type TEXT,
-    node_name TEXT,
-    node_path TEXT,
-    materialized TEXT,
-    relation_database TEXT,
-    relation_schema TEXT,
-    relation_alias TEXT,
-    relation_name TEXT,
-    checksum TEXT,
-    started_at TIMESTAMPTZ,
-    finished_at TIMESTAMPTZ,
-    execution_time_seconds DOUBLE PRECISION,
-    last_success_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (project_id, environment_id, unique_id)
-);
-
-CREATE TABLE IF NOT EXISTS promoted_manifest_meta (
-    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    environment_id BIGINT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-    source_run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-    base_manifest JSONB NOT NULL,
-    promoted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (project_id, environment_id)
-);
-
-CREATE TABLE IF NOT EXISTS promoted_manifest_nodes (
-    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    environment_id BIGINT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-    unique_id TEXT NOT NULL,
-    source_run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-    checksum TEXT,
-    raw_node JSONB NOT NULL,
-    promoted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (project_id, environment_id, unique_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_runs_project_env ON runs(project_id, environment_id, id DESC);
-CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, sequence_no);
-CREATE INDEX IF NOT EXISTS idx_node_executions_run ON node_executions(run_id);
-CREATE INDEX IF NOT EXISTS idx_promoted_manifest_nodes_scope ON promoted_manifest_nodes(project_id, environment_id);
-"#;
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 pub struct Db {
     pool: PgPool,
+}
+
+struct RunFinalization<'a> {
+    run_id: Uuid,
+    project_id: i64,
+    environment_id: i64,
+    subcommand: &'a str,
+    dbt_version: Option<&'a str>,
+    exit_code: i32,
+    terminal_status: &'a str,
+    manifest: Option<&'a ManifestSnapshot>,
+    promote_base_manifest: bool,
 }
 
 impl Db {
@@ -173,7 +42,7 @@ impl Db {
     }
 
     pub async fn init(&self) -> AppResult<()> {
-        self.pool.execute(SCHEMA_SQL).await?;
+        MIGRATOR.run(&self.pool).await?;
         Ok(())
     }
 
@@ -228,7 +97,15 @@ impl Db {
         .execute(&self.pool)
         .await?;
 
-        let mut child = spawn_dbt_child(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir)?;
+        let mut child = match spawn_dbt_child(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir)
+        {
+            Ok(child) => child,
+            Err(err) => {
+                self.mark_run_finished(run_id, None, 1, "wrapper_failed")
+                    .await?;
+                return Err(err);
+            }
+        };
 
         let stdout = child
             .stdout
@@ -287,37 +164,18 @@ impl Db {
         };
         let exit_code = status.code().unwrap_or(1);
 
-        sqlx::query(
-            r#"
-            UPDATE runs
-            SET dbt_version = COALESCE($2, dbt_version),
-                finished_at = NOW(),
-                exit_code = $3,
-                terminal_status = $4
-            WHERE run_id = $1
-            "#,
-        )
-        .bind(run_id)
-        .bind(dbt_version)
-        .bind(exit_code)
-        .bind(terminal_status)
-        .execute(&self.pool)
+        self.finalize_run(RunFinalization {
+            run_id,
+            project_id,
+            environment_id,
+            subcommand,
+            dbt_version: dbt_version.as_deref(),
+            exit_code,
+            terminal_status,
+            manifest: manifest_result.ok().as_ref(),
+            promote_base_manifest: ctx.is_full_graph_run && status.success(),
+        })
         .await?;
-
-        if let Ok(manifest) = manifest_result {
-            self.persist_manifest(run_id, &manifest).await?;
-            if should_promote_manifest(subcommand) {
-                self.promote_manifest_state(
-                    run_id,
-                    project_id,
-                    environment_id,
-                    ctx.is_full_graph_run && status.success(),
-                )
-                .await?;
-            }
-        }
-
-        self.rebuild_current_state(project_id, environment_id).await?;
 
         if status.success() {
             Ok(())
@@ -379,6 +237,96 @@ impl Db {
             .await?;
         self.rebuild_current_state_up_to(project_id, environment_id, Some(run_pk))
             .await
+    }
+
+    async fn finalize_run(&self, finalization: RunFinalization<'_>) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        self.mark_run_finished_in_tx(
+            &mut tx,
+            finalization.run_id,
+            finalization.dbt_version,
+            finalization.exit_code,
+            finalization.terminal_status,
+        )
+            .await?;
+
+        if let Some(manifest) = finalization.manifest {
+            self.persist_manifest_in_tx(&mut tx, finalization.run_id, manifest)
+                .await?;
+            if should_promote_manifest(finalization.subcommand) {
+                self.promote_manifest_state_in_tx(
+                    &mut tx,
+                    finalization.run_id,
+                    finalization.project_id,
+                    finalization.environment_id,
+                    finalization.promote_base_manifest,
+                )
+                .await?;
+            }
+        }
+
+        self.rebuild_current_state_up_to_in_tx(
+            &mut tx,
+            finalization.project_id,
+            finalization.environment_id,
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn mark_run_finished(
+        &self,
+        run_id: Uuid,
+        dbt_version: Option<&str>,
+        exit_code: i32,
+        terminal_status: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE runs
+            SET dbt_version = COALESCE($2, dbt_version),
+                finished_at = NOW(),
+                exit_code = $3,
+                terminal_status = $4
+            WHERE run_id = $1
+            "#,
+        )
+        .bind(run_id)
+        .bind(dbt_version)
+        .bind(exit_code)
+        .bind(terminal_status)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_run_finished_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        run_id: Uuid,
+        dbt_version: Option<&str>,
+        exit_code: i32,
+        terminal_status: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE runs
+            SET dbt_version = COALESCE($2, dbt_version),
+                finished_at = NOW(),
+                exit_code = $3,
+                terminal_status = $4
+            WHERE run_id = $1
+            "#,
+        )
+        .bind(run_id)
+        .bind(dbt_version)
+        .bind(exit_code)
+        .bind(terminal_status)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
     }
 
     async fn ensure_environment(&self, project_slug: &str, environment_slug: &str) -> AppResult<(i64, i64)> {
@@ -593,7 +541,12 @@ impl Db {
         Ok(())
     }
 
-    async fn persist_manifest(&self, run_id: Uuid, manifest: &ManifestSnapshot) -> AppResult<()> {
+    async fn persist_manifest_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        run_id: Uuid,
+        manifest: &ManifestSnapshot,
+    ) -> AppResult<()> {
         let manifest_raw = serde_json::to_vec(&manifest.raw)?;
         let checksum = format!("{:x}", md5::compute(&manifest_raw));
         sqlx::query(
@@ -610,16 +563,16 @@ impl Db {
         .bind(sqlx::types::Json(&manifest.raw))
         .bind(manifest_raw.len() as i64)
         .bind(checksum)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
 
         sqlx::query("DELETE FROM manifest_nodes WHERE run_id = $1")
             .bind(run_id)
-            .execute(&self.pool)
+            .execute(&mut **tx)
             .await?;
         sqlx::query("DELETE FROM manifest_edges WHERE run_id = $1")
             .bind(run_id)
-            .execute(&self.pool)
+            .execute(&mut **tx)
             .await?;
 
         for node in &manifest.nodes {
@@ -649,7 +602,7 @@ impl Db {
             .bind(&node.schema_name)
             .bind(&node.alias)
             .bind(&node.relation_name)
-            .execute(&self.pool)
+            .execute(&mut **tx)
             .await?;
         }
 
@@ -663,7 +616,7 @@ impl Db {
             .bind(run_id)
             .bind(&edge.parent_unique_id)
             .bind(&edge.child_unique_id)
-            .execute(&self.pool)
+            .execute(&mut **tx)
             .await?;
         }
 
@@ -672,6 +625,27 @@ impl Db {
 
     async fn promote_manifest_state(
         &self,
+        run_id: Uuid,
+        project_id: i64,
+        environment_id: i64,
+        promote_base_manifest: bool,
+    ) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        self.promote_manifest_state_in_tx(
+            &mut tx,
+            run_id,
+            project_id,
+            environment_id,
+            promote_base_manifest,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn promote_manifest_state_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
         run_id: Uuid,
         project_id: i64,
         environment_id: i64,
@@ -693,7 +667,7 @@ impl Db {
             .bind(run_id)
             .bind(project_id)
             .bind(environment_id)
-            .execute(&self.pool)
+            .execute(&mut **tx)
             .await?;
         }
 
@@ -724,15 +698,9 @@ impl Db {
         .bind(run_id)
         .bind(project_id)
         .bind(environment_id)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
 
-        Ok(())
-    }
-
-    async fn rebuild_current_state(&self, project_id: i64, environment_id: i64) -> AppResult<()> {
-        self.rebuild_current_state_up_to(project_id, environment_id, None)
-            .await?;
         Ok(())
     }
 
@@ -842,6 +810,21 @@ impl Db {
         environment_id: i64,
         max_run_pk: Option<i64>,
     ) -> AppResult<u64> {
+        let mut tx = self.pool.begin().await?;
+        let rows = self
+            .rebuild_current_state_up_to_in_tx(&mut tx, project_id, environment_id, max_run_pk)
+            .await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
+    async fn rebuild_current_state_up_to_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        project_id: i64,
+        environment_id: i64,
+        max_run_pk: Option<i64>,
+    ) -> AppResult<u64> {
         sqlx::query(
             r#"
             DELETE FROM current_node_state
@@ -850,7 +833,7 @@ impl Db {
         )
         .bind(project_id)
         .bind(environment_id)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
 
         let inserted = sqlx::query(
@@ -943,7 +926,7 @@ impl Db {
         .bind(project_id)
         .bind(environment_id)
         .bind(max_run_pk)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
 
         Ok(inserted.rows_affected())
@@ -1026,10 +1009,10 @@ impl Db {
         .fetch_all(&self.pool)
         .await?
         .into_iter()
-        .filter_map(|row| {
+        .map(|row| {
             let unique_id: String = row.get("unique_id");
             let raw_node: sqlx::types::Json<Value> = row.get("raw_node");
-            Some((unique_id, raw_node.0))
+            (unique_id, raw_node.0)
         })
         .collect::<BTreeMap<_, _>>();
 
