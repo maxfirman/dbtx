@@ -9,6 +9,7 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{runners::AsyncRunner, ContainerAsync},
 };
+use uuid::Uuid;
 
 const PROJECT_SLUG: &str = "jaffle-it";
 const ENVIRONMENT_SLUG: &str = "dev";
@@ -146,9 +147,21 @@ async fn dbtx_seed_persists_seed_state() {
     .fetch_one(db.pool())
     .await
     .expect("seed node count");
+    let promoted_node_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM promoted_manifest_nodes")
+            .fetch_one(db.pool())
+            .await
+            .expect("promoted node count");
+    let promoted_meta_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM promoted_manifest_meta")
+            .fetch_one(db.pool())
+            .await
+            .expect("promoted meta count");
 
     assert_eq!(command, "seed");
     assert_eq!(seed_count, 6);
+    assert_eq!(promoted_node_count, 0);
+    assert_eq!(promoted_meta_count, 0);
 }
 
 #[tokio::test]
@@ -167,6 +180,17 @@ async fn dbtx_test_persists_test_state() {
         &project,
         &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
     ));
+    let promoted_node_count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM promoted_manifest_nodes")
+            .fetch_one(db.pool())
+            .await
+            .expect("promoted node count before test");
+    let promoted_meta_source_before: Uuid = sqlx::query_scalar(
+        "SELECT source_run_id FROM promoted_manifest_meta LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("promoted meta source before test");
 
     let output = run_dbtx(
         db.url(),
@@ -186,9 +210,22 @@ async fn dbtx_test_persists_test_state() {
     .fetch_one(db.pool())
     .await
     .expect("test node count");
+    let promoted_node_count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM promoted_manifest_nodes")
+            .fetch_one(db.pool())
+            .await
+            .expect("promoted node count after test");
+    let promoted_meta_source_after: Uuid = sqlx::query_scalar(
+        "SELECT source_run_id FROM promoted_manifest_meta LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("promoted meta source after test");
 
     assert_eq!(command, "test");
     assert!(test_count >= 1, "expected persisted test node executions, got {test_count}");
+    assert_eq!(promoted_node_count_after, promoted_node_count_before);
+    assert_eq!(promoted_meta_source_after, promoted_meta_source_before);
 }
 
 #[tokio::test]

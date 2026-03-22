@@ -306,8 +306,15 @@ impl Db {
 
         if let Ok(manifest) = manifest_result {
             self.persist_manifest(run_id, &manifest).await?;
-            self.promote_manifest_state(run_id, project_id, environment_id, ctx.is_full_graph_run && status.success())
+            if should_promote_manifest(subcommand) {
+                self.promote_manifest_state(
+                    run_id,
+                    project_id,
+                    environment_id,
+                    ctx.is_full_graph_run && status.success(),
+                )
                 .await?;
+            }
         }
 
         self.rebuild_current_state(project_id, environment_id).await?;
@@ -766,6 +773,7 @@ impl Db {
               AND r.environment_id = $2
               AND r.terminal_status = 'success'
               AND r.is_full_graph_run = TRUE
+              AND r.command IN ('run', 'build')
               AND ($3::BIGINT IS NULL OR r.id <= $3)
             ORDER BY r.id DESC
             LIMIT 1
@@ -794,6 +802,7 @@ impl Db {
                 JOIN runs r ON r.run_id = ne.run_id
                 WHERE r.project_id = $1
                   AND r.environment_id = $2
+                  AND r.command IN ('run', 'build')
                   AND ne.status = 'success'
                   AND ($3::BIGINT IS NULL OR r.id <= $3)
                 ORDER BY ne.unique_id, r.id DESC
@@ -1121,6 +1130,10 @@ fn null_if_empty(value: &str) -> Option<&str> {
     } else {
         Some(value)
     }
+}
+
+fn should_promote_manifest(subcommand: &str) -> bool {
+    matches!(subcommand, "run" | "build")
 }
 
 fn read_dbt_project_name(project_dir: &Path) -> String {
