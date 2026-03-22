@@ -112,34 +112,9 @@ impl ManifestSnapshot {
             }
         }
 
-        if let Some(nodes) = raw_manifest.get("nodes").and_then(Value::as_object) {
-            let mut parent_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
-            let mut child_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
-
-            for (unique_id, node) in nodes {
-                let parents = node
-                    .get("depends_on")
-                    .and_then(|depends_on| depends_on.get("nodes"))
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-
-                parent_map.insert(unique_id.clone(), parents.clone());
-
-                for parent in parents {
-                    child_map
-                        .entry(parent)
-                        .or_default()
-                        .push(unique_id.clone());
-                }
-            }
-
-            raw_manifest["parent_map"] = json_map_from_edges(parent_map);
-            raw_manifest["child_map"] = json_map_from_edges(child_map);
-        }
+        let (parent_map, child_map) = rebuild_dependency_maps(&raw_manifest);
+        raw_manifest["parent_map"] = json_map_from_edges(parent_map);
+        raw_manifest["child_map"] = json_map_from_edges(child_map);
 
         raw_manifest
     }
@@ -258,6 +233,46 @@ fn patch_scalar(node: &mut Map<String, Value>, key: &str, value: Option<&String>
     if let Some(value) = value {
         node.insert(key.to_string(), Value::String(value.clone()));
     }
+}
+
+fn rebuild_dependency_maps(raw_manifest: &Value) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, Vec<String>>) {
+    let mut parent_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut child_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for section in [
+        "nodes",
+        "sources",
+        "exposures",
+        "metrics",
+        "semantic_models",
+        "saved_queries",
+        "unit_tests",
+    ] {
+        let Some(entries) = raw_manifest.get(section).and_then(Value::as_object) else {
+            continue;
+        };
+
+        for (unique_id, entry) in entries {
+            let parents = entry
+                .get("depends_on")
+                .and_then(|depends_on| depends_on.get("nodes"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+
+            parent_map.insert(unique_id.clone(), parents.clone());
+            child_map.entry(unique_id.clone()).or_default();
+
+            for parent in parents {
+                child_map.entry(parent).or_default().push(unique_id.clone());
+            }
+        }
+    }
+
+    (parent_map, child_map)
 }
 
 fn json_map_from_edges(map: BTreeMap<String, Vec<String>>) -> Value {
@@ -383,6 +398,36 @@ mod tests {
         );
         assert_eq!(
             reconstructed["child_map"]["model.pkg.parent"],
+            json!(["model.pkg.child"])
+        );
+    }
+
+    #[test]
+    fn reconstruct_preserves_source_entries_in_dependency_maps() {
+        let raw = json!({
+            "nodes": {
+                "model.pkg.child": {
+                    "depends_on": {
+                        "nodes": ["source.pkg.raw"]
+                    }
+                }
+            },
+            "sources": {
+                "source.pkg.raw": {
+                    "depends_on": {
+                        "nodes": []
+                    }
+                }
+            },
+            "parent_map": {"old": ["x"]},
+            "child_map": {"x": ["old"]}
+        });
+
+        let reconstructed = ManifestSnapshot::reconstruct(raw, &BTreeMap::new(), &[]);
+
+        assert_eq!(reconstructed["parent_map"]["source.pkg.raw"], json!([]));
+        assert_eq!(
+            reconstructed["child_map"]["source.pkg.raw"],
             json!(["model.pkg.child"])
         );
     }

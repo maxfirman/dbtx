@@ -377,6 +377,32 @@ async fn dbtx_ls_state_modified_without_prior_state_returns_all_node_types() {
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_full_run_does_not_leave_sources_in_state_modified() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+
+    let output = run_dbtx(
+        db.url(),
+        &project,
+        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+    );
+    assert_success(&output);
+
+    let modified = modified_unique_ids(db.url(), &project);
+    assert!(
+        !modified.iter().any(|unique_id| unique_id.starts_with("source.")),
+        "expected sources to stay out of state:modified after full run, got: {modified:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
 async fn dbtx_replay_rebuilds_real_current_state() {
     let _guard = integration_lock()
         .lock()
