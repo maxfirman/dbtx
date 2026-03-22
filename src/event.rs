@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::IsTerminal;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEvent {
@@ -48,11 +49,17 @@ impl LogEvent {
     }
 
     pub fn render_text_line(&self) -> Option<String> {
+        self.render_text_line_with_color(should_use_color())
+    }
+
+    fn render_text_line_with_color(&self, use_color: bool) -> Option<String> {
         match self.info.name.as_str() {
-            "Generic" => render_generic_message(&self.info.msg),
+            "Generic" => render_generic_message(&self.info.msg, use_color),
             "LogModelResult" | "LogSeedResult" | "LogSnapshotResult" | "LogTestResult"
-            | "LogFreshnessResult" | "LogSnapshotResultLine" => Some(self.info.msg.clone()),
-            "CommandCompleted" => Some(self.info.msg.clone()),
+            | "LogFreshnessResult" | "LogSnapshotResultLine" => {
+                Some(render_result_line(self, use_color))
+            }
+            "CommandCompleted" => Some(colorize_summary(&self.info.msg, use_color)),
             _ => None,
         }
     }
@@ -144,13 +151,52 @@ fn parse_timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-fn render_generic_message(msg: &str) -> Option<String> {
+fn should_use_color() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if matches!(std::env::var("TERM").ok().as_deref(), Some("dumb")) {
+        return false;
+    }
+    if matches!(std::env::var("CLICOLOR_FORCE").ok().as_deref(), Some("1")) {
+        return true;
+    }
+    std::io::stdout().is_terminal()
+}
+
+fn render_generic_message(msg: &str, use_color: bool) -> Option<String> {
     if msg.is_empty() {
         return None;
     }
 
-    if msg.starts_with("dbt-fusion ") || msg.starts_with("error:") {
-        return Some(msg.to_string());
+    if msg.starts_with("dbt-fusion ") {
+        let (name, rest) = msg.split_once(' ').unwrap_or((msg, ""));
+        let rendered = if rest.is_empty() {
+            style(name, &[AnsiStyle::Green, AnsiStyle::Bold], use_color)
+        } else {
+            format!(
+                "{} {}",
+                style(name, &[AnsiStyle::Green, AnsiStyle::Bold], use_color),
+                rest
+            )
+        };
+        return Some(rendered);
+    }
+
+    if msg.starts_with("error:") {
+        let rest = &msg["error:".len()..];
+        return Some(format!(
+            "{}{}",
+            style("error:", &[AnsiStyle::Red, AnsiStyle::Bold], use_color),
+            rest
+        ));
+    }
+
+    if msg == "Loading profiles.yml" {
+        return Some(format!(
+            "{} profiles.yml",
+            style("   Loading", &[AnsiStyle::Green, AnsiStyle::Bold], use_color)
+        ));
     }
 
     if msg.starts_with(' ') || msg.starts_with('\n') {
@@ -160,9 +206,229 @@ fn render_generic_message(msg: &str) -> Option<String> {
     Some(format!("   {msg}"))
 }
 
+fn render_result_line(event: &LogEvent, use_color: bool) -> String {
+    let line = event.info.msg.as_str();
+    let normalized = event.normalized_node_event();
+    let Some(normalized) = normalized else {
+        return line.to_string();
+    };
+
+    let status = normalized
+        .status
+        .as_deref()
+        .map(result_status_label_and_style)
+        .or_else(|| detect_status_from_msg(line))
+        .unwrap_or(("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold]));
+    let timing = extract_bracketed_segment(line).unwrap_or("[  0.00s]");
+    let resource_type = normalized.resource_type.as_deref().unwrap_or("model");
+    let relation = format_relation_name(
+        normalized.relation_schema.as_deref(),
+        normalized.relation_alias.as_deref(),
+        normalized.relation_name.as_deref(),
+        normalized.node_name.as_deref(),
+        use_color,
+    );
+    let materialized = normalized.materialized.as_deref().unwrap_or(resource_type);
+
+    format!(
+        " {} {} {} {} ({})",
+        style(status.0, status.1, use_color),
+        timing,
+        resource_type,
+        relation,
+        materialized
+    )
+}
+
+fn colorize_summary(msg: &str, use_color: bool) -> String {
+    let mut lines = msg.lines();
+    let mut rendered = Vec::new();
+
+    if let Some(first) = lines.next() {
+        rendered.push(first.to_string());
+    }
+
+    for line in lines {
+        rendered.push(colorize_summary_line(line, use_color));
+    }
+
+    rendered.join("\n")
+}
+
+fn colorize_summary_line(line: &str, use_color: bool) -> String {
+    if line.starts_with("===") {
+        return style(line, &[AnsiStyle::Dim], use_color);
+    }
+
+    if line.starts_with("Finished '") {
+        return colorize_finished_summary(line, use_color);
+    }
+
+    if let Some(rest) = line.strip_prefix("Summary: ") {
+        return format!("Summary: {}", colorize_summary_counts(rest, use_color));
+    }
+
+    line.to_string()
+}
+
+fn colorize_finished_summary(line: &str, use_color: bool) -> String {
+    let mut rendered = line.to_string();
+
+    for quoted in extract_quoted_segments(line) {
+        let styled = style(quoted, &[AnsiStyle::White, AnsiStyle::Bold], use_color);
+        rendered = rendered.replace(&format!("'{quoted}'"), &format!("'{styled}'"));
+    }
+
+    if let Some(timing) = extract_bracketed_segment(line) {
+        let styled_timing = style(timing, &[AnsiStyle::Dim], use_color);
+        rendered = rendered.replace(timing, &styled_timing);
+    }
+
+    for phrase in [
+        ("successfully", &[AnsiStyle::Green, AnsiStyle::Bold][..]),
+        ("with 1 error", &[AnsiStyle::Red, AnsiStyle::Bold][..]),
+        ("with 1 warning", &[AnsiStyle::Yellow, AnsiStyle::Bold][..]),
+    ] {
+        if rendered.contains(phrase.0) {
+            rendered = rendered.replace(phrase.0, &style(phrase.0, phrase.1, use_color));
+        }
+    }
+
+    rendered
+}
+
+fn colorize_summary_counts(input: &str, use_color: bool) -> String {
+    input
+        .split(" | ")
+        .map(|segment| {
+            if segment.ends_with(" success") || segment.ends_with(" successes") {
+                style(segment, &[AnsiStyle::Green, AnsiStyle::Bold], use_color)
+            } else if segment.ends_with(" error") || segment.ends_with(" errors") {
+                style(segment, &[AnsiStyle::Red, AnsiStyle::Bold], use_color)
+            } else if segment.ends_with(" warning") || segment.ends_with(" warnings") {
+                style(segment, &[AnsiStyle::Yellow, AnsiStyle::Bold], use_color)
+            } else if segment.ends_with(" skipped") {
+                style(segment, &[AnsiStyle::Yellow, AnsiStyle::Bold], use_color)
+            } else {
+                style(segment, &[AnsiStyle::White, AnsiStyle::Bold], use_color)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn format_relation_name(
+    schema: Option<&str>,
+    alias: Option<&str>,
+    relation_name: Option<&str>,
+    node_name: Option<&str>,
+    use_color: bool,
+) -> String {
+    if let (Some(schema), Some(alias)) = (schema, alias) {
+        return format!(
+            "{}{}",
+            style(&format!("{schema}."), &[AnsiStyle::Cyan, AnsiStyle::Bold], use_color),
+            style(alias, &[AnsiStyle::Blue, AnsiStyle::Bold], use_color)
+        );
+    }
+
+    if let Some(alias) = alias.or(node_name) {
+        return style(alias, &[AnsiStyle::Blue, AnsiStyle::Bold], use_color);
+    }
+
+    relation_name.unwrap_or("unknown").to_string()
+}
+
+fn extract_bracketed_segment(line: &str) -> Option<&str> {
+    let start = line.find('[')?;
+    let end = line[start..].find(']')?;
+    Some(&line[start..=start + end])
+}
+
+fn extract_quoted_segments(line: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut remainder = line;
+
+    while let Some(start) = remainder.find('\'') {
+        let tail = &remainder[start + 1..];
+        let Some(end) = tail.find('\'') else {
+            break;
+        };
+        segments.push(&tail[..end]);
+        remainder = &tail[end + 1..];
+    }
+
+    segments
+}
+
+fn detect_status_from_msg(line: &str) -> Option<(&'static str, &'static [AnsiStyle])> {
+    for (prefix, styles) in [
+        ("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold][..]),
+        ("Failed", &[AnsiStyle::Red, AnsiStyle::Bold][..]),
+        ("Warned", &[AnsiStyle::Yellow, AnsiStyle::Bold][..]),
+        ("Skipped", &[AnsiStyle::Yellow, AnsiStyle::Bold][..]),
+        ("PASS", &[AnsiStyle::Green, AnsiStyle::Bold][..]),
+        ("ERROR", &[AnsiStyle::Red, AnsiStyle::Bold][..]),
+    ] {
+        if line.trim_start().starts_with(prefix) {
+            return Some((prefix, styles));
+        }
+    }
+    None
+}
+
+fn result_status_label_and_style(status: &str) -> (&'static str, &'static [AnsiStyle]) {
+    match status {
+        "success" | "pass" => ("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold]),
+        "error" | "fail" | "failed" => ("Failed", &[AnsiStyle::Red, AnsiStyle::Bold]),
+        "warn" | "warning" => ("Warned", &[AnsiStyle::Yellow, AnsiStyle::Bold]),
+        "skipped" => ("Skipped", &[AnsiStyle::Yellow, AnsiStyle::Bold]),
+        _ => ("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold]),
+    }
+}
+
+fn style(input: &str, styles: &[AnsiStyle], use_color: bool) -> String {
+    if !use_color {
+        return input.to_string();
+    }
+    let codes = styles
+        .iter()
+        .map(|style| style.code())
+        .collect::<Vec<_>>()
+        .join(";");
+    format!("\x1b[{codes}m{input}\x1b[0m")
+}
+
+#[derive(Clone, Copy)]
+enum AnsiStyle {
+    Red,
+    Green,
+    Yellow,
+    Cyan,
+    Blue,
+    White,
+    Bold,
+    Dim,
+}
+
+impl AnsiStyle {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Red => "31",
+            Self::Green => "32",
+            Self::Yellow => "33",
+            Self::Cyan => "36",
+            Self::Blue => "34",
+            Self::White => "37",
+            Self::Bold => "1",
+            Self::Dim => "2",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::LogEvent;
+    use super::{AnsiStyle, LogEvent, render_result_line, style};
 
     #[test]
     fn normalizes_node_finished_event() {
@@ -203,7 +469,7 @@ mod tests {
 
         let event = LogEvent::parse(raw).expect("event should parse");
         assert_eq!(
-            event.render_text_line().as_deref(),
+            event.render_text_line_with_color(false).as_deref(),
             Some("   Loading profiles.yml")
         );
     }
@@ -217,7 +483,7 @@ mod tests {
 
         let event = LogEvent::parse(raw).expect("event should parse");
         assert!(event
-            .render_text_line()
+            .render_text_line_with_color(false)
             .expect("summary should render")
             .contains("Finished 'run' successfully"));
     }
@@ -230,6 +496,24 @@ mod tests {
         }"#;
 
         let event = LogEvent::parse(raw).expect("event should parse");
-        assert!(event.render_text_line().is_none());
+        assert!(event.render_text_line_with_color(false).is_none());
+    }
+
+    #[test]
+    fn colorizes_result_status_when_enabled() {
+        let raw = r#"{
+          "info":{"name":"LogModelResult","msg":" Succeeded [  0.07s] model main.stg_customers (view)"},
+          "data":{"execution_time":0.07,"status":"success","node_info":{"unique_id":"model.pkg.stg_customers","resource_type":"model","node_name":"stg_customers","materialized":"view","node_relation":{"schema":"main","alias":"stg_customers"}}}
+        }"#;
+        let event = LogEvent::parse(raw).expect("event should parse");
+        let rendered = render_result_line(&event, true);
+        assert!(rendered.contains("\u{1b}[32;1mSucceeded\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[36;1mmain.\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[34;1mstg_customers\u{1b}[0m"));
+    }
+
+    #[test]
+    fn color_helper_is_noop_when_disabled() {
+        assert_eq!(style("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold], false), "Succeeded");
     }
 }
