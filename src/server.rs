@@ -1,9 +1,9 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationCommandApi,
-    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
-    InvocationLifecycleStatus, InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest,
-    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
+    EnvironmentsResponse, InvocationCommandApi, InvocationCreateApiRequest,
+    InvocationCreateResponse, InvocationEvent, InvocationLifecycleStatus, InvocationStatusResponse,
+    MigrateResponse, ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest,
+    ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::Db;
@@ -78,7 +78,10 @@ impl InvocationManager {
             history: Mutex::new(Vec::new()),
             tx,
         });
-        self.inner.lock().await.insert(invocation_id, runtime.clone());
+        self.inner
+            .lock()
+            .await
+            .insert(invocation_id, runtime.clone());
         (invocation_id, runtime)
     }
 
@@ -97,7 +100,12 @@ impl InvocationRuntime {
         self.status.lock().await.clone()
     }
 
-    async fn finish(&self, status: InvocationLifecycleStatus, exit_code: i32, error: Option<String>) {
+    async fn finish(
+        &self,
+        status: InvocationLifecycleStatus,
+        exit_code: i32,
+        error: Option<String>,
+    ) {
         let mut current = self.status.lock().await;
         current.status = status;
         current.exit_code = Some(exit_code);
@@ -194,7 +202,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/projects:init", post(project_init))
         .route("/v1/projects", get(projects_list))
         .route("/v1/projects/show", post(project_show))
-        .route("/v1/projects/{project_id}", patch(project_update).get(project_get))
+        .route(
+            "/v1/projects/{project_id}",
+            patch(project_update).get(project_get),
+        )
         .route("/v1/environments", post(environment_create))
         .route(
             "/v1/projects/{project_id}/environments",
@@ -208,14 +219,13 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/invocations/{id}", get(invocation_status))
         .route("/v1/invocations/{id}/events", get(invocation_events))
         .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &axum::http::Request<_>| {
-                    info_span!(
-                        "http_request",
-                        method = %request.method(),
-                        uri = %request.uri(),
-                    )
-                }),
+            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+                info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    uri = %request.uri(),
+                )
+            }),
         )
         .with_state(state)
 }
@@ -254,7 +264,6 @@ async fn project_init(
             project_root: request.project_root,
             default_branch: request.default_branch,
             force: request.force,
-            database_url: request.database_url,
         })
         .await?;
     info!(project_id = %project.project_id, project_name = %project.project_name, "initialized project");
@@ -447,11 +456,7 @@ async fn invocation_create(
                     "invocation completed successfully"
                 );
                 runtime
-                    .finish(
-                        InvocationLifecycleStatus::Succeeded,
-                        result.exit_code,
-                        None,
-                    )
+                    .finish(InvocationLifecycleStatus::Succeeded, result.exit_code, None)
                     .await
             }
             Err(err) => {
@@ -478,11 +483,12 @@ async fn invocation_status(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<InvocationStatusResponse>, ApiError> {
-    let runtime = state
-        .invocations
-        .get(id)
-        .await
-        .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "invocation not found")))?;
+    let runtime = state.invocations.get(id).await.ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "invocation not found",
+        ))
+    })?;
     info!(invocation_id = %id, "loaded invocation status");
     Ok(Json(runtime.status().await))
 }
@@ -491,11 +497,12 @@ async fn invocation_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let runtime = state
-        .invocations
-        .get(id)
-        .await
-        .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "invocation not found")))?;
+    let runtime = state.invocations.get(id).await.ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "invocation not found",
+        ))
+    })?;
     let history = runtime.history.lock().await.clone();
     let rx = runtime.tx.subscribe();
     info!(invocation_id = %id, buffered_events = history.len(), "subscribed to invocation event stream");
@@ -559,10 +566,15 @@ impl IntoResponse for ApiError {
             | AppError::InvalidProfileConfig(_)
             | AppError::InvalidProfileSecret(_)
             | AppError::MissingSecretKey => StatusCode::BAD_REQUEST,
-            AppError::ProjectIdNotFound(_) | AppError::EnvironmentNotFound(_, _) => StatusCode::NOT_FOUND,
-            AppError::EnvironmentAlreadyExists(_, _) | AppError::ProjectIdAlreadyConfigured(_) => StatusCode::CONFLICT,
+            AppError::ProjectIdNotFound(_) | AppError::EnvironmentNotFound(_, _) => {
+                StatusCode::NOT_FOUND
+            }
+            AppError::EnvironmentAlreadyExists(_, _) | AppError::ProjectIdAlreadyConfigured(_) => {
+                StatusCode::CONFLICT
+            }
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,
-            AppError::ImmutableEnvironment(_, _) | AppError::ImmutableEnvironmentGitMismatch(_, _) => StatusCode::CONFLICT,
+            AppError::ImmutableEnvironment(_, _)
+            | AppError::ImmutableEnvironmentGitMismatch(_, _) => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = serde_json::json!({ "error": self.0.to_string() });
@@ -597,19 +609,11 @@ mod tests {
         let history = vec![sample_event("one")];
         let mut stream = Box::pin(event_stream(history, rx));
 
-        let first = stream
-            .next()
-            .await
-            .expect("history item")
-            .expect("event");
+        let first = stream.next().await.expect("history item").expect("event");
         let _first = first;
 
         tx.send(sample_event("two")).expect("send live event");
-        let second = stream
-            .next()
-            .await
-            .expect("live item")
-            .expect("event");
+        let second = stream.next().await.expect("live item").expect("event");
         let _second = second;
     }
 }

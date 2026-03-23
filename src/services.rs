@@ -1,11 +1,9 @@
-use crate::config::{
-    InvocationContext, RuntimeConfig, read_dbtx_project_id, write_dbtx_toml,
-};
+use crate::config::{InvocationContext, RuntimeConfig, read_dbtx_project_id, write_dbtx_toml};
 use crate::db::{
     CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, GitState, ProjectRecord,
-    RunFinalization, RunStart, UpdateEnvironmentInput, append_invocation_id,
-    append_profiles_dir, append_state_dir, build_generated_profiles, read_dbt_project_name,
-    read_git_state, spawn_dbt_child, validate_environment_git_state,
+    RunFinalization, RunStart, UpdateEnvironmentInput, append_invocation_id, append_profiles_dir,
+    append_state_dir, build_generated_profiles, read_dbt_project_name, read_git_state,
+    spawn_dbt_child, validate_environment_git_state,
 };
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
@@ -68,7 +66,6 @@ pub struct ProjectInitRequest {
     pub project_root: Option<String>,
     pub default_branch: Option<String>,
     pub force: bool,
-    pub database_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -113,11 +110,11 @@ pub struct EnvironmentUpdateRequest {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct InferredProjectInput {
-    pub(crate) project_name: String,
-    pub(crate) git_repo_url: String,
-    pub(crate) default_branch: Option<String>,
-    pub(crate) project_root: String,
+pub struct InferredProjectInput {
+    pub project_name: String,
+    pub git_repo_url: String,
+    pub default_branch: Option<String>,
+    pub project_root: String,
 }
 
 pub struct ProjectService<'a> {
@@ -155,16 +152,13 @@ impl<'a> ProjectService<'a> {
             project_root: inferred.project_root,
         };
         let project = if let Some(existing_project_id) = existing_project_id.as_deref() {
-            self.db.reinitialize_project_id(existing_project_id, input).await?
+            self.db
+                .reinitialize_project_id(existing_project_id, input)
+                .await?
         } else {
             self.db.create_project(input).await?
         };
-        write_dbtx_toml(
-            &request.current_dir,
-            Some(&project_id),
-            Some(&request.database_url),
-            request.force,
-        )?;
+        write_dbtx_toml(&request.current_dir, Some(&project_id), request.force)?;
         Ok(project)
     }
 
@@ -194,7 +188,11 @@ impl<'a> ProjectService<'a> {
         self.db.list_projects().await
     }
 
-    pub async fn show(&self, current_dir: &Path, project: Option<String>) -> AppResult<ProjectRecord> {
+    pub async fn show(
+        &self,
+        current_dir: &Path,
+        project: Option<String>,
+    ) -> AppResult<ProjectRecord> {
         self.db.require_current_schema().await?;
         let project_id = project
             .or_else(|| read_dbtx_project_id(current_dir).ok().flatten())
@@ -215,8 +213,10 @@ impl<'a> EnvironmentService<'a> {
     pub async fn create(&self, request: EnvironmentCreateRequest) -> AppResult<EnvironmentRecord> {
         self.db.require_current_schema().await?;
         let project = resolve_project_identifier(request.project, &request.current_dir)?;
-        let local_profile =
-            LocalTargetProfile::from_local_project(&request.current_dir, request.target.as_deref())?;
+        let local_profile = LocalTargetProfile::from_local_project(
+            &request.current_dir,
+            request.target.as_deref(),
+        )?;
         let profile_secrets = local_profile.encrypted_secrets()?;
         let slug = request
             .slug
@@ -266,7 +266,11 @@ impl<'a> EnvironmentService<'a> {
             .await
     }
 
-    pub async fn list(&self, current_dir: &Path, project: String) -> AppResult<Vec<EnvironmentRecord>> {
+    pub async fn list(
+        &self,
+        current_dir: &Path,
+        project: String,
+    ) -> AppResult<Vec<EnvironmentRecord>> {
         self.db.require_current_schema().await?;
         let project = resolve_project_identifier(Some(project), current_dir)?;
         self.db.list_environments(&project).await
@@ -407,14 +411,16 @@ impl<'a> InvocationService<'a> {
             })
             .await?;
 
-        let mut child = match spawn_dbt_child(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir)
-        {
-            Ok(child) => child,
-            Err(err) => {
-                self.db.mark_run_finished(run_id, None, 1, "wrapper_failed").await?;
-                return Err(err);
-            }
-        };
+        let mut child =
+            match spawn_dbt_child(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir) {
+                Ok(child) => child,
+                Err(err) => {
+                    self.db
+                        .mark_run_finished(run_id, None, 1, "wrapper_failed")
+                        .await?;
+                    return Err(err);
+                }
+            };
 
         let stdout = child
             .stdout
@@ -470,7 +476,11 @@ impl<'a> InvocationService<'a> {
 
         let manifest_path = ctx.target_path.join("manifest.json");
         let manifest_result = ManifestSnapshot::from_path(&manifest_path).await;
-        let terminal_status = if status.success() { "success" } else { "failed" };
+        let terminal_status = if status.success() {
+            "success"
+        } else {
+            "failed"
+        };
         let exit_code = status.code().unwrap_or(1);
 
         self.db
@@ -487,9 +497,7 @@ impl<'a> InvocationService<'a> {
             })
             .await?;
 
-        let result = InvocationResult {
-            exit_code,
-        };
+        let result = InvocationResult { exit_code };
         if status.success() {
             Ok(result)
         } else {
@@ -593,7 +601,7 @@ fn resolve_project_identifier(project: Option<String>, current_dir: &Path) -> Ap
         .ok_or(AppError::ProjectIdMissing)
 }
 
-pub(crate) fn infer_project_defaults(
+pub fn infer_project_defaults(
     current_dir: &Path,
     git_repo_url: Option<&str>,
     project_root: Option<&str>,
@@ -615,7 +623,7 @@ pub(crate) fn infer_project_defaults(
     })
 }
 
-pub(crate) fn read_dbt_project_name_from_root(project_root: &Path) -> AppResult<String> {
+pub fn read_dbt_project_name_from_root(project_root: &Path) -> AppResult<String> {
     let yaml = read_dbt_project_yaml(project_root)?;
     yaml.get("name")
         .and_then(serde_yaml::Value::as_str)
@@ -638,7 +646,7 @@ fn git_remote_origin_url(repo_root: &Path) -> AppResult<String> {
         .map_err(|_| AppError::GitRemoteNotFound)
 }
 
-pub(crate) fn relative_project_root(repo_root: &Path, project_root: &Path) -> String {
+pub fn relative_project_root(repo_root: &Path, project_root: &Path) -> String {
     match project_root.strip_prefix(repo_root) {
         Ok(path) if path.as_os_str().is_empty() => ".".to_string(),
         Ok(path) => path.to_string_lossy().into_owned(),

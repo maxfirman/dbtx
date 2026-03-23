@@ -25,8 +25,6 @@ pub struct DbtxToml {
     #[serde(default)]
     pub project: ProjectConfig,
     #[serde(default)]
-    pub database: DatabaseConfig,
-    #[serde(default)]
     pub service: ServiceConfig,
 }
 
@@ -36,28 +34,17 @@ pub struct ProjectConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DatabaseConfig {
-    pub url: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub url: Option<String>,
 }
 
 impl RuntimeConfig {
-    pub fn resolve(
-        database_url_override: Option<String>,
-        service_url_override: Option<String>,
-        project_dir: Option<&Path>,
-    ) -> AppResult<Self> {
-        let database_url = resolve_database_url(database_url_override, project_dir)?;
+    pub fn from_database_url(database_url: String) -> Self {
         let dbt_path = env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
-        let _service_url = resolve_service_url(service_url_override, project_dir)?;
-        Ok(Self {
+        Self {
             database_url,
             dbt_path,
-        })
+        }
     }
 }
 
@@ -134,16 +121,10 @@ pub fn read_dbtx_project_id(project_root: &Path) -> AppResult<Option<String>> {
 
 pub fn resolve_database_url(
     database_url_override: Option<String>,
-    project_dir: Option<&Path>,
+    _project_dir: Option<&Path>,
 ) -> AppResult<String> {
-    let file_database_url = project_dir
-        .map(read_dbtx_toml)
-        .transpose()?
-        .flatten()
-        .and_then(|config| config.database.url);
     database_url_override
         .or_else(|| env::var("DBTX_DATABASE_URL").ok())
-        .or(file_database_url)
         .ok_or(AppError::MissingDatabaseUrl)
 }
 
@@ -164,7 +145,6 @@ pub fn resolve_service_url(
 pub fn write_dbtx_toml(
     project_root: &Path,
     project_id: Option<&str>,
-    database_url: Option<&str>,
     force_project_id: bool,
 ) -> AppResult<()> {
     let path = dbtx_toml_path(project_root);
@@ -179,9 +159,6 @@ pub fn write_dbtx_toml(
 
     if let Some(project_id) = project_id {
         config.project.id = Some(project_id.to_string());
-    }
-    if let Some(database_url) = database_url {
-        config.database.url = Some(database_url.to_string());
     }
 
     std::fs::write(path, toml::to_string_pretty(&config)?)?;
@@ -289,24 +266,13 @@ mod tests {
     #[test]
     fn writes_and_reads_dbtx_toml() {
         let temp = TempDir::new().expect("temp dir");
-        write_dbtx_toml(
-            temp.path(),
-            Some("prj_123"),
-            Some("postgres://dbtx:dbtx@localhost/dbtx"),
-            false,
-        )
-        .expect("write dbtx.toml");
+        write_dbtx_toml(temp.path(), Some("prj_123"), false).expect("write dbtx.toml");
         assert_eq!(
             read_dbtx_project_id(temp.path()).expect("read project id"),
             Some("prj_123".to_string())
         );
-        let config = super::read_dbtx_toml(temp.path())
-            .expect("read config")
-            .expect("config exists");
-        assert_eq!(
-            config.database.url.as_deref(),
-            Some("postgres://dbtx:dbtx@localhost/dbtx")
-        );
+        let config = super::read_dbtx_toml(temp.path()).expect("read config");
+        assert!(config.is_some());
     }
 
     #[test]
@@ -315,9 +281,6 @@ mod tests {
             project: super::ProjectConfig {
                 id: Some("prj_123".to_string()),
             },
-            database: super::DatabaseConfig {
-                url: Some("postgres://localhost/dbtx".to_string()),
-            },
             service: super::ServiceConfig {
                 url: Some("http://127.0.0.1:8585".to_string()),
             },
@@ -325,7 +288,6 @@ mod tests {
         let rendered = toml::to_string_pretty(&config).expect("render toml");
         assert!(rendered.contains("[project]"));
         assert!(rendered.contains("id = \"prj_123\""));
-        assert!(rendered.contains("[database]"));
         assert!(rendered.contains("[service]"));
     }
 }

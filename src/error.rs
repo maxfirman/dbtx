@@ -55,9 +55,14 @@ pub enum AppError {
     #[error("dbtx project id is missing from dbtx.toml. Run `dbtx project init` first.")]
     ProjectIdMissing,
     #[error(
-        "database url is not configured. Set --database-url, DBTX_DATABASE_URL, or database.url in dbtx.toml."
+        "database url is not configured. Set --database-url or DBTX_DATABASE_URL for dbtx-server."
     )]
     MissingDatabaseUrl,
+    #[error(
+        "dbtx service url is not configured. Start `dbtx-server` and set --service-url, DBTX_SERVICE_URL, or service.url in dbtx.toml."
+    )]
+    #[allow(dead_code)]
+    MissingServiceUrl,
     #[error(
         "database schema is not up to date. Run `dbtx state migrate` before invoking other commands."
     )]

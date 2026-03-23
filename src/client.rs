@@ -25,7 +25,8 @@ impl DaemonClient {
     }
 
     pub async fn migrate(&self) -> AppResult<MigrateResponse> {
-        self.send(self.http.post(self.url("/v1/state/migrate"))).await
+        self.send(self.http.post(self.url("/v1/state/migrate")))
+            .await
     }
 
     pub async fn project_init(&self, request: ProjectInitApiRequest) -> AppResult<ProjectResponse> {
@@ -51,8 +52,11 @@ impl DaemonClient {
     }
 
     pub async fn project_show_by_id(&self, project_id: &str) -> AppResult<ProjectResponse> {
-        self.send(self.http.get(self.url(&format!("/v1/projects/{project_id}"))))
-            .await
+        self.send(
+            self.http
+                .get(self.url(&format!("/v1/projects/{project_id}"))),
+        )
+        .await
     }
 
     pub async fn project_show_with_context(
@@ -87,9 +91,7 @@ impl DaemonClient {
     ) -> AppResult<EnvironmentResponse> {
         self.send(
             self.http
-                .patch(self.url(&format!(
-                    "/v1/projects/{project_id}/environments/{slug}"
-                )))
+                .patch(self.url(&format!("/v1/projects/{project_id}/environments/{slug}")))
                 .json(&request),
         )
         .await
@@ -123,7 +125,10 @@ impl DaemonClient {
             .await
     }
 
-    pub async fn invocation_status(&self, invocation_id: Uuid) -> AppResult<InvocationStatusResponse> {
+    pub async fn invocation_status(
+        &self,
+        invocation_id: Uuid,
+    ) -> AppResult<InvocationStatusResponse> {
         self.send(
             self.http
                 .get(self.url(&format!("/v1/invocations/{invocation_id}"))),
@@ -131,7 +136,11 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn stream_invocation_events<F>(&self, invocation_id: Uuid, mut on_event: F) -> AppResult<()>
+    pub async fn stream_invocation_events<F>(
+        &self,
+        invocation_id: Uuid,
+        mut on_event: F,
+    ) -> AppResult<()>
     where
         F: FnMut(InvocationEvent),
     {
@@ -190,7 +199,12 @@ async fn ensure_success(response: reqwest::Response) -> AppResult<reqwest::Respo
     let body = response.text().await.map_err(map_reqwest_error)?;
     let message = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
-        .and_then(|value| value.get("error").and_then(|value| value.as_str()).map(ToString::to_string))
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        })
         .unwrap_or(body);
     Err(match status {
         StatusCode::PRECONDITION_FAILED => AppError::SchemaOutOfDate,

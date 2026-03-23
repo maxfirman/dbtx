@@ -5,8 +5,6 @@ use std::ffi::OsString;
 #[command(about = "dbt-compatible wrapper with state persistence")]
 pub struct Cli {
     #[arg(long, global = true)]
-    pub database_url: Option<String>,
-    #[arg(long, global = true)]
     pub service_url: Option<String>,
     #[command(subcommand)]
     pub command: Command,
@@ -178,17 +176,14 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn state_migrate_accepts_database_url() {
+    fn state_migrate_accepts_service_url() {
         let cli = Cli::parse_from([
             "dbtx",
-            "--database-url",
-            "postgres://example",
             "--service-url",
             "http://127.0.0.1:8585",
             "state",
             "migrate",
         ]);
-        assert_eq!(cli.database_url.as_deref(), Some("postgres://example"));
         assert_eq!(cli.service_url.as_deref(), Some("http://127.0.0.1:8585"));
         match cli.command {
             Command::State(StateCommand::Migrate) => {}

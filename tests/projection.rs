@@ -1,8 +1,11 @@
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::fs;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use testcontainers_modules::{
     postgres::Postgres,
@@ -16,7 +19,7 @@ async fn commands_require_explicit_migration() {
     let db = TestDatabase::new_unmigrated().await;
     let repo = TempProjectRepo::new("proj");
 
-    let output = run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]);
+    let output = run_dbtx_in_dir(db.service_url(), repo.project_dir(), &["project", "init"]);
     assert_failure(&output);
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("dbtx state migrate"),
@@ -24,9 +27,9 @@ async fn commands_require_explicit_migration() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    init_dbtx_schema(db.url());
+    init_dbtx_schema(db.service_url());
 
-    let output = run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]);
+    let output = run_dbtx_in_dir(db.service_url(), repo.project_dir(), &["project", "init"]);
     assert_success(&output);
 }
 
@@ -37,12 +40,12 @@ async fn project_and_environment_cli_round_trip() {
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
 
-    let output = run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]);
+    let output = run_dbtx_in_dir(db.service_url(), repo.project_dir(), &["project", "init"]);
     assert_success(&output);
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     let output = run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &[
             "environment",
@@ -58,7 +61,7 @@ async fn project_and_environment_cli_round_trip() {
     assert_success(&output);
 
     let list_output = run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &["environment", "list", "--project", &project_id],
     );
@@ -105,7 +108,7 @@ async fn project_and_environment_cli_round_trip() {
     assert_eq!(environment_row.get::<String, _>("status"), "active");
 
     let duplicate_output = run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &[
             "environment",
@@ -132,13 +135,13 @@ async fn environment_seed_from_copies_active_state_without_runs() {
     let repo = TempProjectRepo::new("proj");
 
     assert_success(&run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &["project", "init"],
     ));
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
     assert_success(&run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &[
             "environment",
@@ -218,7 +221,7 @@ async fn environment_seed_from_copies_active_state_without_runs() {
     .expect("insert current state");
 
     assert_success(&run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &[
             "environment",
@@ -281,14 +284,14 @@ async fn commit_environment_requires_commit_sha_and_records_version_history() {
     let repo = TempProjectRepo::new("proj");
 
     assert_success(&run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &["project", "init"],
     ));
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     let missing_sha = run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &[
             "environment",
@@ -309,7 +312,7 @@ async fn commit_environment_requires_commit_sha_and_records_version_history() {
     );
 
     assert_success(&run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &[
             "environment",
@@ -345,14 +348,14 @@ async fn immutable_environment_rejects_identity_updates() {
     let repo = TempProjectRepo::new("proj");
 
     assert_success(&run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &["project", "init"],
     ));
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     assert_success(&run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &[
             "environment",
@@ -372,7 +375,7 @@ async fn immutable_environment_rejects_identity_updates() {
     ));
 
     let update = run_dbtx_in_dir(
-        db.url(),
+        db.service_url(),
         repo.project_dir(),
         &[
             "environment",
@@ -409,7 +412,7 @@ struct RunInsert<'a> {
 }
 
 struct TestDatabase {
-    url: String,
+    daemon: TestDaemon,
     pool: PgPool,
     _container: Option<ContainerAsync<Postgres>>,
 }
@@ -417,12 +420,13 @@ struct TestDatabase {
 impl TestDatabase {
     async fn new() -> Self {
         if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
-            init_dbtx_schema(&url);
+            let daemon = TestDaemon::start(&url);
+            init_dbtx_schema(daemon.service_url());
             let pool = PgPool::connect(&url)
                 .await
                 .expect("connect external test db");
             return Self {
-                url,
+                daemon,
                 pool,
                 _container: None,
             };
@@ -442,13 +446,14 @@ impl TestDatabase {
             .await
             .expect("postgres port");
         let url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx");
-        init_dbtx_schema(&url);
+        let daemon = TestDaemon::start(&url);
+        init_dbtx_schema(daemon.service_url());
         let pool = PgPool::connect(&url)
             .await
             .expect("connect testcontainer db");
 
         Self {
-            url,
+            daemon,
             pool,
             _container: Some(container),
         }
@@ -456,11 +461,12 @@ impl TestDatabase {
 
     async fn new_unmigrated() -> Self {
         if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
+            let daemon = TestDaemon::start(&url);
             let pool = PgPool::connect(&url)
                 .await
                 .expect("connect external test db");
             return Self {
-                url,
+                daemon,
                 pool,
                 _container: None,
             };
@@ -480,23 +486,82 @@ impl TestDatabase {
             .await
             .expect("postgres port");
         let url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx");
+        let daemon = TestDaemon::start(&url);
         let pool = PgPool::connect(&url)
             .await
             .expect("connect testcontainer db");
 
         Self {
-            url,
+            daemon,
             pool,
             _container: Some(container),
         }
     }
 
-    fn url(&self) -> &str {
-        &self.url
+    fn service_url(&self) -> &str {
+        self.daemon.service_url()
     }
 
     fn pool(&self) -> &PgPool {
         &self.pool
+    }
+}
+
+struct TestDaemon {
+    service_url: String,
+    child: Child,
+}
+
+impl TestDaemon {
+    fn start(database_url: &str) -> Self {
+        let listen = next_listen_addr();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dbtx-server"))
+            .args(["--listen", &listen])
+            .env("DBTX_DATABASE_URL", database_url)
+            .env("DBTX_SECRET_KEY", "test-secret-key")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start dbtx-server");
+
+        let service_url = format!("http://{listen}");
+        wait_for_server(&service_url, &mut child);
+        Self { service_url, child }
+    }
+
+    fn service_url(&self) -> &str {
+        &self.service_url
+    }
+}
+
+impl Drop for TestDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn next_listen_addr() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    drop(listener);
+    addr.to_string()
+}
+
+fn wait_for_server(service_url: &str, child: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let addr = service_url.trim_start_matches("http://");
+    loop {
+        if TcpStream::connect(addr).is_ok() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("poll dbtx-server") {
+            panic!("dbtx-server exited early with status {status}");
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for dbtx-server at {service_url}");
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -650,10 +715,10 @@ fn manifest_with_nodes<const N: usize>(nodes: [serde_json::Value; N]) -> serde_j
     })
 }
 
-fn init_dbtx_schema(database_url: &str) {
+fn init_dbtx_schema(service_url: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_dbtx"))
         .args(["state", "migrate"])
-        .env("DBTX_DATABASE_URL", database_url)
+        .env("DBTX_SERVICE_URL", service_url)
         .output()
         .expect("run dbtx migrate");
     assert!(
@@ -664,11 +729,10 @@ fn init_dbtx_schema(database_url: &str) {
     );
 }
 
-fn run_dbtx_in_dir(database_url: &str, cwd: &Path, args: &[&str]) -> std::process::Output {
+fn run_dbtx_in_dir(service_url: &str, cwd: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_dbtx"))
         .args(args)
-        .env("DBTX_DATABASE_URL", database_url)
-        .env("DBTX_SECRET_KEY", "test-secret-key")
+        .env("DBTX_SERVICE_URL", service_url)
         .current_dir(cwd)
         .output()
         .expect("run dbtx in dir")

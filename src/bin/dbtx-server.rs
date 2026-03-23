@@ -1,26 +1,8 @@
-#[path = "../api.rs"]
-mod api;
-#[path = "../config.rs"]
-mod config;
-#[path = "../db.rs"]
-mod db;
-#[path = "../error.rs"]
-mod error;
-#[path = "../event.rs"]
-mod event;
-#[path = "../manifest.rs"]
-mod manifest;
-#[path = "../profile.rs"]
-mod profile;
-#[path = "../services.rs"]
-mod services;
-#[path = "../server.rs"]
-mod server;
-
 use clap::Parser;
-use config::RuntimeConfig;
-use db::Db;
-use error::AppResult;
+use dbtx::config::{RuntimeConfig, resolve_database_url};
+use dbtx::db::Db;
+use dbtx::error::AppResult;
+use dbtx::server;
 use std::sync::Once;
 use tracing_subscriber::EnvFilter;
 
@@ -46,7 +28,10 @@ async fn run() -> AppResult<()> {
     init_service_logging();
     let cli = ServerCli::parse();
     let current_dir = std::env::current_dir()?;
-    let config = RuntimeConfig::resolve(cli.database_url, None, Some(&current_dir))?;
+    let config = RuntimeConfig::from_database_url(resolve_database_url(
+        cli.database_url,
+        Some(&current_dir),
+    )?);
     let db = Db::connect(&config.database_url).await?;
     server::serve(&cli.listen, server::AppState::new(db, config)).await
 }

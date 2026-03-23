@@ -13,35 +13,41 @@ Phase 1 supports:
 
 ## Configuration
 
-- `DBTX_DATABASE_URL`: PostgreSQL connection string
+- `DBTX_DATABASE_URL`: PostgreSQL connection string for `dbtx-server`
+- `DBTX_SERVICE_URL`: URL for the `dbtx-server` daemon
 - `DBTX_DBT_PATH`: optional path to the `dbt` executable, defaults to `dbt`
-- `DBTX_PROJECT_SLUG`: optional override for project identity
 - `DBTX_ENVIRONMENT_SLUG`: optional override for environment identity
 
 ## Examples
 
+Start the daemon:
+
+```bash
+DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run --bin dbtx-server -- --listen 127.0.0.1:8585
+```
+
 Initialize the schema:
 
 ```bash
-DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- state migrate
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- state migrate
 ```
 
 Run dbt with state capture:
 
 ```bash
-DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- run --target dev --select orders+
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- run --select orders+
 ```
 
 Build dbt resources with state capture:
 
 ```bash
-DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- build --target dev
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- build
 ```
 
 List nodes using reconstructed state:
 
 ```bash
-DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- ls --select orders+
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- ls --select orders+
 ```
 
 ## Real Integration Tests

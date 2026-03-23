@@ -35,7 +35,6 @@ pub struct ProjectInitApiRequest {
     pub project_root: Option<String>,
     pub default_branch: Option<String>,
     pub force: bool,
-    pub database_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

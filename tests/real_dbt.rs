@@ -3,9 +3,12 @@
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use std::fs;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use testcontainers_modules::{
     postgres::Postgres,
@@ -36,15 +39,22 @@ async fn dbtx_environment_uses_stored_target_name_when_slug_differs() {
     )
     .expect("write marker model");
 
-    assert_success(&run_dbtx(db.url(), &project, &["project", "init"]));
+    assert_success(&run_dbtx(db.service_url(), &project, &["project", "init"]));
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
-        &["environment", "create", "--slug", "staging", "--target", "dev"],
+        &[
+            "environment",
+            "create",
+            "--slug",
+            "staging",
+            "--target",
+            "dev",
+        ],
     ));
 
     let output = run_dbtx_with_environment_slug(
-        db.url(),
+        db.service_url(),
         &project,
         "staging",
         &[
@@ -61,7 +71,11 @@ async fn dbtx_environment_uses_stored_target_name_when_slug_differs() {
 
     let query = Command::new("duckdb")
         .args([
-            project.path().join("warehouse.duckdb").to_str().expect("utf8 db"),
+            project
+                .path()
+                .join("warehouse.duckdb")
+                .to_str()
+                .expect("utf8 db"),
             "-csv",
             "-c",
             "select target_name from main.target_name_marker",
@@ -91,7 +105,7 @@ async fn dbtx_ls_requires_project_init() {
     project.seed();
 
     let output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "ls",
@@ -120,10 +134,10 @@ async fn dbtx_run_persists_real_jaffle_state() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
 
     let output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "run",
@@ -224,10 +238,10 @@ async fn dbtx_build_persists_real_jaffle_state() {
     reset_db(db.pool()).await;
 
     let project = RealProject::new();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
 
     let output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "build",
@@ -273,10 +287,10 @@ async fn dbtx_seed_persists_seed_state() {
     reset_db(db.pool()).await;
 
     let project = RealProject::new();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
 
     let output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "seed",
@@ -326,9 +340,9 @@ async fn dbtx_test_persists_test_state() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "run",
@@ -350,7 +364,7 @@ async fn dbtx_test_persists_test_state() {
             .expect("promoted meta source before test");
 
     let output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "test",
@@ -406,9 +420,9 @@ async fn dbtx_ls_uses_real_project_and_does_not_write_runs() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "run",
@@ -436,7 +450,7 @@ async fn dbtx_ls_uses_real_project_and_does_not_write_runs() {
     }
 
     let output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "ls",
@@ -481,10 +495,10 @@ async fn dbtx_ls_without_prior_state_succeeds() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
 
     let output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "ls",
@@ -530,9 +544,9 @@ async fn dbtx_ls_state_modified_without_prior_state_returns_all_node_types() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
 
-    let modified = modified_unique_ids(db.url(), &project);
+    let modified = modified_unique_ids(db.service_url(), &project);
     assert!(
         modified.contains("model.jaffle_shop_project.stg_customers"),
         "expected clean-state modified selector to include models, got: {modified:?}"
@@ -564,23 +578,23 @@ async fn project_init_and_force_reset_state_modified_baseline() {
 
     let project = RealProject::new();
 
-    let init_output = run_dbtx(db.url(), &project, &["project", "init"]);
+    let init_output = run_dbtx(db.service_url(), &project, &["project", "init"]);
     assert_success(&init_output);
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &["environment", "create", "--target", "dev"],
     ));
 
-    let initial_all = listed_unique_ids(db.url(), &project);
-    let initial_modified = modified_unique_ids(db.url(), &project);
+    let initial_all = listed_unique_ids(db.service_url(), &project);
+    let initial_modified = modified_unique_ids(db.service_url(), &project);
     assert_eq!(
         initial_modified, initial_all,
         "expected state:modified to match dbtx ls immediately after project init"
     );
 
     let build_output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "build",
@@ -592,7 +606,7 @@ async fn project_init_and_force_reset_state_modified_baseline() {
     );
     assert_success(&build_output);
 
-    let modified_after_build = modified_unique_ids(db.url(), &project);
+    let modified_after_build = modified_unique_ids(db.service_url(), &project);
     let seed_statuses = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT status FROM node_executions ne JOIN runs r ON r.run_id = ne.run_id WHERE r.command = 'build' AND ne.resource_type = 'seed' ORDER BY status",
     )
@@ -610,7 +624,7 @@ async fn project_init_and_force_reset_state_modified_baseline() {
         "expected state:modified to be empty after full build, got: {modified_after_build:?}; seed_statuses={seed_statuses:?}; promoted_seed_count={promoted_seed_count}"
     );
 
-    let init_again = run_dbtx(db.url(), &project, &["project", "init"]);
+    let init_again = run_dbtx(db.service_url(), &project, &["project", "init"]);
     assert_failure(&init_again);
     let stderr = String::from_utf8_lossy(&init_again.stderr);
     assert!(
@@ -618,16 +632,16 @@ async fn project_init_and_force_reset_state_modified_baseline() {
         "expected clear existing-project-id error, got: {stderr}"
     );
 
-    let force_output = run_dbtx(db.url(), &project, &["project", "init", "--force"]);
+    let force_output = run_dbtx(db.service_url(), &project, &["project", "init", "--force"]);
     assert_success(&force_output);
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &["environment", "create", "--target", "dev"],
     ));
 
-    let forced_all = listed_unique_ids(db.url(), &project);
-    let forced_modified = modified_unique_ids(db.url(), &project);
+    let forced_all = listed_unique_ids(db.service_url(), &project);
+    let forced_modified = modified_unique_ids(db.service_url(), &project);
     assert_eq!(
         forced_modified, forced_all,
         "expected state:modified to match dbtx ls after project init --force"
@@ -645,10 +659,10 @@ async fn dbtx_full_run_clears_state_modified() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
 
     let output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "run",
@@ -660,7 +674,7 @@ async fn dbtx_full_run_clears_state_modified() {
     );
     assert_success(&output);
 
-    let modified = modified_unique_ids(db.url(), &project);
+    let modified = modified_unique_ids(db.service_url(), &project);
     assert!(
         modified.is_empty(),
         "expected state:modified to be empty after full run, got: {modified:?}"
@@ -678,10 +692,10 @@ async fn dbtx_build_state_modified_clears_modified_set() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
 
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "run",
@@ -697,14 +711,14 @@ async fn dbtx_build_state_modified_clears_modified_set() {
         "\n-- dbtx build state:modified marker\n",
     );
 
-    let modified_before = modified_unique_ids(db.url(), &project);
+    let modified_before = modified_unique_ids(db.service_url(), &project);
     assert!(
         modified_before.contains("model.jaffle_shop_project.stg_customers"),
         "expected modified model before state:modified build, got: {modified_before:?}"
     );
 
     let output = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "build",
@@ -718,7 +732,7 @@ async fn dbtx_build_state_modified_clears_modified_set() {
     );
     assert_success(&output);
 
-    let modified_after = modified_unique_ids(db.url(), &project);
+    let modified_after = modified_unique_ids(db.service_url(), &project);
     assert!(
         modified_after.is_empty(),
         "expected state:modified to be empty after build -s state:modified, got: {modified_after:?}"
@@ -736,10 +750,10 @@ async fn seeded_environment_starts_with_empty_state_modified() {
 
     let project = RealProject::new();
     project.seed();
-    let project_id = project.init_dbtx_project(db.url());
+    let project_id = project.init_dbtx_project(db.service_url());
 
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "environment",
@@ -752,7 +766,7 @@ async fn seeded_environment_starts_with_empty_state_modified() {
     ));
 
     assert_success(&run_dbtx_with_environment_slug(
-        db.url(),
+        db.service_url(),
         &project,
         "staging",
         &[
@@ -765,7 +779,7 @@ async fn seeded_environment_starts_with_empty_state_modified() {
     ));
 
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "environment",
@@ -783,7 +797,7 @@ async fn seeded_environment_starts_with_empty_state_modified() {
         ],
     ));
 
-    let modified = modified_unique_ids_for_env(db.url(), &project, "pr-123");
+    let modified = modified_unique_ids_for_env(db.service_url(), &project, "pr-123");
     assert!(
         modified.is_empty(),
         "expected seeded environment to start with empty state:modified, got: {modified:?}"
@@ -801,10 +815,10 @@ async fn dbtx_ls_reports_modified_model_after_file_change() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
 
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "run",
@@ -820,7 +834,7 @@ async fn dbtx_ls_reports_modified_model_after_file_change() {
         "\n-- dbtx integration modified marker\n",
     );
 
-    let modified = modified_unique_ids(db.url(), &project);
+    let modified = modified_unique_ids(db.service_url(), &project);
     assert!(
         modified.contains("model.jaffle_shop_project.stg_customers"),
         "expected stg_customers to be reported as modified, got: {modified:?}"
@@ -838,10 +852,10 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.url());
+    project.init_dbtx_project(db.service_url());
 
     assert_success(&run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "run",
@@ -862,7 +876,7 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
         "select *, missing_dbtx_column from customer_order_count\n",
     );
 
-    let modified_before = modified_unique_ids(db.url(), &project);
+    let modified_before = modified_unique_ids(db.service_url(), &project);
     assert!(
         modified_before.contains("model.jaffle_shop_project.stg_orders"),
         "expected stg_orders to be modified before rerun, got: {modified_before:?}"
@@ -873,7 +887,7 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
     );
 
     let failed_run = run_dbtx(
-        db.url(),
+        db.service_url(),
         &project,
         &[
             "run",
@@ -887,7 +901,7 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
     );
     assert_failure(&failed_run);
 
-    let modified_after = modified_unique_ids(db.url(), &project);
+    let modified_after = modified_unique_ids(db.service_url(), &project);
     assert!(
         !modified_after.contains("model.jaffle_shop_project.stg_orders"),
         "expected successful upstream model to be removed from modified set, got: {modified_after:?}"
@@ -896,7 +910,6 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
         modified_after.contains("model.jaffle_shop_project.orders"),
         "expected failed downstream model to remain modified, got: {modified_after:?}"
     );
-
 }
 
 struct RealProject {
@@ -972,11 +985,11 @@ impl RealProject {
         assert_success(&output);
     }
 
-    fn init_dbtx_project(&self, database_url: &str) -> String {
-        let output = run_dbtx(database_url, self, &["project", "init"]);
+    fn init_dbtx_project(&self, service_url: &str) -> String {
+        let output = run_dbtx(service_url, self, &["project", "init"]);
         assert_success(&output);
         let create_env = run_dbtx(
-            database_url,
+            service_url,
             self,
             &["environment", "create", "--target", "dev"],
         );
@@ -1004,7 +1017,7 @@ impl RealProject {
 }
 
 struct TestDatabase {
-    url: String,
+    daemon: TestDaemon,
     pool: PgPool,
     _container: Option<ContainerAsync<Postgres>>,
 }
@@ -1012,12 +1025,13 @@ struct TestDatabase {
 impl TestDatabase {
     async fn new() -> Self {
         if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
-            init_dbtx_schema(&url);
+            let daemon = TestDaemon::start(&url);
+            init_dbtx_schema(daemon.service_url());
             let pool = PgPool::connect(&url)
                 .await
                 .expect("connect external test db");
             return Self {
-                url,
+                daemon,
                 pool,
                 _container: None,
             };
@@ -1037,20 +1051,21 @@ impl TestDatabase {
             .await
             .expect("postgres port");
         let url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx");
-        init_dbtx_schema(&url);
+        let daemon = TestDaemon::start(&url);
+        init_dbtx_schema(daemon.service_url());
         let pool = PgPool::connect(&url)
             .await
             .expect("connect testcontainer db");
 
         Self {
-            url,
+            daemon,
             pool,
             _container: Some(container),
         }
     }
 
-    fn url(&self) -> &str {
-        &self.url
+    fn service_url(&self) -> &str {
+        self.daemon.service_url()
     }
 
     fn pool(&self) -> &PgPool {
@@ -1058,10 +1073,68 @@ impl TestDatabase {
     }
 }
 
-fn init_dbtx_schema(database_url: &str) {
+struct TestDaemon {
+    service_url: String,
+    child: Child,
+}
+
+impl TestDaemon {
+    fn start(database_url: &str) -> Self {
+        let listen = next_listen_addr();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dbtx-server"))
+            .args(["--listen", &listen])
+            .env("DBTX_DATABASE_URL", database_url)
+            .env("DBTX_SECRET_KEY", "test-secret-key")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start dbtx-server");
+
+        let service_url = format!("http://{listen}");
+        wait_for_server(&service_url, &mut child);
+        Self { service_url, child }
+    }
+
+    fn service_url(&self) -> &str {
+        &self.service_url
+    }
+}
+
+impl Drop for TestDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn next_listen_addr() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    drop(listener);
+    addr.to_string()
+}
+
+fn wait_for_server(service_url: &str, child: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let addr = service_url.trim_start_matches("http://");
+    loop {
+        if TcpStream::connect(addr).is_ok() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("poll dbtx-server") {
+            panic!("dbtx-server exited early with status {status}");
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for dbtx-server at {service_url}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn init_dbtx_schema(service_url: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_dbtx"))
         .args(["state", "migrate"])
-        .env("DBTX_DATABASE_URL", database_url)
+        .env("DBTX_SERVICE_URL", service_url)
         .output()
         .expect("run dbtx migrate");
     assert_success(&output);
@@ -1076,9 +1149,9 @@ async fn reset_db(pool: &PgPool) {
     .expect("truncate db");
 }
 
-fn run_dbtx(database_url: &str, project: &RealProject, args: &[&str]) -> Output {
+fn run_dbtx(service_url: &str, project: &RealProject, args: &[&str]) -> Output {
     run_dbtx_with_environment_slug(
-        database_url,
+        service_url,
         project,
         environment_slug_from_args(args).unwrap_or(ENVIRONMENT_SLUG),
         args,
@@ -1086,15 +1159,14 @@ fn run_dbtx(database_url: &str, project: &RealProject, args: &[&str]) -> Output 
 }
 
 fn run_dbtx_with_environment_slug(
-    database_url: &str,
+    service_url: &str,
     project: &RealProject,
     environment_slug: &str,
     args: &[&str],
 ) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx"));
     command.args(strip_profiles_dir_args(args));
-    command.env("DBTX_DATABASE_URL", database_url);
-    command.env("DBTX_SECRET_KEY", "test-secret-key");
+    command.env("DBTX_SERVICE_URL", service_url);
     command.env("DBTX_ENVIRONMENT_SLUG", environment_slug);
     command.current_dir(project.path());
     command.output().expect("run dbtx")
@@ -1158,26 +1230,26 @@ fn assert_failure(output: &Output) {
 }
 
 fn modified_unique_ids(
-    database_url: &str,
+    service_url: &str,
     project: &RealProject,
 ) -> std::collections::BTreeSet<String> {
-    modified_unique_ids_for_env(database_url, project, ENVIRONMENT_SLUG)
+    modified_unique_ids_for_env(service_url, project, ENVIRONMENT_SLUG)
 }
 
 fn listed_unique_ids(
-    database_url: &str,
+    service_url: &str,
     project: &RealProject,
 ) -> std::collections::BTreeSet<String> {
-    listed_unique_ids_for_env(database_url, project, ENVIRONMENT_SLUG)
+    listed_unique_ids_for_env(service_url, project, ENVIRONMENT_SLUG)
 }
 
 fn modified_unique_ids_for_env(
-    database_url: &str,
+    service_url: &str,
     project: &RealProject,
     environment_slug: &str,
 ) -> std::collections::BTreeSet<String> {
     listed_unique_ids_for_env_impl(
-        database_url,
+        service_url,
         project,
         environment_slug,
         &["-s", "state:modified", "--output", "json"],
@@ -1185,12 +1257,12 @@ fn modified_unique_ids_for_env(
 }
 
 fn listed_unique_ids_for_env(
-    database_url: &str,
+    service_url: &str,
     project: &RealProject,
     environment_slug: &str,
 ) -> std::collections::BTreeSet<String> {
     listed_unique_ids_for_env_impl(
-        database_url,
+        service_url,
         project,
         environment_slug,
         &["--output", "json"],
@@ -1198,7 +1270,7 @@ fn listed_unique_ids_for_env(
 }
 
 fn listed_unique_ids_for_env_impl(
-    database_url: &str,
+    service_url: &str,
     project: &RealProject,
     environment_slug: &str,
     extra_args: &[&str],
@@ -1212,7 +1284,7 @@ fn listed_unique_ids_for_env_impl(
     ];
     args.extend_from_slice(extra_args);
 
-    let output = run_dbtx_with_environment_slug(database_url, project, environment_slug, &args);
+    let output = run_dbtx_with_environment_slug(service_url, project, environment_slug, &args);
     assert_success(&output);
 
     String::from_utf8_lossy(&output.stdout)

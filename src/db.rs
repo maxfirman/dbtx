@@ -666,7 +666,10 @@ impl Db {
         Ok(())
     }
 
-    pub(crate) async fn resolve_local_project(&self, project_dir: &Path) -> AppResult<ProjectRecord> {
+    pub(crate) async fn resolve_local_project(
+        &self,
+        project_dir: &Path,
+    ) -> AppResult<ProjectRecord> {
         let project_id = read_dbtx_project_id(project_dir)?.ok_or(AppError::ProjectIdMissing)?;
         let project = self.get_project_by_project_id(&project_id).await?;
         validate_project_record(&project, project_dir)?;
@@ -1085,7 +1088,12 @@ impl Db {
         Ok(())
     }
 
-    pub(crate) async fn persist_raw_line(&self, run_id: Uuid, sequence_no: i64, line: &str) -> AppResult<()> {
+    pub(crate) async fn persist_raw_line(
+        &self,
+        run_id: Uuid,
+        sequence_no: i64,
+        line: &str,
+    ) -> AppResult<()> {
         sqlx::query(
             r#"
             INSERT INTO run_events (run_id, sequence_no, event_name, event_code, unique_id, payload)
@@ -1613,7 +1621,10 @@ fn relative_project_root(repo_root: &Path, project_root: &Path) -> String {
     }
 }
 
-pub(crate) fn validate_project_record(project: &ProjectRecord, project_dir: &Path) -> AppResult<()> {
+pub(crate) fn validate_project_record(
+    project: &ProjectRecord,
+    project_dir: &Path,
+) -> AppResult<()> {
     let repo_root = git_repo_root(project_dir)?;
     let current_name = read_dbt_project_name(project_dir);
     let current_git_repo_url = git_remote_origin_url(&repo_root)?;
