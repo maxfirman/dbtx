@@ -378,6 +378,71 @@ async fn dbtx_ls_state_modified_without_prior_state_returns_all_node_types() {
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn project_init_and_force_reset_state_modified_baseline() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+
+    let init_output = run_dbtx(db.url(), &project, &["project", "init"]);
+    assert_success(&init_output);
+
+    let initial_all = listed_unique_ids(db.url(), &project);
+    let initial_modified = modified_unique_ids(db.url(), &project);
+    assert_eq!(
+        initial_modified, initial_all,
+        "expected state:modified to match dbtx ls immediately after project init"
+    );
+
+    let build_output = run_dbtx(
+        db.url(),
+        &project,
+        &["build", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+    );
+    assert_success(&build_output);
+
+    let modified_after_build = modified_unique_ids(db.url(), &project);
+    let seed_statuses = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT status FROM node_executions ne JOIN runs r ON r.run_id = ne.run_id WHERE r.command = 'build' AND ne.resource_type = 'seed' ORDER BY status",
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("seed statuses");
+    let promoted_seed_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM promoted_manifest_nodes WHERE unique_id LIKE 'seed.%'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("promoted seed count");
+    assert!(
+        modified_after_build.is_empty(),
+        "expected state:modified to be empty after full build, got: {modified_after_build:?}; seed_statuses={seed_statuses:?}; promoted_seed_count={promoted_seed_count}"
+    );
+
+    let init_again = run_dbtx(db.url(), &project, &["project", "init"]);
+    assert_failure(&init_again);
+    let stderr = String::from_utf8_lossy(&init_again.stderr);
+    assert!(
+        stderr.contains("dbtx project id is already configured"),
+        "expected clear existing-project-id error, got: {stderr}"
+    );
+
+    let force_output = run_dbtx(db.url(), &project, &["project", "init", "--force"]);
+    assert_success(&force_output);
+
+    let forced_all = listed_unique_ids(db.url(), &project);
+    let forced_modified = modified_unique_ids(db.url(), &project);
+    assert_eq!(
+        forced_modified, forced_all,
+        "expected state:modified to match dbtx ls after project init --force"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
 async fn dbtx_full_run_clears_state_modified() {
     let _guard = integration_lock()
         .lock()
@@ -912,26 +977,51 @@ fn modified_unique_ids(database_url: &str, project: &RealProject) -> std::collec
     modified_unique_ids_for_env(database_url, project, ENVIRONMENT_SLUG)
 }
 
+fn listed_unique_ids(database_url: &str, project: &RealProject) -> std::collections::BTreeSet<String> {
+    listed_unique_ids_for_env(database_url, project, ENVIRONMENT_SLUG)
+}
+
 fn modified_unique_ids_for_env(
     database_url: &str,
     project: &RealProject,
     environment_slug: &str,
 ) -> std::collections::BTreeSet<String> {
+    listed_unique_ids_for_env_impl(
+        database_url,
+        project,
+        environment_slug,
+        &["-s", "state:modified", "--output", "json"],
+    )
+}
+
+fn listed_unique_ids_for_env(
+    database_url: &str,
+    project: &RealProject,
+    environment_slug: &str,
+) -> std::collections::BTreeSet<String> {
+    listed_unique_ids_for_env_impl(database_url, project, environment_slug, &["--output", "json"])
+}
+
+fn listed_unique_ids_for_env_impl(
+    database_url: &str,
+    project: &RealProject,
+    environment_slug: &str,
+    extra_args: &[&str],
+) -> std::collections::BTreeSet<String> {
+    let mut args = vec![
+        "ls",
+        "--project-dir",
+        project.path_str(),
+        "--profiles-dir",
+        project.path_str(),
+    ];
+    args.extend_from_slice(extra_args);
+
     let output = run_dbtx_with_environment_slug(
         database_url,
         project,
         environment_slug,
-        &[
-            "ls",
-            "--project-dir",
-            project.path_str(),
-            "--profiles-dir",
-            project.path_str(),
-            "-s",
-            "state:modified",
-            "--output",
-            "json",
-        ],
+        &args,
     );
     assert_success(&output);
 

@@ -1,7 +1,7 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
-use crate::manifest::{CurrentNodeState, ManifestSnapshot, ReconstructedManifest};
+use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
 use serde_json::Value;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
@@ -121,6 +121,60 @@ impl Db {
         .bind(&input.project_root)
         .fetch_one(&self.pool)
         .await?;
+        Ok(project_record_from_row(&row))
+    }
+
+    pub async fn reinitialize_project_id(
+        &self,
+        existing_project_id: &str,
+        input: CreateProjectInput,
+    ) -> AppResult<ProjectRecord> {
+        let mut tx = self.pool.begin().await?;
+        let existing_row = sqlx::query("SELECT id FROM projects WHERE project_id = $1")
+            .bind(existing_project_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+        let Some(existing_row) = existing_row else {
+            tx.rollback().await?;
+            return self.create_project(input).await;
+        };
+
+        let project_pk: i64 = existing_row.get("id");
+
+        sqlx::query("DELETE FROM environments WHERE project_id = $1")
+            .bind(project_pk)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM runs WHERE project_id = $1")
+            .bind(project_pk)
+            .execute(&mut *tx)
+            .await?;
+
+        let row = sqlx::query(
+            r#"
+            UPDATE projects
+            SET project_id = $2,
+                project_name = $3,
+                slug = $4,
+                git_repo_url = $5,
+                default_branch = COALESCE($6, 'main'),
+                project_root = $7
+            WHERE id = $1
+            RETURNING id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata
+            "#,
+        )
+        .bind(project_pk)
+        .bind(&input.project_id)
+        .bind(&input.project_name)
+        .bind(&input.slug)
+        .bind(&input.git_repo_url)
+        .bind(input.default_branch.as_deref())
+        .bind(&input.project_root)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
         Ok(project_record_from_row(&row))
     }
 
@@ -851,7 +905,10 @@ impl Db {
         .await?;
 
         if let Some(node) = event.normalized_node_event() {
-            let promote_manifest_state = matches!(node.status.as_deref(), Some("success" | "pass"));
+            let promote_manifest_state = node
+                .status
+                .as_deref()
+                .is_some_and(is_promotable_status);
             let resource_type = node.resource_type.clone();
             let node_name = node.node_name.clone();
             let node_path = node.node_path.clone();
@@ -1150,7 +1207,7 @@ impl Db {
             FROM node_executions ne
             JOIN manifest_snapshots ms ON ms.run_id = ne.run_id
             WHERE ne.run_id = $1
-              AND ne.status = 'success'
+              AND ne.status IN ('success', 'pass', 'created')
               AND ms.manifest -> 'nodes' -> ne.unique_id IS NOT NULL
             ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE SET
                 source_run_id = EXCLUDED.source_run_id,
@@ -1235,7 +1292,7 @@ impl Db {
                 WHERE r.project_id = $1
                   AND r.environment_id = $2
                   AND r.command IN ('run', 'build')
-                  AND ne.status = 'success'
+                  AND ne.status IN ('success', 'pass', 'created')
                   AND ($3::BIGINT IS NULL OR r.id <= $3)
                 ORDER BY ne.unique_id, r.id DESC
             )
@@ -1337,7 +1394,7 @@ impl Db {
                 WHERE r.project_id = $1
                   AND r.environment_id = $2
                   AND ($3::BIGINT IS NULL OR r.id <= $3)
-                  AND ne.status = 'success'
+                  AND ne.status IN ('success', 'pass', 'created')
                 ORDER BY ne.unique_id, r.id DESC
             ),
             latest_state AS (
@@ -1427,37 +1484,6 @@ impl Db {
         let environment_id: i64 = base_row.get("environment_id");
         let base_manifest: sqlx::types::Json<Value> = base_row.get("base_manifest");
 
-        let current_nodes = sqlx::query(
-            r#"
-            SELECT
-                unique_id,
-                materialized,
-                relation_database,
-                relation_schema,
-                relation_alias,
-                relation_name,
-                checksum
-            FROM current_node_state
-            WHERE project_id = $1
-              AND environment_id = $2
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_id)
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(|row| CurrentNodeState {
-            unique_id: row.get("unique_id"),
-            materialized: row.get("materialized"),
-            relation_database: row.get("relation_database"),
-            relation_schema: row.get("relation_schema"),
-            relation_alias: row.get("relation_alias"),
-            relation_name: row.get("relation_name"),
-            checksum: row.get("checksum"),
-        })
-        .collect::<Vec<_>>();
-
         let promoted_nodes = sqlx::query(
             r#"
             SELECT
@@ -1480,11 +1506,7 @@ impl Db {
         })
         .collect::<BTreeMap<_, _>>();
 
-        let reconstructed = ManifestSnapshot::reconstruct(
-            base_manifest.0,
-            &promoted_nodes,
-            &current_nodes,
-        );
+        let reconstructed = ManifestSnapshot::reconstruct(base_manifest.0, &promoted_nodes);
         Ok(Some(ReconstructedManifest::write(&reconstructed).await?))
     }
 
@@ -1581,6 +1603,10 @@ fn null_if_empty(value: &str) -> Option<&str> {
 
 fn should_promote_manifest(subcommand: &str) -> bool {
     matches!(subcommand, "run" | "build")
+}
+
+fn is_promotable_status(status: &str) -> bool {
+    matches!(status, "success" | "pass" | "created")
 }
 
 fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {

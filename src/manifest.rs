@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 use tempfile::TempDir;
@@ -35,17 +35,6 @@ pub struct ManifestEdge {
     pub child_unique_id: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct CurrentNodeState {
-    pub unique_id: String,
-    pub materialized: Option<String>,
-    pub relation_database: Option<String>,
-    pub relation_schema: Option<String>,
-    pub relation_alias: Option<String>,
-    pub relation_name: Option<String>,
-    pub checksum: Option<String>,
-}
-
 #[derive(Debug)]
 pub struct ReconstructedManifest {
     pub temp_dir: TempDir,
@@ -65,7 +54,6 @@ impl ManifestSnapshot {
     pub fn reconstruct(
         raw_manifest: Value,
         successful_nodes: &BTreeMap<String, Value>,
-        current_nodes: &[CurrentNodeState],
     ) -> Value {
         let mut raw_manifest = raw_manifest;
 
@@ -73,41 +61,6 @@ impl ManifestSnapshot {
             for (unique_id, raw_node) in successful_nodes {
                 if nodes.contains_key(unique_id) {
                     nodes.insert(unique_id.clone(), raw_node.clone());
-                }
-            }
-
-            for patch in current_nodes {
-                let Some(node) = nodes.get_mut(&patch.unique_id).and_then(Value::as_object_mut) else {
-                    continue;
-                };
-
-                patch_scalar(node, "database", patch.relation_database.as_ref());
-                patch_scalar(node, "schema", patch.relation_schema.as_ref());
-                patch_scalar(node, "alias", patch.relation_alias.as_ref());
-                patch_scalar(node, "relation_name", patch.relation_name.as_ref());
-
-                if let Some(materialized) = &patch.materialized {
-                    let config = node
-                        .entry("config".to_string())
-                        .or_insert_with(|| Value::Object(Map::new()));
-                    if let Some(config) = config.as_object_mut() {
-                        config.insert(
-                            "materialized".to_string(),
-                            Value::String(materialized.clone()),
-                        );
-                    }
-                }
-
-                if let Some(checksum) = &patch.checksum {
-                    let checksum_value = node
-                        .entry("checksum".to_string())
-                        .or_insert_with(|| Value::Object(Map::new()));
-                    if let Some(checksum_obj) = checksum_value.as_object_mut() {
-                        checksum_obj.insert(
-                            "checksum".to_string(),
-                            Value::String(checksum.clone()),
-                        );
-                    }
                 }
             }
         }
@@ -229,12 +182,6 @@ fn extract_edges(raw: &Value) -> Vec<ManifestEdge> {
     edges
 }
 
-fn patch_scalar(node: &mut Map<String, Value>, key: &str, value: Option<&String>) {
-    if let Some(value) = value {
-        node.insert(key.to_string(), Value::String(value.clone()));
-    }
-}
-
 fn rebuild_dependency_maps(raw_manifest: &Value) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, Vec<String>>) {
     let mut parent_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut child_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -290,7 +237,7 @@ fn json_map_from_edges(map: BTreeMap<String, Vec<String>>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{CurrentNodeState, ManifestSnapshot};
+    use super::ManifestSnapshot;
     use serde_json::json;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
@@ -328,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn reconstruct_patches_current_state_fields() {
+    fn reconstruct_preserves_base_node_without_promoted_override() {
         let raw = json!({
             "nodes": {
                 "model.pkg.a": {
@@ -344,27 +291,15 @@ mod tests {
             "child_map": {}
         });
 
-        let reconstructed = ManifestSnapshot::reconstruct(
-            raw,
-            &BTreeMap::new(),
-            &[CurrentNodeState {
-                unique_id: "model.pkg.a".to_string(),
-                materialized: Some("table".to_string()),
-                relation_database: Some("new_db".to_string()),
-                relation_schema: Some("new_schema".to_string()),
-                relation_alias: Some("new_alias".to_string()),
-                relation_name: Some("new.rel".to_string()),
-                checksum: Some("new".to_string()),
-            }],
-        );
+        let reconstructed = ManifestSnapshot::reconstruct(raw, &BTreeMap::new());
 
         let node = &reconstructed["nodes"]["model.pkg.a"];
-        assert_eq!(node["database"], "new_db");
-        assert_eq!(node["schema"], "new_schema");
-        assert_eq!(node["alias"], "new_alias");
-        assert_eq!(node["relation_name"], "new.rel");
-        assert_eq!(node["config"]["materialized"], "table");
-        assert_eq!(node["checksum"]["checksum"], "new");
+        assert_eq!(node["database"], "old_db");
+        assert_eq!(node["schema"], "old_schema");
+        assert_eq!(node["alias"], "old_alias");
+        assert_eq!(node["relation_name"], "old.rel");
+        assert_eq!(node["config"]["materialized"], "view");
+        assert_eq!(node["checksum"]["checksum"], "old");
     }
 
     #[test]
@@ -386,11 +321,7 @@ mod tests {
             "child_map": {"x": ["old"]}
         });
 
-        let reconstructed = ManifestSnapshot::reconstruct(
-            raw,
-            &BTreeMap::new(),
-            &[],
-        );
+        let reconstructed = ManifestSnapshot::reconstruct(raw, &BTreeMap::new());
 
         assert_eq!(
             reconstructed["parent_map"]["model.pkg.child"],
@@ -423,7 +354,7 @@ mod tests {
             "child_map": {"x": ["old"]}
         });
 
-        let reconstructed = ManifestSnapshot::reconstruct(raw, &BTreeMap::new(), &[]);
+        let reconstructed = ManifestSnapshot::reconstruct(raw, &BTreeMap::new());
 
         assert_eq!(reconstructed["parent_map"]["source.pkg.raw"], json!([]));
         assert_eq!(
@@ -451,7 +382,7 @@ mod tests {
             }),
         )]);
 
-        let reconstructed = ManifestSnapshot::reconstruct(raw, &successful_nodes, &[]);
+        let reconstructed = ManifestSnapshot::reconstruct(raw, &successful_nodes);
         assert_eq!(reconstructed["nodes"]["model.pkg.a"]["raw_code"], "old code");
         assert_eq!(reconstructed["nodes"]["model.pkg.a"]["checksum"]["checksum"], "old");
     }
