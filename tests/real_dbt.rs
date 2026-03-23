@@ -79,7 +79,7 @@ async fn dbtx_run_persists_real_jaffle_state() {
         "expected dbt version line in stdout, got: {stdout}"
     );
     assert!(
-        stdout.contains("   Loading profiles.yml"),
+        stdout.contains("Loading ") && stdout.contains("profiles.yml"),
         "expected text-mode loading line in stdout, got: {stdout}"
     );
     assert!(
@@ -503,6 +503,11 @@ async fn project_init_and_force_reset_state_modified_baseline() {
 
     let init_output = run_dbtx(db.url(), &project, &["project", "init"]);
     assert_success(&init_output);
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &["environment", "create", "--target", "dev"],
+    ));
 
     let initial_all = listed_unique_ids(db.url(), &project);
     let initial_modified = modified_unique_ids(db.url(), &project);
@@ -552,6 +557,11 @@ async fn project_init_and_force_reset_state_modified_baseline() {
 
     let force_output = run_dbtx(db.url(), &project, &["project", "init", "--force"]);
     assert_success(&force_output);
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &["environment", "create", "--target", "dev"],
+    ));
 
     let forced_all = listed_unique_ids(db.url(), &project);
     let forced_modified = modified_unique_ids(db.url(), &project);
@@ -1010,6 +1020,12 @@ impl RealProject {
     fn init_dbtx_project(&self, database_url: &str) -> String {
         let output = run_dbtx(database_url, self, &["project", "init"]);
         assert_success(&output);
+        let create_env = run_dbtx(
+            database_url,
+            self,
+            &["environment", "create", "--target", "dev"],
+        );
+        assert_success(&create_env);
         self.project_id()
     }
 
@@ -1121,12 +1137,32 @@ fn run_dbtx_with_environment_slug(
     args: &[&str],
 ) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx"));
-    command.args(args);
+    command.args(strip_profiles_dir_args(args));
     command.env("DBTX_DATABASE_URL", database_url);
+    command.env("DBTX_SECRET_KEY", "test-secret-key");
     command.env("DBTX_PROJECT_SLUG", project.project_slug());
     command.env("DBTX_ENVIRONMENT_SLUG", environment_slug);
     command.current_dir(project.path());
     command.output().expect("run dbtx")
+}
+
+fn strip_profiles_dir_args<'a>(args: &'a [&'a str]) -> Vec<&'a str> {
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut idx = 0;
+    while idx < args.len() {
+        let current = args[idx];
+        if current == "--profiles-dir" {
+            idx += 2;
+            continue;
+        }
+        if current.starts_with("--profiles-dir=") {
+            idx += 1;
+            continue;
+        }
+        filtered.push(current);
+        idx += 1;
+    }
+    filtered
 }
 
 fn environment_slug_from_args<'a>(args: &'a [&'a str]) -> Option<&'a str> {

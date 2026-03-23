@@ -16,6 +16,28 @@ pub enum AppError {
     TomlDe(#[from] toml::de::Error),
     #[error("toml serialization error: {0}")]
     TomlSer(#[from] toml::ser::Error),
+    #[error("missing DBTX_SECRET_KEY for encrypted profile secrets")]
+    MissingSecretKey,
+    #[error("dbt project is missing a profile name")]
+    MissingDbtProfile,
+    #[error("profiles.yml was not found at {0}")]
+    ProfilesFileNotFound(String),
+    #[error("dbt profile '{0}' was not found in profiles.yml")]
+    ProfileNotFound(String),
+    #[error("dbt profile '{0}' target '{1}' was not found in profiles.yml")]
+    ProfileTargetNotFound(String, String),
+    #[error("profile adapter type is missing")]
+    MissingAdapterType,
+    #[error("unsupported dbt adapter '{0}'")]
+    UnsupportedAdapter(String),
+    #[error("invalid profile config: {0}")]
+    InvalidProfileConfig(String),
+    #[error("invalid profile secrets: {0}")]
+    InvalidProfileSecret(String),
+    #[error("failed to encrypt secret data: {0}")]
+    Encryption(String),
+    #[error("invalid encrypted secret payload: {0}")]
+    InvalidEncryptedSecret(String),
     #[error("dbt invocation failed with exit code {0}")]
     DbtFailed(i32),
     #[error("missing manifest at {0}")]
@@ -64,6 +86,10 @@ pub enum AppError {
     ProjectValidationFailed(String),
     #[error("dbtx manages --state internally; remove the user-supplied --state argument")]
     UserStateNotAllowed,
+    #[error(
+        "dbtx manages warehouse profiles internally; remove the user-supplied --profiles-dir argument"
+    )]
+    UserProfilesDirNotAllowed,
 }
 
 pub type AppResult<T> = Result<T, AppError>;

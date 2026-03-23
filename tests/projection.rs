@@ -279,10 +279,10 @@ async fn project_and_environment_cli_round_trip() {
         &[
             "environment",
             "create",
-            "--project",
-            &project_id,
             "--slug",
             "staging",
+            "--target",
+            "dev",
             "--kind",
             "persistent",
         ],
@@ -715,7 +715,7 @@ async fn scope_ids(pool: &PgPool) -> ScopeIds {
     .await
     .expect("project id");
     let environment_id: i64 = sqlx::query_scalar(
-        "INSERT INTO environments (project_id, slug) VALUES ($1, 'dev') ON CONFLICT (project_id, slug) DO UPDATE SET slug = EXCLUDED.slug RETURNING id",
+        "INSERT INTO environments (project_id, slug, adapter_type, schema_name, threads, profile_config, profile_secrets) VALUES ($1, 'dev', 'duckdb', 'main', 4, '{\"path\":\"warehouse.duckdb\"}'::jsonb, '{}'::jsonb) ON CONFLICT (project_id, slug) DO UPDATE SET slug = EXCLUDED.slug RETURNING id",
     )
     .bind(project_id)
     .fetch_one(pool)
@@ -909,6 +909,7 @@ fn run_dbtx_in_dir(database_url: &str, cwd: &Path, args: &[&str]) -> std::proces
     Command::new(env!("CARGO_BIN_EXE_dbtx"))
         .args(args)
         .env("DBTX_DATABASE_URL", database_url)
+        .env("DBTX_SECRET_KEY", "test-secret-key")
         .current_dir(cwd)
         .output()
         .expect("run dbtx in dir")
@@ -926,9 +927,16 @@ impl TempProjectRepo {
         fs::create_dir_all(&project_dir).expect("create project dir");
         fs::write(
             project_dir.join("dbt_project.yml"),
-            format!("name: {project_name}\nversion: '1.0'\n"),
+            format!("name: {project_name}\nprofile: {project_name}\nversion: '1.0'\n"),
         )
         .expect("write dbt project");
+        fs::write(
+            project_dir.join("profiles.yml"),
+            format!(
+                "{project_name}:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: warehouse.duckdb\n      schema: main\n      threads: 4\n"
+            ),
+        )
+        .expect("write profiles");
         git(&["init", "-b", "main"], temp_dir.path());
         git(
             &["config", "user.email", "dbtx@example.com"],

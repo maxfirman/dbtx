@@ -15,7 +15,6 @@ pub struct InvocationContext {
     pub project_slug: String,
     pub environment_slug: String,
     pub project_dir: PathBuf,
-    pub profiles_dir: PathBuf,
     pub target_path: PathBuf,
     pub is_full_graph_run: bool,
     pub wants_state_modified: bool,
@@ -67,14 +66,14 @@ impl InvocationContext {
         if has_option(args, "--state") {
             return Err(AppError::UserStateNotAllowed);
         }
+        if has_option(args, "--profiles-dir") {
+            return Err(AppError::UserProfilesDirNotAllowed);
+        }
 
         let current_dir = env::current_dir().map_err(AppError::Io)?;
         let project_dir = parse_path_option(args, "--project-dir")
             .map(|path| absolutize(&current_dir, &path))
             .unwrap_or(current_dir.clone());
-        let profiles_dir = parse_path_option(args, "--profiles-dir")
-            .map(|path| absolutize(&current_dir, &path))
-            .unwrap_or_else(|| current_dir.clone());
         let target_path = parse_path_option(args, "--target-path")
             .map(|path| absolutize(&current_dir, &path))
             .unwrap_or_else(|| project_dir.join("target"));
@@ -109,7 +108,6 @@ impl InvocationContext {
             project_slug,
             environment_slug,
             project_dir,
-            profiles_dir,
             target_path,
             is_full_graph_run,
             wants_state_modified,
@@ -218,8 +216,6 @@ mod tests {
         let args = vec![
             OsString::from("--project-dir"),
             OsString::from("/tmp/example"),
-            OsString::from("--profiles-dir"),
-            OsString::from("/tmp/profiles"),
             OsString::from("--target"),
             OsString::from("prod"),
             OsString::from("--target-path=artifacts"),
@@ -230,7 +226,6 @@ mod tests {
         let ctx = InvocationContext::from_args(&args, true).expect("context should build");
         assert_eq!(ctx.project_slug, "example");
         assert_eq!(ctx.environment_slug, "prod");
-        assert_eq!(ctx.profiles_dir, std::path::PathBuf::from("/tmp/profiles"));
         assert!(ctx.target_path.ends_with("artifacts"));
         assert!(!ctx.is_full_graph_run);
         assert!(ctx.wants_state_modified);
@@ -242,6 +237,16 @@ mod tests {
         let args = vec![OsString::from("--state"), OsString::from("target/state")];
         let err = InvocationContext::from_args(&args, false).expect_err("state should fail");
         assert!(matches!(err, AppError::UserStateNotAllowed));
+    }
+
+    #[test]
+    fn rejects_user_supplied_profiles_dir() {
+        let args = vec![
+            OsString::from("--profiles-dir"),
+            OsString::from("/tmp/profiles"),
+        ];
+        let err = InvocationContext::from_args(&args, false).expect_err("profiles dir should fail");
+        assert!(matches!(err, AppError::UserProfilesDirNotAllowed));
     }
 
     #[test]

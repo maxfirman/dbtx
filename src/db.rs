@@ -2,6 +2,10 @@ use crate::config::{InvocationContext, RuntimeConfig, read_dbtx_project_id};
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
+use crate::profile::{
+    EnvironmentProfileRecord, GeneratedProfiles, resolve_runtime_profile,
+    validate_environment_profile,
+};
 use serde_json::Value;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
@@ -52,7 +56,11 @@ pub struct EnvironmentRecord {
     pub pr_number: Option<i32>,
     pub immutable: bool,
     pub status: String,
-    pub schema_prefix: Option<String>,
+    pub adapter_type: String,
+    pub schema_name: String,
+    pub threads: Option<i32>,
+    pub profile_config: Value,
+    pub profile_secrets: Value,
     pub metadata: Value,
 }
 
@@ -76,7 +84,11 @@ pub struct CreateEnvironmentInput {
     pub pr_number: Option<i32>,
     pub immutable: bool,
     pub status: String,
-    pub schema_prefix: Option<String>,
+    pub adapter_type: String,
+    pub schema_name: Option<String>,
+    pub threads: Option<i32>,
+    pub profile_config: Value,
+    pub profile_secrets: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +102,11 @@ pub struct UpdateEnvironmentInput {
     pub pr_number: Option<i32>,
     pub immutable: bool,
     pub status: Option<String>,
-    pub schema_prefix: Option<String>,
+    pub adapter_type: Option<String>,
+    pub schema_name: Option<String>,
+    pub threads: Option<i32>,
+    pub profile_config: Option<Value>,
+    pub profile_secrets: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +131,7 @@ struct RunFinalization<'a> {
 impl Db {
     pub async fn connect(database_url: &str) -> AppResult<Self> {
         let pool = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(20)
             .connect(database_url)
             .await?;
         Ok(Self { pool })
@@ -157,32 +173,6 @@ impl Db {
         .fetch_one(&self.pool)
         .await?;
         Ok(project_record_from_row(&row))
-    }
-
-    pub async fn ensure_default_environment(&self, project_id: &str) -> AppResult<()> {
-        let project = self.get_project_by_project_id(project_id).await?;
-        match self
-            .get_environment_by_project_id(project.id, &project.project_id, "dev")
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(AppError::EnvironmentNotFound(_, _)) => self
-                .create_environment(CreateEnvironmentInput {
-                    project: project.project_id,
-                    slug: "dev".to_string(),
-                    kind: "persistent".to_string(),
-                    baseline_slug: None,
-                    git_branch: None,
-                    git_commit_sha: None,
-                    pr_number: None,
-                    immutable: false,
-                    status: "active".to_string(),
-                    schema_prefix: None,
-                })
-                .await
-                .map(|_| ()),
-            Err(err) => Err(err),
-        }
     }
 
     pub async fn reinitialize_project_id(
@@ -264,6 +254,14 @@ impl Db {
         validate_environment_input(&input.kind, input.git_commit_sha.as_deref())?;
         validate_environment_status(&input.status)?;
         let project = self.get_project_by_project_id(&input.project).await?;
+        validate_environment_profile(
+            &input.adapter_type,
+            input.schema_name.as_deref().unwrap_or(""),
+            input.threads,
+            &input.profile_config,
+            &input.profile_secrets,
+            false,
+        )?;
         let baseline = match input.baseline_slug.as_deref() {
             Some(baseline_slug) => Some(
                 self.get_environment_by_project_id(project.id, &project.project_id, baseline_slug)
@@ -276,9 +274,10 @@ impl Db {
             r#"
             INSERT INTO environments (
                 project_id, slug, kind, baseline_environment_id, git_branch, git_commit_sha,
-                pr_number, immutable, status, schema_prefix
+                pr_number, immutable, status, adapter_type, schema_name, threads, profile_config,
+                profile_secrets
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING id
             "#,
         )
@@ -291,7 +290,11 @@ impl Db {
         .bind(input.pr_number)
         .bind(input.immutable)
         .bind(&input.status)
-        .bind(input.schema_prefix.as_deref())
+        .bind(&input.adapter_type)
+        .bind(input.schema_name.as_deref())
+        .bind(input.threads)
+        .bind(sqlx::types::Json(&input.profile_config))
+        .bind(sqlx::types::Json(&input.profile_secrets))
         .fetch_one(&self.pool)
         .await
         .map_err(|err| match &err {
@@ -342,6 +345,31 @@ impl Db {
         let git_branch = input.git_branch.or(existing.git_branch.clone());
         let git_commit_sha = input.git_commit_sha.or(existing.git_commit_sha.clone());
         validate_environment_input(&kind, git_commit_sha.as_deref())?;
+        let adapter_type = input
+            .adapter_type
+            .as_deref()
+            .unwrap_or(&existing.adapter_type)
+            .to_string();
+        let schema_name = input
+            .schema_name
+            .as_deref()
+            .unwrap_or(&existing.schema_name)
+            .to_string();
+        let threads = input.threads.or(existing.threads);
+        validate_environment_profile(
+            &adapter_type,
+            &schema_name,
+            threads,
+            input
+                .profile_config
+                .as_ref()
+                .unwrap_or(&existing.profile_config),
+            input
+                .profile_secrets
+                .as_ref()
+                .unwrap_or(&existing.profile_secrets),
+            true,
+        )?;
         let immutable = existing.immutable || input.immutable;
         let status = input.status.unwrap_or(existing.status.clone());
         validate_environment_status(&status)?;
@@ -356,7 +384,11 @@ impl Db {
                 pr_number = $7,
                 immutable = $8,
                 status = $9,
-                schema_prefix = $10
+                adapter_type = $10,
+                schema_name = $11,
+                threads = $12,
+                profile_config = $13,
+                profile_secrets = $14
             WHERE id = $1 AND project_id = $2
             "#,
         )
@@ -369,12 +401,21 @@ impl Db {
         .bind(input.pr_number.or(existing.pr_number))
         .bind(immutable)
         .bind(&status)
-        .bind(
+        .bind(&adapter_type)
+        .bind(&schema_name)
+        .bind(threads)
+        .bind(sqlx::types::Json(
             input
-                .schema_prefix
-                .as_deref()
-                .or(existing.schema_prefix.as_deref()),
-        )
+                .profile_config
+                .as_ref()
+                .unwrap_or(&existing.profile_config),
+        ))
+        .bind(sqlx::types::Json(
+            input
+                .profile_secrets
+                .as_ref()
+                .unwrap_or(&existing.profile_secrets),
+        ))
         .execute(&self.pool)
         .await?;
 
@@ -402,7 +443,11 @@ impl Db {
                 e.pr_number,
                 e.immutable,
                 e.status,
-                e.schema_prefix,
+                e.adapter_type,
+                e.schema_name,
+                e.threads,
+                e.profile_config,
+                e.profile_secrets,
                 e.metadata
             FROM environments e
             JOIN projects p ON p.id = e.project_id
@@ -571,15 +616,19 @@ impl Db {
                 Some(
                     ReconstructedManifest::write_empty_state(
                         &read_dbt_project_name(&ctx.project_dir),
-                        &read_adapter_type(&ctx.profiles_dir),
+                        &environment.adapter_type,
                     )
                     .await?,
                 )
             } else {
                 None
             });
+        let generated_profiles = build_generated_profiles(&ctx.project_dir, &environment)?;
         let dbt_args = append_invocation_id(
-            append_state_dir(ctx.dbt_args.clone(), reconstructed_manifest.as_ref()),
+            append_profiles_dir(
+                append_state_dir(ctx.dbt_args.clone(), reconstructed_manifest.as_ref()),
+                &generated_profiles,
+            ),
             run_id,
         );
         let args_json = Value::Array(
@@ -721,14 +770,18 @@ impl Db {
                 Some(
                     ReconstructedManifest::write_empty_state(
                         &read_dbt_project_name(&ctx.project_dir),
-                        &read_adapter_type(&ctx.profiles_dir),
+                        &environment.adapter_type,
                     )
                     .await?,
                 )
             } else {
                 None
             });
-        let dbt_args = append_state_dir(ctx.dbt_args.clone(), reconstructed_manifest.as_ref());
+        let generated_profiles = build_generated_profiles(&ctx.project_dir, &environment)?;
+        let dbt_args = append_profiles_dir(
+            append_state_dir(ctx.dbt_args.clone(), reconstructed_manifest.as_ref()),
+            &generated_profiles,
+        );
         let status = self
             .execute_passthrough_command(&config.dbt_path, "ls", &dbt_args, &ctx.project_dir)
             .await?;
@@ -914,7 +967,11 @@ impl Db {
                 e.pr_number,
                 e.immutable,
                 e.status,
-                e.schema_prefix,
+                e.adapter_type,
+                e.schema_name,
+                e.threads,
+                e.profile_config,
+                e.profile_secrets,
                 e.metadata
             FROM environments e
             JOIN projects p ON p.id = e.project_id
@@ -950,7 +1007,11 @@ impl Db {
                 e.pr_number,
                 e.immutable,
                 e.status,
-                e.schema_prefix,
+                e.adapter_type,
+                e.schema_name,
+                e.threads,
+                e.profile_config,
+                e.profile_secrets,
                 e.metadata
             FROM environments e
             JOIN projects p ON p.id = e.project_id
@@ -1693,6 +1754,21 @@ fn append_state_dir(
     args
 }
 
+fn append_profiles_dir(
+    mut args: Vec<OsString>,
+    generated_profiles: &GeneratedProfiles,
+) -> Vec<OsString> {
+    args.push("--profiles-dir".into());
+    args.push(
+        generated_profiles
+            .temp_dir
+            .path()
+            .as_os_str()
+            .to_os_string(),
+    );
+    args
+}
+
 fn spawn_dbt_child(
     dbt_path: &str,
     subcommand: &str,
@@ -1754,6 +1830,8 @@ fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
 
 fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord {
     let metadata: sqlx::types::Json<Value> = row.get("metadata");
+    let profile_config: sqlx::types::Json<Value> = row.get("profile_config");
+    let profile_secrets: sqlx::types::Json<Value> = row.get("profile_secrets");
     EnvironmentRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
@@ -1768,7 +1846,11 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         pr_number: row.get("pr_number"),
         immutable: row.get("immutable"),
         status: row.get("status"),
-        schema_prefix: row.get("schema_prefix"),
+        adapter_type: row.get("adapter_type"),
+        schema_name: row.get("schema_name"),
+        threads: row.get("threads"),
+        profile_config: profile_config.0,
+        profile_secrets: profile_secrets.0,
         metadata: metadata.0,
     }
 }
@@ -1880,6 +1962,25 @@ fn validate_environment_git_state(
     }
 }
 
+fn build_generated_profiles(
+    project_dir: &Path,
+    environment: &EnvironmentRecord,
+) -> AppResult<GeneratedProfiles> {
+    let profile_name = read_dbt_profile_name(project_dir)?;
+    let resolved = resolve_runtime_profile(
+        &profile_name,
+        &environment.slug,
+        &EnvironmentProfileRecord {
+            adapter_type: environment.adapter_type.clone(),
+            schema_name: environment.schema_name.clone(),
+            threads: environment.threads,
+            profile_config: environment.profile_config.clone(),
+            profile_secrets: environment.profile_secrets.clone(),
+        },
+    )?;
+    resolved.generate()
+}
+
 fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
     let output = std::process::Command::new("git")
         .args(args)
@@ -1895,28 +1996,11 @@ fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
     Ok(stdout)
 }
 
-fn read_adapter_type(profiles_dir: &Path) -> String {
-    read_yaml_scalar(&profiles_dir.join("profiles.yml"), "type")
-        .unwrap_or_else(|| "duckdb".to_string())
-}
-
-fn read_yaml_scalar(path: &Path, key: &str) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    content.lines().find_map(|line| {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            return None;
-        }
-        let prefix = format!("{key}:");
-        trimmed
-            .strip_prefix(&prefix)
-            .map(|value| {
-                value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string()
-            })
-            .filter(|value| !value.is_empty())
-    })
+fn read_dbt_profile_name(project_dir: &Path) -> AppResult<String> {
+    let yaml = read_dbt_project_yaml(project_dir)?;
+    yaml.get("profile")
+        .and_then(serde_yaml::Value::as_str)
+        .or_else(|| yaml.get("name").and_then(serde_yaml::Value::as_str))
+        .map(ToString::to_string)
+        .ok_or(AppError::MissingDbtProfile)
 }

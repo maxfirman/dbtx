@@ -114,9 +114,11 @@ pub enum EnvironmentCommand {
     #[command(about = "Create a registered dbtx environment")]
     Create {
         #[arg(long)]
-        project: String,
+        project: Option<String>,
         #[arg(long)]
-        slug: String,
+        slug: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
         #[arg(long, default_value = "persistent")]
         kind: String,
         #[arg(long)]
@@ -132,7 +134,7 @@ pub enum EnvironmentCommand {
         #[arg(long, default_value = "active")]
         status: String,
         #[arg(long)]
-        schema_prefix: Option<String>,
+        schema_name: Option<String>,
     },
     #[command(about = "Update a registered dbtx environment")]
     Update {
@@ -155,7 +157,11 @@ pub enum EnvironmentCommand {
         #[arg(long)]
         status: Option<String>,
         #[arg(long)]
-        schema_prefix: Option<String>,
+        adapter_type: Option<String>,
+        #[arg(long)]
+        schema_name: Option<String>,
+        #[arg(long)]
+        threads: Option<i32>,
     },
     #[command(about = "List registered dbtx environments for a project")]
     List {

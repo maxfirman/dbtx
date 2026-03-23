@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod event;
 mod manifest;
+mod profile;
 
 use clap::Parser;
 use cli::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
@@ -13,6 +14,7 @@ use db::{
     UpdateEnvironmentInput,
 };
 use error::{AppError, AppResult};
+use profile::LocalTargetProfile;
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -244,7 +246,6 @@ async fn handle_project_command(
             } else {
                 db.create_project(input).await?
             };
-            db.ensure_default_environment(&project.project_id).await?;
             print_project(&project);
         }
         ProjectCommand::Update {
@@ -301,6 +302,7 @@ async fn handle_environment_command(
         EnvironmentCommand::Create {
             project,
             slug,
+            target,
             kind,
             baseline,
             git_branch,
@@ -308,8 +310,13 @@ async fn handle_environment_command(
             pr_number,
             immutable,
             status,
-            schema_prefix,
+            schema_name,
         } => {
+            let project = resolve_project_identifier(project, &current_dir)?;
+            let local_profile =
+                LocalTargetProfile::from_local_project(&current_dir, target.as_deref())?;
+            let profile_secrets = local_profile.encrypted_secrets()?;
+            let slug = slug.unwrap_or_else(|| local_profile.target_name.clone());
             let environment = db
                 .create_environment(CreateEnvironmentInput {
                     project,
@@ -321,7 +328,11 @@ async fn handle_environment_command(
                     pr_number,
                     immutable,
                     status,
-                    schema_prefix,
+                    adapter_type: local_profile.adapter_type,
+                    schema_name: schema_name.or(Some(local_profile.schema_name)),
+                    threads: local_profile.threads,
+                    profile_config: local_profile.profile_config,
+                    profile_secrets,
                 })
                 .await?;
             print_environment(&environment);
@@ -336,8 +347,11 @@ async fn handle_environment_command(
             pr_number,
             immutable,
             status,
-            schema_prefix,
+            adapter_type,
+            schema_name,
+            threads,
         } => {
+            let project = resolve_project_identifier(Some(project), &current_dir)?;
             let environment = db
                 .update_environment(UpdateEnvironmentInput {
                     project,
@@ -349,17 +363,23 @@ async fn handle_environment_command(
                     pr_number,
                     immutable,
                     status,
-                    schema_prefix,
+                    adapter_type,
+                    schema_name,
+                    threads,
+                    profile_config: None,
+                    profile_secrets: None,
                 })
                 .await?;
             print_environment(&environment);
         }
         EnvironmentCommand::List { project } => {
+            let project = resolve_project_identifier(Some(project), &current_dir)?;
             for environment in db.list_environments(&project).await? {
                 print_environment(&environment);
             }
         }
         EnvironmentCommand::Show { project, slug } => {
+            let project = resolve_project_identifier(Some(project), &current_dir)?;
             let environment = db.get_environment(&project, &slug).await?;
             print_environment(&environment);
         }
@@ -369,6 +389,7 @@ async fn handle_environment_command(
             source,
             seed_type,
         } => {
+            let project = resolve_project_identifier(Some(project), &current_dir)?;
             db.seed_environment_from(&project, &target, &source, &seed_type)
                 .await?;
             println!(
@@ -395,7 +416,7 @@ fn print_project(project: &ProjectRecord) {
 
 fn print_environment(environment: &EnvironmentRecord) {
     println!(
-        "environment id={} project_pk={} project_id={} project={} slug={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} immutable={} status={} schema_prefix={} metadata={}",
+        "environment id={} project_pk={} project_id={} project={} slug={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} immutable={} status={} adapter_type={} schema_name={} threads={} profile_config={} metadata={}",
         environment.id,
         environment.project_id,
         environment.project_ref,
@@ -418,7 +439,13 @@ fn print_environment(environment: &EnvironmentRecord) {
             .unwrap_or_default(),
         environment.immutable,
         environment.status,
-        environment.schema_prefix.as_deref().unwrap_or(""),
+        environment.adapter_type,
+        environment.schema_name,
+        environment
+            .threads
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        environment.profile_config,
         environment.metadata,
     );
 }
@@ -451,6 +478,13 @@ fn infer_project_defaults(
             .map(ToString::to_string)
             .unwrap_or(relative_project_root(&repo_root, &current_dir)),
     })
+}
+
+fn resolve_project_identifier(project: Option<String>, current_dir: &Path) -> AppResult<String> {
+    project
+        .or_else(|| std::env::var("DBTX_PROJECT_ID").ok())
+        .or_else(|| read_dbtx_project_id(current_dir).ok().flatten())
+        .ok_or(AppError::ProjectIdMissing)
 }
 
 fn read_dbt_project_name_from_root(project_root: &Path) -> AppResult<String> {
