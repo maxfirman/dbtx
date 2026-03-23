@@ -1,4 +1,5 @@
 use crate::error::{AppError, AppResult};
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -21,21 +22,38 @@ pub struct InvocationContext {
     pub dbt_args: Vec<OsString>,
 }
 
-impl RuntimeConfig {
-    pub fn from_env() -> AppResult<Self> {
-        let database_url =
-            env::var("DBTX_DATABASE_URL").map_err(|_| AppError::MissingEnv("DBTX_DATABASE_URL"))?;
-        let dbt_path = env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
-        Ok(Self {
-            database_url,
-            dbt_path,
-        })
-    }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DbtxToml {
+    #[serde(default)]
+    pub project: ProjectConfig,
+    #[serde(default)]
+    pub database: DatabaseConfig,
+}
 
-    pub fn from_optional_database_url(database_url: Option<String>) -> AppResult<Self> {
-        let database_url = database_url
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DatabaseConfig {
+    pub url: Option<String>,
+}
+
+impl RuntimeConfig {
+    pub fn resolve(
+        database_url_override: Option<String>,
+        project_dir: Option<&Path>,
+    ) -> AppResult<Self> {
+        let file_database_url = project_dir
+            .map(read_dbtx_toml)
+            .transpose()?
+            .flatten()
+            .and_then(|config| config.database.url);
+        let database_url = database_url_override
             .or_else(|| env::var("DBTX_DATABASE_URL").ok())
-            .ok_or(AppError::MissingEnv("DBTX_DATABASE_URL"))?;
+            .or(file_database_url)
+            .ok_or(AppError::MissingDatabaseUrl)?;
         let dbt_path = env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
         Ok(Self {
             database_url,
@@ -100,6 +118,52 @@ impl InvocationContext {
     }
 }
 
+pub fn read_dbtx_toml(project_root: &Path) -> AppResult<Option<DbtxToml>> {
+    let path = dbtx_toml_path(project_root);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path)?;
+    Ok(Some(toml::from_str(&content)?))
+}
+
+pub fn read_dbtx_project_id(project_root: &Path) -> AppResult<Option<String>> {
+    Ok(read_dbtx_toml(project_root)?
+        .and_then(|config| config.project.id)
+        .filter(|value| !value.is_empty()))
+}
+
+pub fn write_dbtx_toml(
+    project_root: &Path,
+    project_id: Option<&str>,
+    database_url: Option<&str>,
+    force_project_id: bool,
+) -> AppResult<()> {
+    let path = dbtx_toml_path(project_root);
+    let mut config = read_dbtx_toml(project_root)?.unwrap_or_default();
+
+    if let Some(existing) = config.project.id.as_deref()
+        && !force_project_id
+        && project_id.is_some()
+    {
+        return Err(AppError::ProjectIdAlreadyConfigured(existing.to_string()));
+    }
+
+    if let Some(project_id) = project_id {
+        config.project.id = Some(project_id.to_string());
+    }
+    if let Some(database_url) = database_url {
+        config.database.url = Some(database_url.to_string());
+    }
+
+    std::fs::write(path, toml::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
+pub fn dbtx_toml_path(project_root: &Path) -> PathBuf {
+    project_root.join("dbtx.toml")
+}
+
 fn parse_path_option(args: &[OsString], flag: &str) -> Option<PathBuf> {
     parse_string_option(args, flag).map(PathBuf::from)
 }
@@ -144,9 +208,10 @@ fn absolutize(base: &Path, path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::InvocationContext;
+    use super::{DbtxToml, InvocationContext, read_dbtx_project_id, write_dbtx_toml};
     use crate::error::AppError;
     use std::ffi::OsString;
+    use tempfile::TempDir;
 
     #[test]
     fn derives_context_from_args() {
@@ -177,5 +242,44 @@ mod tests {
         let args = vec![OsString::from("--state"), OsString::from("target/state")];
         let err = InvocationContext::from_args(&args, false).expect_err("state should fail");
         assert!(matches!(err, AppError::UserStateNotAllowed));
+    }
+
+    #[test]
+    fn writes_and_reads_dbtx_toml() {
+        let temp = TempDir::new().expect("temp dir");
+        write_dbtx_toml(
+            temp.path(),
+            Some("prj_123"),
+            Some("postgres://dbtx:dbtx@localhost/dbtx"),
+            false,
+        )
+        .expect("write dbtx.toml");
+        assert_eq!(
+            read_dbtx_project_id(temp.path()).expect("read project id"),
+            Some("prj_123".to_string())
+        );
+        let config = super::read_dbtx_toml(temp.path())
+            .expect("read config")
+            .expect("config exists");
+        assert_eq!(
+            config.database.url.as_deref(),
+            Some("postgres://dbtx:dbtx@localhost/dbtx")
+        );
+    }
+
+    #[test]
+    fn serializes_expected_shape() {
+        let config = DbtxToml {
+            project: super::ProjectConfig {
+                id: Some("prj_123".to_string()),
+            },
+            database: super::DatabaseConfig {
+                url: Some("postgres://localhost/dbtx".to_string()),
+            },
+        };
+        let rendered = toml::to_string_pretty(&config).expect("render toml");
+        assert!(rendered.contains("[project]"));
+        assert!(rendered.contains("id = \"prj_123\""));
+        assert!(rendered.contains("[database]"));
     }
 }

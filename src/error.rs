@@ -2,8 +2,6 @@ use std::io;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("missing required environment variable {0}")]
-    MissingEnv(&'static str),
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("database error: {0}")]
@@ -14,6 +12,10 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("yaml error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    #[error("toml error: {0}")]
+    TomlDe(#[from] toml::de::Error),
+    #[error("toml serialization error: {0}")]
+    TomlSer(#[from] toml::ser::Error),
     #[error("dbt invocation failed with exit code {0}")]
     DbtFailed(i32),
     #[error("missing manifest at {0}")]
@@ -27,11 +29,15 @@ pub enum AppError {
     #[error("failed to infer git remote origin url from current repository")]
     GitRemoteNotFound,
     #[error(
-        "dbtx project id is already configured in dbt_project.yml: {0}. Use `dbtx project init --force` to overwrite it."
+        "dbtx project id is already configured in dbtx.toml: {0}. Use `dbtx project init --force` to overwrite it."
     )]
     ProjectIdAlreadyConfigured(String),
-    #[error("dbtx project id is missing from dbt_project.yml. Run `dbtx project init` first.")]
+    #[error("dbtx project id is missing from dbtx.toml. Run `dbtx project init` first.")]
     ProjectIdMissing,
+    #[error(
+        "database url is not configured. Set --database-url, DBTX_DATABASE_URL, or database.url in dbtx.toml."
+    )]
+    MissingDatabaseUrl,
     #[error(
         "project id '{0}' was not found in the database. Run `dbtx project init --force` to re-initialize the project or `dbtx project update` to sync it."
     )]
@@ -65,7 +71,6 @@ pub type AppResult<T> = Result<T, AppError>;
 impl AppError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::MissingEnv(_) => 2,
             Self::DbtFailed(code) => *code,
             _ => 1,
         }

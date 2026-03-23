@@ -1,4 +1,4 @@
-use crate::config::{InvocationContext, RuntimeConfig};
+use crate::config::{InvocationContext, RuntimeConfig, read_dbtx_project_id};
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
@@ -1741,18 +1741,6 @@ fn read_dbt_project_name(project_dir: &Path) -> String {
                 .to_string_lossy()
                 .into_owned()
         })
-}
-
-fn read_dbtx_project_id(project_dir: &Path) -> AppResult<Option<String>> {
-    let yaml = read_dbt_project_yaml(project_dir)?;
-    Ok(yaml
-        .get("vars")
-        .and_then(serde_yaml::Value::as_mapping)
-        .and_then(|vars| vars.get(serde_yaml::Value::String("dbtx".to_string())))
-        .and_then(serde_yaml::Value::as_mapping)
-        .and_then(|dbtx| dbtx.get(serde_yaml::Value::String("project_id".to_string())))
-        .and_then(serde_yaml::Value::as_str)
-        .map(ToString::to_string))
 }
 
 fn read_dbt_project_yaml(project_dir: &Path) -> AppResult<serde_yaml::Value> {

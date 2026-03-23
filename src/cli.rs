@@ -6,6 +6,8 @@ use uuid::Uuid;
 #[command(name = "dbtx")]
 #[command(about = "dbt-compatible wrapper with state persistence")]
 pub struct Cli {
+    #[arg(long, global = true)]
+    pub database_url: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -73,10 +75,7 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum StateCommand {
     #[command(about = "Initialize the dbtx database schema")]
-    Init {
-        #[arg(long, env = "DBTX_DATABASE_URL")]
-        database_url: Option<String>,
-    },
+    Init,
 }
 
 #[derive(Debug, Subcommand)]
@@ -192,15 +191,14 @@ mod tests {
     fn state_init_accepts_database_url() {
         let cli = Cli::parse_from([
             "dbtx",
-            "state",
-            "init",
             "--database-url",
             "postgres://example",
+            "state",
+            "init",
         ]);
+        assert_eq!(cli.database_url.as_deref(), Some("postgres://example"));
         match cli.command {
-            Command::State(StateCommand::Init { database_url }) => {
-                assert_eq!(database_url.as_deref(), Some("postgres://example"));
-            }
+            Command::State(StateCommand::Init) => {}
             _ => panic!("expected state init command"),
         }
     }

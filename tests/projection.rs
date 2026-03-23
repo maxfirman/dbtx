@@ -953,12 +953,14 @@ impl TempProjectRepo {
 }
 
 fn read_project_id_from_dbt_project(project_dir: &Path) -> String {
-    let content =
-        fs::read_to_string(project_dir.join("dbt_project.yml")).expect("read dbt project");
-    content
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("project_id:").map(str::trim))
-        .expect("project id line")
+    let content = fs::read_to_string(project_dir.join("dbtx.toml")).expect("read dbtx config");
+    let config: toml::Value = toml::from_str(&content).expect("parse dbtx config");
+    config
+        .get("project")
+        .and_then(toml::Value::as_table)
+        .and_then(|table| table.get("id"))
+        .and_then(toml::Value::as_str)
+        .expect("project id")
         .to_string()
 }
 

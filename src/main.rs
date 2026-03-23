@@ -7,7 +7,7 @@ mod manifest;
 
 use clap::Parser;
 use cli::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
-use config::RuntimeConfig;
+use config::{RuntimeConfig, read_dbtx_project_id, write_dbtx_toml};
 use db::{
     CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, ProjectRecord,
     UpdateEnvironmentInput,
@@ -31,25 +31,32 @@ async fn run() -> AppResult<()> {
 
     match cli.command {
         Command::State(state_command) => match state_command {
-            StateCommand::Init { database_url } => {
-                let _db = connect_initialized_db(&RuntimeConfig::from_optional_database_url(
-                    database_url,
+            StateCommand::Init => {
+                let current_dir = std::env::current_dir()?;
+                let _db = connect_initialized_db(&RuntimeConfig::resolve(
+                    cli.database_url,
+                    Some(&current_dir),
                 )?)
                 .await?;
                 println!("Initialized dbtx database schema.");
             }
         },
-        Command::Project(project_command) => handle_project_command(project_command).await?,
-        Command::Environment(environment_command) => {
-            handle_environment_command(environment_command).await?
+        Command::Project(project_command) => {
+            handle_project_command(project_command, cli.database_url).await?
         }
-        Command::Build { args } => handle_persisting_command("build", args).await?,
-        Command::Run { args } => handle_persisting_command("run", args).await?,
-        Command::Ls { args } => handle_passthrough_command("ls", args).await?,
-        Command::Test { args } => handle_persisting_command("test", args).await?,
-        Command::Seed { args } => handle_persisting_command("seed", args).await?,
+        Command::Environment(environment_command) => {
+            handle_environment_command(environment_command, cli.database_url).await?
+        }
+        Command::Build { args } => {
+            handle_persisting_command("build", args, cli.database_url).await?
+        }
+        Command::Run { args } => handle_persisting_command("run", args, cli.database_url).await?,
+        Command::Ls { args } => handle_passthrough_command("ls", args, cli.database_url).await?,
+        Command::Test { args } => handle_persisting_command("test", args, cli.database_url).await?,
+        Command::Seed { args } => handle_persisting_command("seed", args, cli.database_url).await?,
         Command::Replay { run_id } => {
-            let config = RuntimeConfig::from_env()?;
+            let current_dir = std::env::current_dir()?;
+            let config = RuntimeConfig::resolve(cli.database_url, Some(&current_dir))?;
             let db = connect_db(&config).await?;
             let updated = db.replay_projection(run_id).await?;
             println!("Rebuilt current state for {updated} nodes.");
@@ -72,20 +79,32 @@ fn exit_with_dbt_help(subcommand: &str) -> AppResult<()> {
     std::process::exit(status.code().unwrap_or(0));
 }
 
-async fn handle_persisting_command(subcommand: &str, args: Vec<OsString>) -> AppResult<()> {
+async fn handle_persisting_command(
+    subcommand: &str,
+    args: Vec<OsString>,
+    database_url_override: Option<String>,
+) -> AppResult<()> {
     if is_help_request(&args) {
         exit_with_dbt_help(subcommand)?;
     }
-    let config = RuntimeConfig::from_env()?;
+    let ctx = config::InvocationContext::from_args(&args, false)?;
+    let project_dir = ctx.project_dir;
+    let config = RuntimeConfig::resolve(database_url_override, Some(&project_dir))?;
     let db = connect_initialized_db(&config).await?;
     db.persisting_invocation(subcommand, &config, &args).await
 }
 
-async fn handle_passthrough_command(subcommand: &str, args: Vec<OsString>) -> AppResult<()> {
+async fn handle_passthrough_command(
+    subcommand: &str,
+    args: Vec<OsString>,
+    database_url_override: Option<String>,
+) -> AppResult<()> {
     if is_help_request(&args) {
         exit_with_dbt_help(subcommand)?;
     }
-    let config = RuntimeConfig::from_env()?;
+    let ctx = config::InvocationContext::from_args(&args, false)?;
+    let project_dir = ctx.project_dir;
+    let config = RuntimeConfig::resolve(database_url_override, Some(&project_dir))?;
     let db = connect_db(&config).await?;
     db.ls_invocation(&config, &args).await
 }
@@ -100,8 +119,12 @@ async fn connect_initialized_db(config: &RuntimeConfig) -> AppResult<Db> {
     Ok(db)
 }
 
-async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
-    let config = RuntimeConfig::from_env()?;
+async fn handle_project_command(
+    command: ProjectCommand,
+    database_url_override: Option<String>,
+) -> AppResult<()> {
+    let current_dir = std::env::current_dir()?;
+    let config = RuntimeConfig::resolve(database_url_override, Some(&current_dir))?;
     let db = connect_initialized_db(&config).await?;
     match command {
         ProjectCommand::Init {
@@ -110,7 +133,6 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
             default_branch,
             force,
         } => {
-            let current_dir = std::env::current_dir()?;
             let inferred = infer_project_defaults(
                 git_repo_url.as_deref(),
                 project_root.as_deref(),
@@ -125,7 +147,12 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
                 ));
             }
             let project_id = format!("prj_{}", Uuid::new_v4().simple());
-            write_dbtx_project_id(&current_dir, &project_id, force)?;
+            write_dbtx_toml(
+                &current_dir,
+                Some(&project_id),
+                Some(&config.database_url),
+                force,
+            )?;
             let input = CreateProjectInput {
                 project_id,
                 project_name: inferred.project_name,
@@ -147,7 +174,6 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
             project_root,
             default_branch,
         } => {
-            let current_dir = std::env::current_dir()?;
             let project_id =
                 read_dbtx_project_id(&current_dir)?.ok_or(AppError::ProjectIdMissing)?;
             let inferred = infer_project_defaults(
@@ -186,8 +212,12 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
     Ok(())
 }
 
-async fn handle_environment_command(command: EnvironmentCommand) -> AppResult<()> {
-    let config = RuntimeConfig::from_env()?;
+async fn handle_environment_command(
+    command: EnvironmentCommand,
+    database_url_override: Option<String>,
+) -> AppResult<()> {
+    let current_dir = std::env::current_dir()?;
+    let config = RuntimeConfig::resolve(database_url_override, Some(&current_dir))?;
     let db = connect_initialized_db(&config).await?;
     match command {
         EnvironmentCommand::Create {
@@ -376,62 +406,6 @@ fn relative_project_root(repo_root: &Path, project_root: &Path) -> String {
     }
 }
 
-fn read_dbtx_project_id(project_root: &Path) -> AppResult<Option<String>> {
-    let yaml = read_dbt_project_yaml(project_root)?;
-    Ok(yaml
-        .get("vars")
-        .and_then(serde_yaml::Value::as_mapping)
-        .and_then(|vars| vars.get(serde_yaml::Value::String("dbtx".to_string())))
-        .and_then(serde_yaml::Value::as_mapping)
-        .and_then(|dbtx| dbtx.get(serde_yaml::Value::String("project_id".to_string())))
-        .and_then(serde_yaml::Value::as_str)
-        .map(ToString::to_string))
-}
-
-fn write_dbtx_project_id(project_root: &Path, project_id: &str, force: bool) -> AppResult<()> {
-    let existing = read_dbtx_project_id(project_root)?;
-    if let Some(existing) = existing
-        && !force
-    {
-        return Err(AppError::ProjectIdAlreadyConfigured(existing));
-    }
-
-    let path = project_root.join("dbt_project.yml");
-    let mut yaml = read_dbt_project_yaml(project_root)?;
-    let root = yaml.as_mapping_mut().ok_or(AppError::NotDbtProjectRoot)?;
-
-    let vars_key = serde_yaml::Value::String("vars".to_string());
-    if !root.contains_key(&vars_key) {
-        root.insert(
-            vars_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-    let vars = root
-        .get_mut(&vars_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .ok_or(AppError::NotDbtProjectRoot)?;
-
-    let dbtx_key = serde_yaml::Value::String("dbtx".to_string());
-    if !vars.contains_key(&dbtx_key) {
-        vars.insert(
-            dbtx_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-    let dbtx = vars
-        .get_mut(&dbtx_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .ok_or(AppError::NotDbtProjectRoot)?;
-    dbtx.insert(
-        serde_yaml::Value::String("project_id".to_string()),
-        serde_yaml::Value::String(project_id.to_string()),
-    );
-
-    std::fs::write(path, serde_yaml::to_string(&yaml)?)?;
-    Ok(())
-}
-
 fn read_dbt_project_yaml(project_root: &Path) -> AppResult<serde_yaml::Value> {
     let path = project_root.join("dbt_project.yml");
     if !path.is_file() {
@@ -458,10 +432,8 @@ fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        infer_project_defaults, read_dbt_project_name_from_root, read_dbtx_project_id,
-        relative_project_root, write_dbtx_project_id,
-    };
+    use super::{infer_project_defaults, read_dbt_project_name_from_root, relative_project_root};
+    use crate::config::{read_dbtx_project_id, write_dbtx_toml};
     use crate::error::AppError;
     use std::process::Command;
     use tempfile::TempDir;
@@ -517,7 +489,13 @@ mod tests {
         )
         .expect("dbt project");
 
-        write_dbtx_project_id(temp.path(), "prj_123", false).expect("write project id");
+        write_dbtx_toml(
+            temp.path(),
+            Some("prj_123"),
+            Some("postgres://example/dbtx"),
+            false,
+        )
+        .expect("write project id");
         assert_eq!(
             read_dbtx_project_id(temp.path()).expect("read project id"),
             Some("prj_123".to_string())
@@ -527,13 +505,21 @@ mod tests {
     #[test]
     fn write_dbtx_project_id_overwrites_existing_nested_value() {
         let temp = TempDir::new().expect("temp dir");
-        std::fs::write(
-            temp.path().join("dbt_project.yml"),
-            "name: sample\nvars:\n  dbtx:\n    project_id: prj_old\n",
+        std::fs::write(temp.path().join("dbt_project.yml"), "name: sample\n").expect("dbt project");
+        write_dbtx_toml(
+            temp.path(),
+            Some("prj_old"),
+            Some("postgres://example/dbtx"),
+            false,
         )
-        .expect("dbt project");
-
-        write_dbtx_project_id(temp.path(), "prj_new", true).expect("overwrite project id");
+        .expect("initial config");
+        write_dbtx_toml(
+            temp.path(),
+            Some("prj_new"),
+            Some("postgres://example/dbtx"),
+            true,
+        )
+        .expect("overwrite project id");
         assert_eq!(
             read_dbtx_project_id(temp.path()).expect("read project id"),
             Some("prj_new".to_string())

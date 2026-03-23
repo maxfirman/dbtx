@@ -972,11 +972,14 @@ impl RealProject {
     }
 
     fn project_id(&self) -> String {
-        fs::read_to_string(self.path().join("dbt_project.yml"))
-            .expect("read dbt_project")
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("project_id:").map(str::trim))
-            .expect("project id line")
+        let content = fs::read_to_string(self.path().join("dbtx.toml")).expect("read dbtx config");
+        let config: toml::Value = toml::from_str(&content).expect("parse dbtx config");
+        config
+            .get("project")
+            .and_then(toml::Value::as_table)
+            .and_then(|table| table.get("id"))
+            .and_then(toml::Value::as_str)
+            .expect("project id")
             .to_string()
     }
 
@@ -1242,7 +1245,7 @@ fn jaffle_fixture_dir() -> PathBuf {
 }
 
 fn clean_runtime_artifacts(project_dir: &Path) {
-    for entry in ["target", "logs", "warehouse.duckdb"] {
+    for entry in ["target", "logs", "warehouse.duckdb", "dbtx.toml"] {
         let path = project_dir.join(entry);
         if path.is_dir() {
             fs::remove_dir_all(path).expect("remove dir");
@@ -1250,36 +1253,6 @@ fn clean_runtime_artifacts(project_dir: &Path) {
             fs::remove_file(path).expect("remove file");
         }
     }
-
-    let project_file = project_dir.join("dbt_project.yml");
-    let content = fs::read_to_string(&project_file).expect("read dbt_project");
-    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&content).expect("parse dbt_project");
-    if let Some(root) = yaml.as_mapping_mut() {
-        let vars_key = serde_yaml::Value::String("vars".to_string());
-        if let Some(vars) = root
-            .get_mut(&vars_key)
-            .and_then(serde_yaml::Value::as_mapping_mut)
-        {
-            let dbtx_key = serde_yaml::Value::String("dbtx".to_string());
-            if let Some(dbtx) = vars
-                .get_mut(&dbtx_key)
-                .and_then(serde_yaml::Value::as_mapping_mut)
-            {
-                dbtx.remove(serde_yaml::Value::String("project_id".to_string()));
-                if dbtx.is_empty() {
-                    vars.remove(&dbtx_key);
-                }
-            }
-            if vars.is_empty() {
-                root.remove(&vars_key);
-            }
-        }
-    }
-    fs::write(
-        project_file,
-        serde_yaml::to_string(&yaml).expect("serialize dbt_project"),
-    )
-    .expect("write dbt_project");
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) {
