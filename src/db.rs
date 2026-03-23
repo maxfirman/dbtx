@@ -1,4 +1,4 @@
-use crate::config::{InvocationContext, RuntimeConfig, read_dbtx_project_id};
+use crate::config::read_dbtx_project_id;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
@@ -14,7 +14,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use uuid::Uuid;
 
@@ -113,22 +112,32 @@ pub struct UpdateEnvironmentInput {
 }
 
 #[derive(Debug, Clone)]
-struct GitState {
-    branch: Option<String>,
-    commit_sha: Option<String>,
-    repo_url: Option<String>,
+pub(crate) struct GitState {
+    pub(crate) branch: Option<String>,
+    pub(crate) commit_sha: Option<String>,
+    pub(crate) repo_url: Option<String>,
 }
 
-struct RunFinalization<'a> {
-    run_id: Uuid,
-    project_id: i64,
-    environment_id: i64,
-    subcommand: &'a str,
-    dbt_version: Option<&'a str>,
-    exit_code: i32,
-    terminal_status: &'a str,
-    manifest: Option<&'a ManifestSnapshot>,
-    promote_base_manifest: bool,
+pub(crate) struct RunFinalization<'a> {
+    pub(crate) run_id: Uuid,
+    pub(crate) project_id: i64,
+    pub(crate) environment_id: i64,
+    pub(crate) subcommand: &'a str,
+    pub(crate) dbt_version: Option<&'a str>,
+    pub(crate) exit_code: i32,
+    pub(crate) terminal_status: &'a str,
+    pub(crate) manifest: Option<&'a ManifestSnapshot>,
+    pub(crate) promote_base_manifest: bool,
+}
+
+pub(crate) struct RunStart<'a> {
+    pub(crate) run_id: Uuid,
+    pub(crate) project: &'a ProjectRecord,
+    pub(crate) environment: &'a EnvironmentRecord,
+    pub(crate) subcommand: &'a str,
+    pub(crate) args_json: Value,
+    pub(crate) is_full_graph_run: bool,
+    pub(crate) git_state: &'a GitState,
 }
 
 impl Db {
@@ -514,6 +523,38 @@ impl Db {
             .await
     }
 
+    pub(crate) async fn insert_run_started(&self, run: RunStart<'_>) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO runs (
+                run_id, project_id, environment_id, dbt_invocation_id, command, args, is_full_graph_run,
+                git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref
+            )
+            VALUES ($1, $2, $3, $1, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+        )
+        .bind(run.run_id)
+        .bind(run.project.id)
+        .bind(run.environment.id)
+        .bind(run.subcommand)
+        .bind(run.args_json)
+        .bind(run.is_full_graph_run)
+        .bind(run.git_state.branch.as_deref())
+        .bind(run.git_state.commit_sha.as_deref())
+        .bind(
+            run.git_state
+                .repo_url
+                .as_deref()
+                .or(run.project.git_repo_url.as_deref()),
+        )
+        .bind(run.project.project_root.as_deref())
+        .bind(&run.project.project_name)
+        .bind(&run.project.project_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn seed_environment_from_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -623,202 +664,6 @@ impl Db {
         Ok(())
     }
 
-    pub async fn persisting_invocation(
-        &self,
-        subcommand: &str,
-        config: &RuntimeConfig,
-        incoming_args: &[OsString],
-    ) -> AppResult<()> {
-        let ctx = InvocationContext::from_args(incoming_args, true)?;
-        let project = self.resolve_local_project(&ctx.project_dir).await?;
-        let git_state = read_git_state(&ctx.project_dir);
-        let environment = self
-            .get_environment_by_project_id(project.id, &project.project_id, &ctx.environment_slug)
-            .await?;
-        validate_environment_git_state(&project, &environment, &git_state)?;
-        let run_id = Uuid::new_v4();
-        let reconstructed_manifest = self
-            .load_reconstructed_manifest(project.id, environment.id)
-            .await?
-            .or(if ctx.wants_state_modified {
-                Some(
-                    ReconstructedManifest::write_empty_state(
-                        &read_dbt_project_name(&ctx.project_dir),
-                        &environment.adapter_type,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            });
-        let generated_profiles = build_generated_profiles(&ctx.project_dir, &environment)?;
-        let dbt_args = append_invocation_id(
-            append_profiles_dir(
-                append_state_dir(ctx.dbt_args.clone(), reconstructed_manifest.as_ref()),
-                &generated_profiles,
-            ),
-            run_id,
-        );
-        let args_json = Value::Array(
-            dbt_args
-                .iter()
-                .map(|value| Value::String(value.to_string_lossy().into_owned()))
-                .collect(),
-        );
-        let project_id = project.id;
-        let environment_id = environment.id;
-
-        sqlx::query(
-            r#"
-            INSERT INTO runs (
-                run_id, project_id, environment_id, dbt_invocation_id, command, args, is_full_graph_run,
-                git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref
-            )
-            VALUES ($1, $2, $3, $1, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            "#,
-        )
-        .bind(run_id)
-        .bind(project_id)
-        .bind(environment_id)
-        .bind(subcommand)
-        .bind(args_json)
-        .bind(ctx.is_full_graph_run)
-        .bind(git_state.branch.as_deref())
-        .bind(git_state.commit_sha.as_deref())
-        .bind(git_state.repo_url.as_deref().or(project.git_repo_url.as_deref()))
-        .bind(project.project_root.as_deref())
-        .bind(&project.project_name)
-        .bind(&project.project_id)
-        .execute(&self.pool)
-        .await?;
-
-        let mut child =
-            match spawn_dbt_child(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir) {
-                Ok(child) => child,
-                Err(err) => {
-                    self.mark_run_finished(run_id, None, 1, "wrapper_failed")
-                        .await?;
-                    return Err(err);
-                }
-            };
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stdout")))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stderr")))?;
-
-        let stderr_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Some(line) = reader.next_line().await? {
-                eprintln!("{line}");
-            }
-            Result::<(), std::io::Error>::Ok(())
-        });
-
-        let mut reader = BufReader::new(stdout).lines();
-        let mut sequence_no: i64 = 0;
-        let mut dbt_version: Option<String> = None;
-        while let Some(line) = reader.next_line().await? {
-            sequence_no += 1;
-            if let Some(event) = LogEvent::parse(&line) {
-                if let Some(rendered) = event.render_text_line() {
-                    println!("{rendered}");
-                }
-                if dbt_version.is_none() && event.info.name == "MainReportVersion" {
-                    dbt_version = event
-                        .data
-                        .get("version")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string);
-                }
-                self.persist_log_event(run_id, project_id, environment_id, sequence_no, &event)
-                    .await?;
-            } else {
-                println!("{line}");
-                self.persist_raw_line(run_id, sequence_no, &line).await?;
-            }
-        }
-
-        let status = child.wait().await?;
-        stderr_handle.await.map_err(|err| {
-            AppError::Io(std::io::Error::other(format!("stderr task failed: {err}")))
-        })??;
-
-        let manifest_path = ctx.target_path.join("manifest.json");
-        let manifest_result = ManifestSnapshot::from_path(&manifest_path).await;
-        let terminal_status = if status.success() {
-            "success"
-        } else {
-            "failed"
-        };
-        let exit_code = status.code().unwrap_or(1);
-
-        self.finalize_run(RunFinalization {
-            run_id,
-            project_id,
-            environment_id,
-            subcommand,
-            dbt_version: dbt_version.as_deref(),
-            exit_code,
-            terminal_status,
-            manifest: manifest_result.ok().as_ref(),
-            promote_base_manifest: ctx.is_full_graph_run && status.success(),
-        })
-        .await?;
-
-        if status.success() {
-            Ok(())
-        } else {
-            Err(AppError::DbtFailed(exit_code))
-        }
-    }
-
-    pub async fn ls_invocation(
-        &self,
-        config: &RuntimeConfig,
-        incoming_args: &[OsString],
-    ) -> AppResult<()> {
-        let ctx = InvocationContext::from_args(incoming_args, false)?;
-        let project = self.resolve_local_project(&ctx.project_dir).await?;
-        let git_state = read_git_state(&ctx.project_dir);
-        let environment = self
-            .get_environment_by_project_id(project.id, &project.project_id, &ctx.environment_slug)
-            .await?;
-        validate_environment_git_state(&project, &environment, &git_state)?;
-        let reconstructed_manifest = self
-            .load_reconstructed_manifest(project.id, environment.id)
-            .await?
-            .or(if ctx.wants_state_modified {
-                Some(
-                    ReconstructedManifest::write_empty_state(
-                        &read_dbt_project_name(&ctx.project_dir),
-                        &environment.adapter_type,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            });
-        let generated_profiles = build_generated_profiles(&ctx.project_dir, &environment)?;
-        let dbt_args = append_profiles_dir(
-            append_state_dir(ctx.dbt_args.clone(), reconstructed_manifest.as_ref()),
-            &generated_profiles,
-        );
-        let status = self
-            .execute_passthrough_command(&config.dbt_path, "ls", &dbt_args, &ctx.project_dir)
-            .await?;
-
-        if status.success() {
-            Ok(())
-        } else {
-            Err(AppError::DbtFailed(status.code().unwrap_or(1)))
-        }
-    }
-
     pub async fn replay_projection(&self, run_id: Uuid) -> AppResult<u64> {
         let row = sqlx::query(
             r#"
@@ -842,14 +687,14 @@ impl Db {
             .await
     }
 
-    async fn resolve_local_project(&self, project_dir: &Path) -> AppResult<ProjectRecord> {
+    pub(crate) async fn resolve_local_project(&self, project_dir: &Path) -> AppResult<ProjectRecord> {
         let project_id = read_dbtx_project_id(project_dir)?.ok_or(AppError::ProjectIdMissing)?;
         let project = self.get_project_by_project_id(&project_id).await?;
         validate_project_record(&project, project_dir)?;
         Ok(project)
     }
 
-    async fn finalize_run(&self, finalization: RunFinalization<'_>) -> AppResult<()> {
+    pub(crate) async fn finalize_run(&self, finalization: RunFinalization<'_>) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
         self.mark_run_finished_in_tx(
             &mut tx,
@@ -918,7 +763,7 @@ impl Db {
         Ok(())
     }
 
-    async fn mark_run_finished(
+    pub(crate) async fn mark_run_finished(
         &self,
         run_id: Uuid,
         dbt_version: Option<&str>,
@@ -1093,7 +938,7 @@ impl Db {
         Ok(environment_record_from_row(&row))
     }
 
-    async fn persist_log_event(
+    pub(crate) async fn persist_log_event(
         &self,
         run_id: Uuid,
         project_id: i64,
@@ -1261,7 +1106,7 @@ impl Db {
         Ok(())
     }
 
-    async fn persist_raw_line(&self, run_id: Uuid, sequence_no: i64, line: &str) -> AppResult<()> {
+    pub(crate) async fn persist_raw_line(&self, run_id: Uuid, sequence_no: i64, line: &str) -> AppResult<()> {
         sqlx::query(
             r#"
             INSERT INTO run_events (run_id, sequence_no, event_name, event_code, unique_id, payload)
@@ -1667,7 +1512,7 @@ impl Db {
         Ok(inserted.rows_affected())
     }
 
-    async fn load_reconstructed_manifest(
+    pub(crate) async fn load_reconstructed_manifest(
         &self,
         project_id: i64,
         environment_id: i64,
@@ -1721,51 +1566,6 @@ impl Db {
         let reconstructed = ManifestSnapshot::reconstruct(base_manifest.0, &promoted_nodes);
         Ok(Some(ReconstructedManifest::write(&reconstructed).await?))
     }
-
-    async fn execute_passthrough_command(
-        &self,
-        dbt_path: &str,
-        subcommand: &str,
-        args: &[OsString],
-        project_dir: &std::path::Path,
-    ) -> AppResult<std::process::ExitStatus> {
-        let mut child = spawn_dbt_child(dbt_path, subcommand, args, project_dir)?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stdout")))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stderr")))?;
-
-        let stdout_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Some(line) = reader.next_line().await? {
-                println!("{line}");
-            }
-            Result::<(), std::io::Error>::Ok(())
-        });
-
-        let stderr_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Some(line) = reader.next_line().await? {
-                eprintln!("{line}");
-            }
-            Result::<(), std::io::Error>::Ok(())
-        });
-
-        let status = child.wait().await?;
-        stdout_handle.await.map_err(|err| {
-            AppError::Io(std::io::Error::other(format!("stdout task failed: {err}")))
-        })??;
-        stderr_handle.await.map_err(|err| {
-            AppError::Io(std::io::Error::other(format!("stderr task failed: {err}")))
-        })??;
-
-        Ok(status)
-    }
 }
 
 impl Db {
@@ -1799,13 +1599,13 @@ impl Db {
     }
 }
 
-fn append_invocation_id(mut args: Vec<OsString>, run_id: Uuid) -> Vec<OsString> {
+pub(crate) fn append_invocation_id(mut args: Vec<OsString>, run_id: Uuid) -> Vec<OsString> {
     args.push("--invocation-id".into());
     args.push(run_id.to_string().into());
     args
 }
 
-fn append_state_dir(
+pub(crate) fn append_state_dir(
     mut args: Vec<OsString>,
     reconstructed_manifest: Option<&ReconstructedManifest>,
 ) -> Vec<OsString> {
@@ -1822,7 +1622,7 @@ fn append_state_dir(
     args
 }
 
-fn append_profiles_dir(
+pub(crate) fn append_profiles_dir(
     mut args: Vec<OsString>,
     generated_profiles: &GeneratedProfiles,
 ) -> Vec<OsString> {
@@ -1837,7 +1637,7 @@ fn append_profiles_dir(
     args
 }
 
-fn spawn_dbt_child(
+pub(crate) fn spawn_dbt_child(
     dbt_path: &str,
     subcommand: &str,
     args: &[OsString],
@@ -1924,7 +1724,7 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
     }
 }
 
-fn read_dbt_project_name(project_dir: &Path) -> String {
+pub(crate) fn read_dbt_project_name(project_dir: &Path) -> String {
     read_dbt_project_yaml(project_dir)
         .ok()
         .and_then(|yaml| {
@@ -1968,7 +1768,7 @@ fn relative_project_root(repo_root: &Path, project_root: &Path) -> String {
     }
 }
 
-fn validate_project_record(project: &ProjectRecord, project_dir: &Path) -> AppResult<()> {
+pub(crate) fn validate_project_record(project: &ProjectRecord, project_dir: &Path) -> AppResult<()> {
     let repo_root = git_repo_root(project_dir)?;
     let current_name = read_dbt_project_name(project_dir);
     let current_git_repo_url = git_remote_origin_url(&repo_root)?;
@@ -1987,7 +1787,7 @@ fn validate_project_record(project: &ProjectRecord, project_dir: &Path) -> AppRe
     }
 }
 
-fn read_git_state(project_dir: &Path) -> GitState {
+pub(crate) fn read_git_state(project_dir: &Path) -> GitState {
     let repo_root = git_repo_root(project_dir).ok();
     let repo_url = repo_root
         .as_deref()
@@ -2007,7 +1807,7 @@ fn read_git_state(project_dir: &Path) -> GitState {
     }
 }
 
-fn validate_environment_git_state(
+pub(crate) fn validate_environment_git_state(
     project: &ProjectRecord,
     environment: &EnvironmentRecord,
     git_state: &GitState,
@@ -2031,7 +1831,7 @@ fn validate_environment_git_state(
     }
 }
 
-fn build_generated_profiles(
+pub(crate) fn build_generated_profiles(
     project_dir: &Path,
     environment: &EnvironmentRecord,
 ) -> AppResult<GeneratedProfiles> {

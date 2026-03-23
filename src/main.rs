@@ -5,21 +5,21 @@ mod error;
 mod event;
 mod manifest;
 mod profile;
+mod services;
 
 use clap::Parser;
 use cli::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
-use config::{RuntimeConfig, read_dbtx_project_id, write_dbtx_toml};
-use db::{
-    CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, ProjectRecord,
-    UpdateEnvironmentInput,
+use config::RuntimeConfig;
+use db::{Db, EnvironmentRecord, ProjectRecord};
+use error::AppResult;
+use services::{
+    EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
+    InvocationObserver, InvocationRequest, InvocationService, ProjectInitRequest, ProjectService,
+    ProjectUpdateRequest,
 };
-use error::{AppError, AppResult};
-use profile::LocalTargetProfile;
 use std::ffi::OsString;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() {
@@ -49,19 +49,25 @@ async fn run() -> AppResult<()> {
             handle_environment_command(environment_command, cli.database_url).await?
         }
         Command::Build { args } => {
-            handle_persisting_command("build", args, cli.database_url).await?
+            handle_persisting_command(InvocationCommand::Build, args, cli.database_url).await?
         }
-        Command::Run { args } => handle_persisting_command("run", args, cli.database_url).await?,
-        Command::Ls { args } => handle_passthrough_command("ls", args, cli.database_url).await?,
-        Command::Test { args } => handle_persisting_command("test", args, cli.database_url).await?,
-        Command::Seed { args } => handle_persisting_command("seed", args, cli.database_url).await?,
+        Command::Run { args } => {
+            handle_persisting_command(InvocationCommand::Run, args, cli.database_url).await?
+        }
+        Command::Ls { args } => handle_passthrough_command(args, cli.database_url).await?,
+        Command::Test { args } => {
+            handle_persisting_command(InvocationCommand::Test, args, cli.database_url).await?
+        }
+        Command::Seed { args } => {
+            handle_persisting_command(InvocationCommand::Seed, args, cli.database_url).await?
+        }
         Command::Replay { run_id } => {
             let current_dir = std::env::current_dir()?;
             let config = RuntimeConfig::resolve(cli.database_url, Some(&current_dir))?;
             let db = connect_db(&config).await?;
-            db.require_current_schema().await?;
-            let updated = db.replay_projection(run_id).await?;
-            println!("Rebuilt current state for {updated} nodes.");
+            let service = InvocationService::new(&db);
+            let updated = service.replay(run_id).await?;
+            println!("Rebuilt current state for {} nodes.", updated.updated_nodes);
         }
     }
 
@@ -161,35 +167,56 @@ fn exit_with_dbt_help(subcommand: &str) -> AppResult<()> {
 }
 
 async fn handle_persisting_command(
-    subcommand: &str,
+    command: InvocationCommand,
     args: Vec<OsString>,
     database_url_override: Option<String>,
 ) -> AppResult<()> {
     if is_help_request(&args) {
-        exit_with_dbt_help(subcommand)?;
+        exit_with_dbt_help(command.as_str())?;
     }
     let ctx = config::InvocationContext::from_args(&args, false)?;
     let project_dir = ctx.project_dir;
     let config = RuntimeConfig::resolve(database_url_override, Some(&project_dir))?;
     let db = connect_db(&config).await?;
-    db.require_current_schema().await?;
-    db.persisting_invocation(subcommand, &config, &args).await
+    let service = InvocationService::new(&db);
+    let mut observer = TerminalInvocationObserver;
+    service
+        .invoke(
+            InvocationRequest {
+                command,
+                args,
+                config,
+            },
+            &mut observer,
+        )
+        .await?;
+    Ok(())
 }
 
 async fn handle_passthrough_command(
-    subcommand: &str,
     args: Vec<OsString>,
     database_url_override: Option<String>,
 ) -> AppResult<()> {
     if is_help_request(&args) {
-        exit_with_dbt_help(subcommand)?;
+        exit_with_dbt_help(InvocationCommand::Ls.as_str())?;
     }
     let ctx = config::InvocationContext::from_args(&args, false)?;
     let project_dir = ctx.project_dir;
     let config = RuntimeConfig::resolve(database_url_override, Some(&project_dir))?;
     let db = connect_db(&config).await?;
-    db.require_current_schema().await?;
-    db.ls_invocation(&config, &args).await
+    let service = InvocationService::new(&db);
+    let mut observer = TerminalInvocationObserver;
+    service
+        .invoke(
+            InvocationRequest {
+                command: InvocationCommand::Ls,
+                args,
+                config,
+            },
+            &mut observer,
+        )
+        .await?;
+    Ok(())
 }
 
 async fn connect_db(config: &RuntimeConfig) -> AppResult<Db> {
@@ -203,7 +230,7 @@ async fn handle_project_command(
     let current_dir = std::env::current_dir()?;
     let config = RuntimeConfig::resolve(database_url_override, Some(&current_dir))?;
     let db = connect_db(&config).await?;
-    db.require_current_schema().await?;
+    let service = ProjectService::new(&db);
     match command {
         ProjectCommand::Init {
             git_repo_url,
@@ -211,39 +238,16 @@ async fn handle_project_command(
             default_branch,
             force,
         } => {
-            let inferred = infer_project_defaults(
-                git_repo_url.as_deref(),
-                project_root.as_deref(),
-                default_branch.as_deref(),
-            )?;
-            let existing_project_id = read_dbtx_project_id(&current_dir)?;
-            if let Some(existing_project_id) = existing_project_id.as_deref()
-                && !force
-            {
-                return Err(AppError::ProjectIdAlreadyConfigured(
-                    existing_project_id.to_string(),
-                ));
-            }
-            let project_id = format!("prj_{}", Uuid::new_v4().simple());
-            let input = CreateProjectInput {
-                project_id: project_id.clone(),
-                project_name: inferred.project_name,
-                git_repo_url: inferred.git_repo_url,
-                default_branch: inferred.default_branch,
-                project_root: inferred.project_root,
-            };
-            let project = if let Some(existing_project_id) = existing_project_id.as_deref() {
-                db.reinitialize_project_id(existing_project_id, input)
-                    .await?
-            } else {
-                db.create_project(input).await?
-            };
-            write_dbtx_toml(
-                &current_dir,
-                Some(&project_id),
-                Some(&config.database_url),
-                force,
-            )?;
+            let project = service
+                .init(ProjectInitRequest {
+                    current_dir,
+                    git_repo_url,
+                    project_root,
+                    default_branch,
+                    force,
+                    database_url: config.database_url.clone(),
+                })
+                .await?;
             print_project(&project);
         }
         ProjectCommand::Update {
@@ -251,38 +255,23 @@ async fn handle_project_command(
             project_root,
             default_branch,
         } => {
-            let project_id =
-                read_dbtx_project_id(&current_dir)?.ok_or(AppError::ProjectIdMissing)?;
-            let inferred = infer_project_defaults(
-                git_repo_url.as_deref(),
-                project_root.as_deref(),
-                default_branch.as_deref(),
-            )?;
-            let project = db
-                .update_project(CreateProjectInput {
-                    project_id,
-                    project_name: inferred.project_name,
-                    git_repo_url: inferred.git_repo_url,
-                    default_branch: inferred.default_branch,
-                    project_root: inferred.project_root,
+            let project = service
+                .update(ProjectUpdateRequest {
+                    current_dir,
+                    git_repo_url,
+                    project_root,
+                    default_branch,
                 })
                 .await?;
             print_project(&project);
         }
         ProjectCommand::List => {
-            for project in db.list_projects().await? {
+            for project in service.list().await? {
                 print_project(&project);
             }
         }
         ProjectCommand::Show { project } => {
-            let project = match project {
-                Some(project) => project,
-                None => {
-                    let current_dir = std::env::current_dir()?;
-                    read_dbtx_project_id(&current_dir)?.ok_or(AppError::ProjectIdMissing)?
-                }
-            };
-            let project = db.get_project_by_project_id(&project).await?;
+            let project = service.show(&current_dir, project).await?;
             print_project(&project);
         }
     }
@@ -296,7 +285,7 @@ async fn handle_environment_command(
     let current_dir = std::env::current_dir()?;
     let config = RuntimeConfig::resolve(database_url_override, Some(&current_dir))?;
     let db = connect_db(&config).await?;
-    db.require_current_schema().await?;
+    let service = EnvironmentService::new(&db);
     match command {
         EnvironmentCommand::Create {
             project,
@@ -311,28 +300,20 @@ async fn handle_environment_command(
             status,
             schema_name,
         } => {
-            let project = resolve_project_identifier(project, &current_dir)?;
-            let local_profile =
-                LocalTargetProfile::from_local_project(&current_dir, target.as_deref())?;
-            let profile_secrets = local_profile.encrypted_secrets()?;
-            let slug = slug.unwrap_or_else(|| local_profile.target_name.clone());
-            let environment = db
-                .create_environment(CreateEnvironmentInput {
+            let environment = service
+                .create(EnvironmentCreateRequest {
+                    current_dir,
                     project,
                     slug,
-                    target_name: local_profile.target_name,
+                    target,
                     kind,
-                    baseline_slug: baseline,
+                    baseline,
                     git_branch,
                     git_commit_sha,
                     pr_number,
                     immutable,
                     status,
-                    adapter_type: local_profile.adapter_type,
-                    schema_name: schema_name.or(Some(local_profile.schema_name)),
-                    threads: local_profile.threads,
-                    profile_config: local_profile.profile_config,
-                    profile_secrets,
+                    schema_name,
                 })
                 .await?;
             print_environment(&environment);
@@ -351,37 +332,32 @@ async fn handle_environment_command(
             schema_name,
             threads,
         } => {
-            let project = resolve_project_identifier(Some(project), &current_dir)?;
-            let environment = db
-                .update_environment(UpdateEnvironmentInput {
+            let environment = service
+                .update(EnvironmentUpdateRequest {
+                    current_dir,
                     project,
                     slug,
                     kind,
-                    baseline_slug: baseline,
+                    baseline,
                     git_branch,
                     git_commit_sha,
                     pr_number,
                     immutable,
                     status,
                     adapter_type,
-                    target_name: None,
                     schema_name,
                     threads,
-                    profile_config: None,
-                    profile_secrets: None,
                 })
                 .await?;
             print_environment(&environment);
         }
         EnvironmentCommand::List { project } => {
-            let project = resolve_project_identifier(Some(project), &current_dir)?;
-            for environment in db.list_environments(&project).await? {
+            for environment in service.list(&current_dir, project).await? {
                 print_environment(&environment);
             }
         }
         EnvironmentCommand::Show { project, slug } => {
-            let project = resolve_project_identifier(Some(project), &current_dir)?;
-            let environment = db.get_environment(&project, &slug).await?;
+            let environment = service.show(&current_dir, project, slug).await?;
             print_environment(&environment);
         }
     }
@@ -438,103 +414,25 @@ fn print_environment(environment: &EnvironmentRecord) {
     );
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct InferredProjectInput {
-    project_name: String,
-    git_repo_url: String,
-    default_branch: Option<String>,
-    project_root: String,
-}
+struct TerminalInvocationObserver;
 
-fn infer_project_defaults(
-    git_repo_url: Option<&str>,
-    project_root: Option<&str>,
-    default_branch: Option<&str>,
-) -> AppResult<InferredProjectInput> {
-    let current_dir = std::env::current_dir()?;
-    let project_name = read_dbt_project_name_from_root(&current_dir)?;
-    let repo_root = git_repo_root(&current_dir)?;
-
-    Ok(InferredProjectInput {
-        project_name,
-        git_repo_url: git_repo_url
-            .map(ToString::to_string)
-            .or_else(|| git_remote_origin_url(&repo_root).ok())
-            .ok_or(AppError::GitRemoteNotFound)?,
-        default_branch: default_branch.map(ToString::to_string),
-        project_root: project_root
-            .map(ToString::to_string)
-            .unwrap_or(relative_project_root(&repo_root, &current_dir)),
-    })
-}
-
-fn resolve_project_identifier(project: Option<String>, current_dir: &Path) -> AppResult<String> {
-    project
-        .or_else(|| std::env::var("DBTX_PROJECT_ID").ok())
-        .or_else(|| read_dbtx_project_id(current_dir).ok().flatten())
-        .ok_or(AppError::ProjectIdMissing)
-}
-
-fn read_dbt_project_name_from_root(project_root: &Path) -> AppResult<String> {
-    let yaml = read_dbt_project_yaml(project_root)?;
-    yaml.get("name")
-        .and_then(serde_yaml::Value::as_str)
-        .map(ToString::to_string)
-        .or_else(|| {
-            project_root
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .ok_or(AppError::NotDbtProjectRoot)
-}
-
-fn git_repo_root(current_dir: &Path) -> AppResult<PathBuf> {
-    let output = run_git(["rev-parse", "--show-toplevel"], current_dir)?;
-    Ok(PathBuf::from(output))
-}
-
-fn git_remote_origin_url(repo_root: &Path) -> AppResult<String> {
-    run_git(["config", "--get", "remote.origin.url"], repo_root)
-        .map_err(|_| AppError::GitRemoteNotFound)
-}
-
-fn relative_project_root(repo_root: &Path, project_root: &Path) -> String {
-    match project_root.strip_prefix(repo_root) {
-        Ok(path) if path.as_os_str().is_empty() => ".".to_string(),
-        Ok(path) => path.to_string_lossy().into_owned(),
-        Err(_) => project_root.to_string_lossy().into_owned(),
+impl InvocationObserver for TerminalInvocationObserver {
+    fn stdout_line(&mut self, line: &str) {
+        println!("{line}");
     }
-}
 
-fn read_dbt_project_yaml(project_root: &Path) -> AppResult<serde_yaml::Value> {
-    let path = project_root.join("dbt_project.yml");
-    if !path.is_file() {
-        return Err(AppError::NotDbtProjectRoot);
+    fn stderr_line(&mut self, line: &str) {
+        eprintln!("{line}");
     }
-    let content = std::fs::read_to_string(path)?;
-    Ok(serde_yaml::from_str(&content)?)
-}
-
-fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
-    let output = StdCommand::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()?;
-    if !output.status.success() {
-        return Err(AppError::GitRepoNotFound);
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
-        return Err(AppError::GitRepoNotFound);
-    }
-    Ok(stdout)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_project_defaults, read_dbt_project_name_from_root, relative_project_root};
     use crate::config::{read_dbtx_project_id, write_dbtx_toml};
     use crate::error::AppError;
+    use crate::services::{
+        infer_project_defaults, read_dbt_project_name_from_root, relative_project_root,
+    };
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -556,10 +454,7 @@ mod tests {
             repo_root,
         );
 
-        let original_dir = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(&project_root).expect("set cwd");
-        let inferred = infer_project_defaults(None, None, None).expect("inferred");
-        std::env::set_current_dir(original_dir).expect("restore cwd");
+        let inferred = infer_project_defaults(&project_root, None, None, None).expect("inferred");
 
         assert_eq!(inferred.project_name, "jaffle_shop_project");
         assert_eq!(inferred.git_repo_url, "git@github.com:example/repo.git");
