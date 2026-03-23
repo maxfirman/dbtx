@@ -1,6 +1,9 @@
 use serde_json::json;
 use sqlx::{PgPool, Row};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::TempDir;
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{runners::AsyncRunner, ContainerAsync},
@@ -217,31 +220,27 @@ async fn replay_rebuilds_promoted_and_current_state_for_partial_progress() {
 async fn project_and_environment_cli_round_trip() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
 
-    let output = run_dbtx(
+    let output = run_dbtx_in_dir(
         db.url(),
+        repo.project_dir(),
         &[
             "project",
-            "create",
-            "--slug",
-            "proj",
-            "--git-repo-url",
-            "https://example.com/repo.git",
-            "--project-root",
-            "analytics",
-            "--default-branch",
-            "main",
+            "init",
         ],
     );
     assert_success(&output);
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
-    let output = run_dbtx(
+    let output = run_dbtx_in_dir(
         db.url(),
+        repo.project_dir(),
         &[
             "environment",
             "create",
             "--project",
-            "proj",
+            &project_id,
             "--slug",
             "staging",
             "--kind",
@@ -251,17 +250,28 @@ async fn project_and_environment_cli_round_trip() {
     );
     assert_success(&output);
 
-    let list_output = run_dbtx(db.url(), &["environment", "list", "--project", "proj"]);
+    let list_output = run_dbtx_in_dir(
+        db.url(),
+        repo.project_dir(),
+        &["environment", "list", "--project", &project_id],
+    );
     assert_success(&list_output);
     let stdout = String::from_utf8_lossy(&list_output.stdout);
     assert!(stdout.contains("slug=staging"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains(&format!("project_id={project_id}")),
+        "expected project id in stdout: {stdout}"
+    );
 
     let project_row = sqlx::query(
-        "SELECT slug, git_repo_url, default_branch, project_root FROM projects WHERE slug = 'proj'",
+        "SELECT project_id, project_name, slug, git_repo_url, default_branch, project_root FROM projects WHERE project_id = $1",
     )
+    .bind(&project_id)
     .fetch_one(db.pool())
     .await
     .expect("project row");
+    assert_eq!(project_row.get::<String, _>("project_id"), project_id);
+    assert_eq!(project_row.get::<String, _>("project_name"), "proj");
     assert_eq!(project_row.get::<String, _>("slug"), "proj");
     assert_eq!(
         project_row.get::<Option<String>, _>("git_repo_url").as_deref(),
@@ -285,38 +295,37 @@ async fn project_and_environment_cli_round_trip() {
 async fn environment_seed_from_copies_active_state_without_runs() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
 
-    assert_success(&run_dbtx(
+    assert_success(&run_dbtx_in_dir(
         db.url(),
+        repo.project_dir(),
         &[
             "project",
-            "create",
-            "--slug",
-            "proj",
-            "--git-repo-url",
-            "https://example.com/repo.git",
-            "--project-root",
-            "analytics",
+            "init",
         ],
     ));
-    assert_success(&run_dbtx(
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    assert_success(&run_dbtx_in_dir(
         db.url(),
+        repo.project_dir(),
         &[
             "environment",
             "create",
             "--project",
-            "proj",
+            &project_id,
             "--slug",
             "source",
         ],
     ));
-    assert_success(&run_dbtx(
+    assert_success(&run_dbtx_in_dir(
         db.url(),
+        repo.project_dir(),
         &[
             "environment",
             "create",
             "--project",
-            "proj",
+            &project_id,
             "--slug",
             "target",
             "--kind",
@@ -386,13 +395,14 @@ async fn environment_seed_from_copies_active_state_without_runs() {
     .await
     .expect("insert current state");
 
-    let seed_output = run_dbtx(
+    let seed_output = run_dbtx_in_dir(
         db.url(),
+        repo.project_dir(),
         &[
             "environment",
             "seed-from",
             "--project",
-            "proj",
+            &project_id,
             "--target",
             "target",
             "--source",
@@ -506,7 +516,7 @@ impl TestDatabase {
 
 async fn scope_ids(pool: &PgPool) -> ScopeIds {
     let project_id: i64 = sqlx::query_scalar(
-        "INSERT INTO projects (slug) VALUES ('proj') ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug RETURNING id",
+        "INSERT INTO projects (project_id, project_name, slug, git_repo_url, default_branch, project_root) VALUES ('proj', 'proj', 'proj', 'https://example.com/repo.git', 'main', '.') ON CONFLICT (project_id) DO UPDATE SET slug = EXCLUDED.slug RETURNING id",
     )
     .fetch_one(pool)
     .await
@@ -695,12 +705,67 @@ fn run_replay(database_url: &str, run_id: Uuid) {
     );
 }
 
-fn run_dbtx(database_url: &str, args: &[&str]) -> std::process::Output {
+fn run_dbtx_in_dir(database_url: &str, cwd: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_dbtx"))
         .args(args)
         .env("DBTX_DATABASE_URL", database_url)
+        .current_dir(cwd)
         .output()
-        .expect("run dbtx")
+        .expect("run dbtx in dir")
+}
+
+struct TempProjectRepo {
+    _temp_dir: TempDir,
+    project_dir: PathBuf,
+}
+
+impl TempProjectRepo {
+    fn new(project_name: &str) -> Self {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let project_dir = temp_dir.path().join("analytics");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(
+            project_dir.join("dbt_project.yml"),
+            format!("name: {project_name}\nversion: '1.0'\n"),
+        )
+        .expect("write dbt project");
+        git(&["init"], temp_dir.path());
+        git(
+            &["remote", "add", "origin", "https://example.com/repo.git"],
+            temp_dir.path(),
+        );
+        Self {
+            _temp_dir: temp_dir,
+            project_dir,
+        }
+    }
+
+    fn project_dir(&self) -> &Path {
+        &self.project_dir
+    }
+}
+
+fn read_project_id_from_dbt_project(project_dir: &Path) -> String {
+    let content = fs::read_to_string(project_dir.join("dbt_project.yml")).expect("read dbt project");
+    content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("project_id:").map(str::trim))
+        .expect("project id line")
+        .to_string()
+}
+
+fn git(args: &[&str], cwd: &Path) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 fn assert_success(output: &std::process::Output) {

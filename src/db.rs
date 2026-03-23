@@ -23,6 +23,8 @@ pub struct Db {
 #[derive(Debug, Clone)]
 pub struct ProjectRecord {
     pub id: i64,
+    pub project_id: String,
+    pub project_name: String,
     pub slug: String,
     pub git_repo_url: Option<String>,
     pub default_branch: Option<String>,
@@ -34,6 +36,7 @@ pub struct ProjectRecord {
 pub struct EnvironmentRecord {
     pub id: i64,
     pub project_id: i64,
+    pub project_ref: String,
     pub project_slug: String,
     pub slug: String,
     pub kind: String,
@@ -49,6 +52,8 @@ pub struct EnvironmentRecord {
 
 #[derive(Debug, Clone)]
 pub struct CreateProjectInput {
+    pub project_id: String,
+    pub project_name: String,
     pub slug: String,
     pub git_repo_url: String,
     pub default_branch: Option<String>,
@@ -57,7 +62,7 @@ pub struct CreateProjectInput {
 
 #[derive(Debug, Clone)]
 pub struct CreateEnvironmentInput {
-    pub project_slug: String,
+    pub project: String,
     pub slug: String,
     pub kind: String,
     pub baseline_slug: Option<String>,
@@ -97,15 +102,19 @@ impl Db {
     pub async fn create_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
             r#"
-            INSERT INTO projects (slug, git_repo_url, default_branch, project_root)
-            VALUES ($1, $2, COALESCE($3, 'main'), $4)
-            ON CONFLICT (slug) DO UPDATE SET
+            INSERT INTO projects (project_id, project_name, slug, git_repo_url, default_branch, project_root)
+            VALUES ($1, $2, $3, $4, COALESCE($5, 'main'), $6)
+            ON CONFLICT (project_id) DO UPDATE SET
+                project_name = EXCLUDED.project_name,
+                slug = EXCLUDED.slug,
                 git_repo_url = EXCLUDED.git_repo_url,
                 default_branch = EXCLUDED.default_branch,
                 project_root = EXCLUDED.project_root
-            RETURNING id, slug, git_repo_url, default_branch, project_root, metadata
+            RETURNING id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata
             "#,
         )
+        .bind(&input.project_id)
+        .bind(&input.project_name)
         .bind(&input.slug)
         .bind(&input.git_repo_url)
         .bind(input.default_branch.as_deref())
@@ -117,29 +126,55 @@ impl Db {
 
     pub async fn list_projects(&self) -> AppResult<Vec<ProjectRecord>> {
         let rows = sqlx::query(
-            "SELECT id, slug, git_repo_url, default_branch, project_root, metadata FROM projects ORDER BY slug",
+            "SELECT id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata FROM projects ORDER BY slug",
         )
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(project_record_from_row).collect())
     }
 
-    pub async fn get_project(&self, slug: &str) -> AppResult<ProjectRecord> {
+    pub async fn get_project_by_identifier(&self, project: &str) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
-            "SELECT id, slug, git_repo_url, default_branch, project_root, metadata FROM projects WHERE slug = $1",
+            "SELECT id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1 OR slug = $1",
         )
-        .bind(slug)
+        .bind(project)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| AppError::ProjectNotFound(slug.to_string()))?;
+        .ok_or_else(|| AppError::ProjectNotFound(project.to_string()))?;
         Ok(project_record_from_row(&row))
+    }
+
+    pub async fn get_project_by_project_id(&self, project_id: &str) -> AppResult<ProjectRecord> {
+        let row = sqlx::query(
+            "SELECT id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::ProjectIdNotFound(project_id.to_string()))?;
+        Ok(project_record_from_row(&row))
+    }
+
+    async fn get_project_by_repo_and_root(
+        &self,
+        git_repo_url: &str,
+        project_root: &str,
+    ) -> AppResult<Option<ProjectRecord>> {
+        let row = sqlx::query(
+            "SELECT id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata FROM projects WHERE git_repo_url = $1 AND project_root = $2",
+        )
+        .bind(git_repo_url)
+        .bind(project_root)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(project_record_from_row))
     }
 
     pub async fn create_environment(
         &self,
         input: CreateEnvironmentInput,
     ) -> AppResult<EnvironmentRecord> {
-        let project = self.get_project(&input.project_slug).await?;
+        let project = self.get_project_by_identifier(&input.project).await?;
         let baseline = match input.baseline_slug.as_deref() {
             Some(baseline_slug) => Some(
                 self.get_environment_by_project_id(project.id, &project.slug, baseline_slug)
@@ -181,13 +216,14 @@ impl Db {
         self.get_environment_by_id(environment_id).await
     }
 
-    pub async fn list_environments(&self, project_slug: &str) -> AppResult<Vec<EnvironmentRecord>> {
-        let project = self.get_project(project_slug).await?;
+    pub async fn list_environments(&self, project: &str) -> AppResult<Vec<EnvironmentRecord>> {
+        let project = self.get_project_by_identifier(project).await?;
         let rows = sqlx::query(
             r#"
             SELECT
                 e.id,
                 e.project_id,
+                p.project_id AS project_ref,
                 p.slug AS project_slug,
                 e.slug,
                 e.kind,
@@ -214,22 +250,22 @@ impl Db {
 
     pub async fn get_environment(
         &self,
-        project_slug: &str,
+        project: &str,
         environment_slug: &str,
     ) -> AppResult<EnvironmentRecord> {
-        let project = self.get_project(project_slug).await?;
+        let project = self.get_project_by_identifier(project).await?;
         self.get_environment_by_project_id(project.id, &project.slug, environment_slug)
             .await
     }
 
     pub async fn seed_environment_from(
         &self,
-        project_slug: &str,
+        project: &str,
         target_environment_slug: &str,
         source_environment_slug: &str,
         seed_type: &str,
     ) -> AppResult<()> {
-        let project = self.get_project(project_slug).await?;
+        let project = self.get_project_by_identifier(project).await?;
         let target = self
             .get_environment_by_project_id(project.id, &project.slug, target_environment_slug)
             .await?;
@@ -350,9 +386,12 @@ impl Db {
         incoming_args: &[OsString],
     ) -> AppResult<()> {
         let ctx = InvocationContext::from_args(incoming_args, true)?;
+        let project = self
+            .resolve_local_project(&ctx.project_dir, &ctx.project_slug)
+            .await?;
         let run_id = Uuid::new_v4();
         let reconstructed_manifest = self
-            .load_reconstructed_manifest(&ctx.project_slug, &ctx.environment_slug)
+            .load_reconstructed_manifest(&project.slug, &ctx.environment_slug)
             .await?
             .or(if ctx.wants_state_modified {
                 Some(
@@ -376,7 +415,7 @@ impl Db {
                 .collect(),
         );
         let (project_id, environment_id) = self
-            .ensure_environment(&ctx.project_slug, &ctx.environment_slug)
+            .ensure_environment(&project, &ctx.environment_slug)
             .await?;
 
         sqlx::query(
@@ -487,8 +526,11 @@ impl Db {
         incoming_args: &[OsString],
     ) -> AppResult<()> {
         let ctx = InvocationContext::from_args(incoming_args, false)?;
+        let project = self
+            .resolve_local_project(&ctx.project_dir, &ctx.project_slug)
+            .await?;
         let reconstructed_manifest = self
-            .load_reconstructed_manifest(&ctx.project_slug, &ctx.environment_slug)
+            .load_reconstructed_manifest(&project.slug, &ctx.environment_slug)
             .await?
             .or(if ctx.wants_state_modified {
                 Some(
@@ -534,6 +576,47 @@ impl Db {
             .await?;
         self.rebuild_current_state_up_to(project_id, environment_id, Some(run_pk))
             .await
+    }
+
+    async fn resolve_local_project(
+        &self,
+        project_dir: &Path,
+        fallback_slug: &str,
+    ) -> AppResult<ProjectRecord> {
+        let project_name = read_dbt_project_name(project_dir);
+        if let Some(project_id) = read_dbtx_project_id(project_dir)? {
+            let project = self.get_project_by_project_id(&project_id).await?;
+            validate_project_record(&project, project_dir)?;
+            return Ok(project);
+        }
+
+        let git_context = git_repo_root(project_dir)
+            .and_then(|repo_root| {
+                let git_repo_url = git_remote_origin_url(&repo_root)?;
+                let project_root = relative_project_root(&repo_root, project_dir);
+                Ok((git_repo_url, project_root))
+            })
+            .ok();
+
+        if let Some((git_repo_url, project_root)) = git_context.clone()
+            && let Some(project) = self
+                .get_project_by_repo_and_root(&git_repo_url, &project_root)
+                .await?
+        {
+            validate_project_record(&project, project_dir)?;
+            return Ok(project);
+        }
+
+        Ok(ProjectRecord {
+            id: 0,
+            project_id: fallback_slug.to_string(),
+            project_name,
+            slug: fallback_slug.to_string(),
+            git_repo_url: git_context.as_ref().map(|(git_repo_url, _)| git_repo_url.clone()),
+            default_branch: None,
+            project_root: git_context.map(|(_, project_root)| project_root),
+            metadata: Value::Object(Default::default()),
+        })
     }
 
     async fn finalize_run(&self, finalization: RunFinalization<'_>) -> AppResult<()> {
@@ -626,16 +709,30 @@ impl Db {
         Ok(())
     }
 
-    async fn ensure_environment(&self, project_slug: &str, environment_slug: &str) -> AppResult<(i64, i64)> {
+    async fn ensure_environment(
+        &self,
+        project: &ProjectRecord,
+        environment_slug: &str,
+    ) -> AppResult<(i64, i64)> {
         let project_id: i64 = sqlx::query_scalar(
             r#"
-            INSERT INTO projects (slug)
-            VALUES ($1)
-            ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug
+            INSERT INTO projects (project_id, project_name, slug, git_repo_url, default_branch, project_root)
+            VALUES ($1, $2, $3, $4, COALESCE($5, 'main'), $6)
+            ON CONFLICT (project_id) DO UPDATE SET
+                project_name = EXCLUDED.project_name,
+                slug = EXCLUDED.slug,
+                git_repo_url = COALESCE(EXCLUDED.git_repo_url, projects.git_repo_url),
+                default_branch = COALESCE(EXCLUDED.default_branch, projects.default_branch),
+                project_root = COALESCE(EXCLUDED.project_root, projects.project_root)
             RETURNING id
             "#,
         )
-        .bind(project_slug)
+        .bind(&project.project_id)
+        .bind(&project.project_name)
+        .bind(&project.slug)
+        .bind(project.git_repo_url.as_deref())
+        .bind(project.default_branch.as_deref())
+        .bind(project.project_root.as_deref())
         .fetch_one(&self.pool)
         .await?;
 
@@ -666,6 +763,7 @@ impl Db {
             SELECT
                 e.id,
                 e.project_id,
+                p.project_id AS project_ref,
                 p.slug AS project_slug,
                 e.slug,
                 e.kind,
@@ -700,6 +798,7 @@ impl Db {
             SELECT
                 e.id,
                 e.project_id,
+                p.project_id AS project_ref,
                 p.slug AS project_slug,
                 e.slug,
                 e.kind,
@@ -1488,6 +1587,8 @@ fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
     let metadata: sqlx::types::Json<Value> = row.get("metadata");
     ProjectRecord {
         id: row.get("id"),
+        project_id: row.get("project_id"),
+        project_name: row.get("project_name"),
         slug: row.get("slug"),
         git_repo_url: row.get("git_repo_url"),
         default_branch: row.get("default_branch"),
@@ -1501,6 +1602,7 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
     EnvironmentRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
+        project_ref: row.get("project_ref"),
         project_slug: row.get("project_slug"),
         slug: row.get("slug"),
         kind: row.get("kind"),
@@ -1524,6 +1626,101 @@ fn read_dbt_project_name(project_dir: &Path) -> String {
                 .to_string_lossy()
                 .into_owned()
         })
+}
+
+fn read_dbtx_project_id(project_dir: &Path) -> AppResult<Option<String>> {
+    let path = project_dir.join("dbt_project.yml");
+    let content = std::fs::read_to_string(path)?;
+    let mut in_vars = false;
+    let mut vars_indent = 0usize;
+    let mut in_dbtx = false;
+    let mut dbtx_indent = 0usize;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if in_dbtx && indent <= dbtx_indent {
+            in_dbtx = false;
+        }
+        if in_vars && indent <= vars_indent && trimmed != "vars:" {
+            in_vars = false;
+            in_dbtx = false;
+        }
+        if trimmed == "vars:" {
+            in_vars = true;
+            vars_indent = indent;
+            in_dbtx = false;
+            continue;
+        }
+        if in_vars && trimmed == "dbtx:" {
+            in_dbtx = true;
+            dbtx_indent = indent;
+            continue;
+        }
+        if in_dbtx
+            && let Some(rest) = trimmed.strip_prefix("project_id:")
+        {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Ok(Some(value.to_string()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn git_repo_root(current_dir: &Path) -> AppResult<std::path::PathBuf> {
+    let output = run_git(["rev-parse", "--show-toplevel"], current_dir)?;
+    Ok(output.into())
+}
+
+fn git_remote_origin_url(repo_root: &Path) -> AppResult<String> {
+    run_git(["config", "--get", "remote.origin.url"], repo_root)
+        .map_err(|_| AppError::GitRemoteNotFound)
+}
+
+fn relative_project_root(repo_root: &Path, project_root: &Path) -> String {
+    match project_root.strip_prefix(repo_root) {
+        Ok(path) if path.as_os_str().is_empty() => ".".to_string(),
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(_) => project_root.to_string_lossy().into_owned(),
+    }
+}
+
+fn validate_project_record(project: &ProjectRecord, project_dir: &Path) -> AppResult<()> {
+    let repo_root = git_repo_root(project_dir)?;
+    let current_name = read_dbt_project_name(project_dir);
+    let current_git_repo_url = git_remote_origin_url(&repo_root)?;
+    let current_project_root = relative_project_root(&repo_root, project_dir);
+
+    let matches = project.project_name == current_name
+        && project.git_repo_url.as_deref() == Some(current_git_repo_url.as_str())
+        && project.project_root.as_deref() == Some(current_project_root.as_str());
+
+    if matches {
+        Ok(())
+    } else {
+        Err(AppError::ProjectValidationFailed(project.project_id.clone()))
+    }
+}
+
+fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()?;
+    if !output.status.success() {
+        return Err(AppError::GitRepoNotFound);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Err(AppError::GitRepoNotFound);
+    }
+    Ok(stdout)
 }
 
 fn read_adapter_type(profiles_dir: &Path) -> String {

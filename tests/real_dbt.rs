@@ -464,21 +464,8 @@ async fn seeded_environment_starts_with_empty_state_modified() {
 
     let project = RealProject::new();
     project.seed();
+    let project_id = project.init_dbtx_project(db.url());
 
-    assert_success(&run_dbtx(
-        db.url(),
-        &project,
-        &[
-            "project",
-            "create",
-            "--slug",
-            &project.project_slug(),
-            "--git-repo-url",
-            "https://example.com/repo.git",
-            "--project-root",
-            ".",
-        ],
-    ));
     assert_success(&run_dbtx(
         db.url(),
         &project,
@@ -486,7 +473,7 @@ async fn seeded_environment_starts_with_empty_state_modified() {
             "environment",
             "create",
             "--project",
-            &project.project_slug(),
+            &project_id,
             "--slug",
             "staging",
         ],
@@ -512,7 +499,7 @@ async fn seeded_environment_starts_with_empty_state_modified() {
             "environment",
             "create",
             "--project",
-            &project.project_slug(),
+            &project_id,
             "--slug",
             "pr-123",
             "--kind",
@@ -530,7 +517,7 @@ async fn seeded_environment_starts_with_empty_state_modified() {
             "environment",
             "seed-from",
             "--project",
-            &project.project_slug(),
+            &project_id,
             "--target",
             "pr-123",
             "--source",
@@ -716,6 +703,11 @@ impl RealProject {
         let temp_dir = TempDir::new().expect("temp dir");
         copy_dir_all(&jaffle_fixture_dir(), temp_dir.path());
         clean_runtime_artifacts(temp_dir.path());
+        git_cmd(["init"], temp_dir.path());
+        git_cmd(
+            ["remote", "add", "origin", "https://example.com/jaffle_shop_project.git"],
+            temp_dir.path(),
+        );
         Self { temp_dir }
     }
 
@@ -737,6 +729,15 @@ impl RealProject {
         )
     }
 
+    fn project_id(&self) -> String {
+        fs::read_to_string(self.path().join("dbt_project.yml"))
+            .expect("read dbt_project")
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("project_id:").map(str::trim))
+            .expect("project id line")
+            .to_string()
+    }
+
     fn seed(&self) {
         let mut command = Command::new("dbt");
         command.args([
@@ -749,6 +750,12 @@ impl RealProject {
         command.current_dir(self.path());
         let output = command.output().expect("run dbt seed");
         assert_success(&output);
+    }
+
+    fn init_dbtx_project(&self, database_url: &str) -> String {
+        let output = run_dbtx(database_url, self, &["project", "init"]);
+        assert_success(&output);
+        self.project_id()
     }
 
     fn append_to_file(&self, relative_path: &str, content: &str) {
@@ -977,6 +984,20 @@ fn copy_dir_all(src: &Path, dst: &Path) {
 
 fn should_skip_copy(name: &str) -> bool {
     matches!(name, "target" | "logs" | "warehouse.duckdb" | ".git")
+}
+
+fn git_cmd<const N: usize>(args: [&str; N], cwd: &Path) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 fn integration_lock() -> &'static Mutex<()> {
