@@ -1250,6 +1250,36 @@ fn clean_runtime_artifacts(project_dir: &Path) {
             fs::remove_file(path).expect("remove file");
         }
     }
+
+    let project_file = project_dir.join("dbt_project.yml");
+    let content = fs::read_to_string(&project_file).expect("read dbt_project");
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&content).expect("parse dbt_project");
+    if let Some(root) = yaml.as_mapping_mut() {
+        let vars_key = serde_yaml::Value::String("vars".to_string());
+        if let Some(vars) = root
+            .get_mut(&vars_key)
+            .and_then(serde_yaml::Value::as_mapping_mut)
+        {
+            let dbtx_key = serde_yaml::Value::String("dbtx".to_string());
+            if let Some(dbtx) = vars
+                .get_mut(&dbtx_key)
+                .and_then(serde_yaml::Value::as_mapping_mut)
+            {
+                dbtx.remove(serde_yaml::Value::String("project_id".to_string()));
+                if dbtx.is_empty() {
+                    vars.remove(&dbtx_key);
+                }
+            }
+            if vars.is_empty() {
+                root.remove(&vars_key);
+            }
+        }
+    }
+    fs::write(
+        project_file,
+        serde_yaml::to_string(&yaml).expect("serialize dbt_project"),
+    )
+    .expect("write dbt_project");
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) {

@@ -4,7 +4,7 @@ ADD COLUMN IF NOT EXISTS project_name TEXT;
 
 UPDATE projects
 SET project_id = COALESCE(project_id, 'prj_' || lpad(id::text, 8, '0')),
-    project_name = COALESCE(project_name, slug);
+    project_name = COALESCE(project_name, project_id);
 
 ALTER TABLE projects
 ALTER COLUMN project_id SET NOT NULL;

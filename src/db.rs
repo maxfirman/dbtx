@@ -25,7 +25,6 @@ pub struct ProjectRecord {
     pub id: i64,
     pub project_id: String,
     pub project_name: String,
-    pub slug: String,
     pub git_repo_url: Option<String>,
     pub default_branch: Option<String>,
     pub project_root: Option<String>,
@@ -37,7 +36,7 @@ pub struct EnvironmentRecord {
     pub id: i64,
     pub project_id: i64,
     pub project_ref: String,
-    pub project_slug: String,
+    pub project_name: String,
     pub slug: String,
     pub kind: String,
     pub baseline_environment_id: Option<i64>,
@@ -55,7 +54,6 @@ pub struct EnvironmentRecord {
 pub struct CreateProjectInput {
     pub project_id: String,
     pub project_name: String,
-    pub slug: String,
     pub git_repo_url: String,
     pub default_branch: Option<String>,
     pub project_root: String,
@@ -111,7 +109,7 @@ struct RunFinalization<'a> {
 impl Db {
     pub async fn connect(database_url: &str) -> AppResult<Self> {
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(10)
             .connect(database_url)
             .await?;
         Ok(Self { pool })
@@ -125,20 +123,18 @@ impl Db {
     pub async fn create_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
             r#"
-            INSERT INTO projects (project_id, project_name, slug, git_repo_url, default_branch, project_root)
-            VALUES ($1, $2, $3, $4, COALESCE($5, 'main'), $6)
+            INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root)
+            VALUES ($1, $2, $3, COALESCE($4, 'main'), $5)
             ON CONFLICT (project_id) DO UPDATE SET
                 project_name = EXCLUDED.project_name,
-                slug = EXCLUDED.slug,
                 git_repo_url = EXCLUDED.git_repo_url,
                 default_branch = EXCLUDED.default_branch,
                 project_root = EXCLUDED.project_root
-            RETURNING id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata
+            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
-        .bind(&input.slug)
         .bind(&input.git_repo_url)
         .bind(input.default_branch.as_deref())
         .bind(&input.project_root)
@@ -150,7 +146,7 @@ impl Db {
     pub async fn ensure_default_environment(&self, project_id: &str) -> AppResult<()> {
         let project = self.get_project_by_project_id(project_id).await?;
         match self
-            .get_environment_by_project_id(project.id, &project.slug, "dev")
+            .get_environment_by_project_id(project.id, &project.project_id, "dev")
             .await
         {
             Ok(_) => Ok(()),
@@ -205,18 +201,16 @@ impl Db {
             UPDATE projects
             SET project_id = $2,
                 project_name = $3,
-                slug = $4,
-                git_repo_url = $5,
-                default_branch = COALESCE($6, 'main'),
-                project_root = $7
+                git_repo_url = $4,
+                default_branch = COALESCE($5, 'main'),
+                project_root = $6
             WHERE id = $1
-            RETURNING id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata
+            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(project_pk)
         .bind(&input.project_id)
         .bind(&input.project_name)
-        .bind(&input.slug)
         .bind(&input.git_repo_url)
         .bind(input.default_branch.as_deref())
         .bind(&input.project_root)
@@ -229,7 +223,7 @@ impl Db {
 
     pub async fn list_projects(&self) -> AppResult<Vec<ProjectRecord>> {
         let rows = sqlx::query(
-            "SELECT id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata FROM projects ORDER BY slug",
+            "SELECT id, project_id, project_name, git_repo_url, default_branch, project_root, metadata FROM projects ORDER BY project_name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -238,7 +232,7 @@ impl Db {
 
     pub async fn get_project_by_project_id(&self, project_id: &str) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
-            "SELECT id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1",
+            "SELECT id, project_id, project_name, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1",
         )
         .bind(project_id)
         .fetch_optional(&self.pool)
@@ -256,7 +250,7 @@ impl Db {
         let project = self.get_project_by_project_id(&input.project).await?;
         let baseline = match input.baseline_slug.as_deref() {
             Some(baseline_slug) => Some(
-                self.get_environment_by_project_id(project.id, &project.slug, baseline_slug)
+                self.get_environment_by_project_id(project.id, &project.project_id, baseline_slug)
                     .await?,
             ),
             None => None,
@@ -303,7 +297,7 @@ impl Db {
     ) -> AppResult<EnvironmentRecord> {
         let project = self.get_project_by_project_id(&input.project).await?;
         let existing = self
-            .get_environment_by_project_id(project.id, &project.slug, &input.slug)
+            .get_environment_by_project_id(project.id, &project.project_id, &input.slug)
             .await?;
 
         if existing.immutable {
@@ -323,7 +317,7 @@ impl Db {
         let kind = input.kind.as_deref().unwrap_or(&existing.kind).to_string();
         let baseline_environment_id = match input.baseline_slug.as_deref() {
             Some(baseline_slug) => Some(
-                self.get_environment_by_project_id(project.id, &project.slug, baseline_slug)
+                self.get_environment_by_project_id(project.id, &project.project_id, baseline_slug)
                     .await?
                     .id,
             ),
@@ -382,7 +376,7 @@ impl Db {
                 e.id,
                 e.project_id,
                 p.project_id AS project_ref,
-                p.slug AS project_slug,
+                p.project_name,
                 e.slug,
                 e.kind,
                 e.baseline_environment_id,
@@ -413,7 +407,7 @@ impl Db {
         environment_slug: &str,
     ) -> AppResult<EnvironmentRecord> {
         let project = self.get_project_by_project_id(project).await?;
-        self.get_environment_by_project_id(project.id, &project.slug, environment_slug)
+        self.get_environment_by_project_id(project.id, &project.project_id, environment_slug)
             .await
     }
 
@@ -426,10 +420,10 @@ impl Db {
     ) -> AppResult<()> {
         let project = self.get_project_by_project_id(project).await?;
         let target = self
-            .get_environment_by_project_id(project.id, &project.slug, target_environment_slug)
+            .get_environment_by_project_id(project.id, &project.project_id, target_environment_slug)
             .await?;
         let source = self
-            .get_environment_by_project_id(project.id, &project.slug, source_environment_slug)
+            .get_environment_by_project_id(project.id, &project.project_id, source_environment_slug)
             .await?;
 
         let mut tx = self.pool.begin().await?;
@@ -550,7 +544,7 @@ impl Db {
             .await?;
         let git_state = read_git_state(&ctx.project_dir);
         let environment = self
-            .get_environment_by_project_id(project.id, &project.slug, &ctx.environment_slug)
+            .get_environment_by_project_id(project.id, &project.project_id, &ctx.environment_slug)
             .await?;
         validate_environment_git_state(&project, &environment, &git_state)?;
         let run_id = Uuid::new_v4();
@@ -701,7 +695,7 @@ impl Db {
             .await?;
         let git_state = read_git_state(&ctx.project_dir);
         let environment = self
-            .get_environment_by_project_id(project.id, &project.slug, &ctx.environment_slug)
+            .get_environment_by_project_id(project.id, &project.project_id, &ctx.environment_slug)
             .await?;
         validate_environment_git_state(&project, &environment, &git_state)?;
         let reconstructed_manifest = self
@@ -885,7 +879,7 @@ impl Db {
     async fn get_environment_by_project_id(
         &self,
         project_id: i64,
-        project_slug: &str,
+        project_ref: &str,
         environment_slug: &str,
     ) -> AppResult<EnvironmentRecord> {
         let row = sqlx::query(
@@ -894,7 +888,7 @@ impl Db {
                 e.id,
                 e.project_id,
                 p.project_id AS project_ref,
-                p.slug AS project_slug,
+                p.project_name,
                 e.slug,
                 e.kind,
                 e.baseline_environment_id,
@@ -918,7 +912,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
-            AppError::EnvironmentNotFound(project_slug.to_string(), environment_slug.to_string())
+            AppError::EnvironmentNotFound(project_ref.to_string(), environment_slug.to_string())
         })?;
         Ok(environment_record_from_row(&row))
     }
@@ -930,7 +924,7 @@ impl Db {
                 e.id,
                 e.project_id,
                 p.project_id AS project_ref,
-                p.slug AS project_slug,
+                p.project_name,
                 e.slug,
                 e.kind,
                 e.baseline_environment_id,
@@ -1704,7 +1698,6 @@ fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
         project_name: row.get("project_name"),
-        slug: row.get("slug"),
         git_repo_url: row.get("git_repo_url"),
         default_branch: row.get("default_branch"),
         project_root: row.get("project_root"),
@@ -1718,7 +1711,7 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         id: row.get("id"),
         project_id: row.get("project_id"),
         project_ref: row.get("project_ref"),
-        project_slug: row.get("project_slug"),
+        project_name: row.get("project_name"),
         slug: row.get("slug"),
         kind: row.get("kind"),
         baseline_environment_id: row.get("baseline_environment_id"),

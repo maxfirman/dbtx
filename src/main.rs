@@ -105,7 +105,6 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
     let db = connect_initialized_db(&config).await?;
     match command {
         ProjectCommand::Init {
-            slug,
             git_repo_url,
             project_root,
             default_branch,
@@ -113,7 +112,6 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
         } => {
             let current_dir = std::env::current_dir()?;
             let inferred = infer_project_defaults(
-                slug.as_deref(),
                 git_repo_url.as_deref(),
                 project_root.as_deref(),
                 default_branch.as_deref(),
@@ -131,7 +129,6 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
             let input = CreateProjectInput {
                 project_id,
                 project_name: inferred.project_name,
-                slug: inferred.slug,
                 git_repo_url: inferred.git_repo_url,
                 default_branch: inferred.default_branch,
                 project_root: inferred.project_root,
@@ -146,7 +143,6 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
             print_project(&project);
         }
         ProjectCommand::Update {
-            slug,
             git_repo_url,
             project_root,
             default_branch,
@@ -155,7 +151,6 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
             let project_id =
                 read_dbtx_project_id(&current_dir)?.ok_or(AppError::ProjectIdMissing)?;
             let inferred = infer_project_defaults(
-                slug.as_deref(),
                 git_repo_url.as_deref(),
                 project_root.as_deref(),
                 default_branch.as_deref(),
@@ -164,7 +159,6 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
                 .create_project(CreateProjectInput {
                     project_id,
                     project_name: inferred.project_name,
-                    slug: inferred.slug,
                     git_repo_url: inferred.git_repo_url,
                     default_branch: inferred.default_branch,
                     project_root: inferred.project_root,
@@ -280,11 +274,10 @@ async fn handle_environment_command(command: EnvironmentCommand) -> AppResult<()
 
 fn print_project(project: &ProjectRecord) {
     println!(
-        "project id={} project_id={} project_name={} slug={} git_repo_url={} default_branch={} project_root={} metadata={}",
+        "project id={} project_id={} project_name={} git_repo_url={} default_branch={} project_root={} metadata={}",
         project.id,
         project.project_id,
         project.project_name,
-        project.slug,
         project.git_repo_url.as_deref().unwrap_or(""),
         project.default_branch.as_deref().unwrap_or(""),
         project.project_root.as_deref().unwrap_or(""),
@@ -298,7 +291,7 @@ fn print_environment(environment: &EnvironmentRecord) {
         environment.id,
         environment.project_id,
         environment.project_ref,
-        environment.project_slug,
+        environment.project_name,
         environment.slug,
         environment.kind,
         environment
@@ -325,14 +318,12 @@ fn print_environment(environment: &EnvironmentRecord) {
 #[derive(Debug, PartialEq, Eq)]
 struct InferredProjectInput {
     project_name: String,
-    slug: String,
     git_repo_url: String,
     default_branch: Option<String>,
     project_root: String,
 }
 
 fn infer_project_defaults(
-    slug: Option<&str>,
     git_repo_url: Option<&str>,
     project_root: Option<&str>,
     default_branch: Option<&str>,
@@ -342,10 +333,7 @@ fn infer_project_defaults(
     let repo_root = git_repo_root(&current_dir)?;
 
     Ok(InferredProjectInput {
-        project_name: project_name.clone(),
-        slug: slug
-            .map(ToString::to_string)
-            .unwrap_or_else(|| project_name.replace(' ', "-")),
+        project_name,
         git_repo_url: git_repo_url
             .map(ToString::to_string)
             .or_else(|| git_remote_origin_url(&repo_root).ok())
@@ -498,11 +486,10 @@ mod tests {
 
         let original_dir = std::env::current_dir().expect("cwd");
         std::env::set_current_dir(&project_root).expect("set cwd");
-        let inferred = infer_project_defaults(None, None, None, None).expect("inferred");
+        let inferred = infer_project_defaults(None, None, None).expect("inferred");
         std::env::set_current_dir(original_dir).expect("restore cwd");
 
         assert_eq!(inferred.project_name, "jaffle_shop_project");
-        assert_eq!(inferred.slug, "jaffle_shop_project");
         assert_eq!(inferred.git_repo_url, "git@github.com:example/repo.git");
         assert_eq!(inferred.project_root, "analytics");
         assert_eq!(inferred.default_branch, None);

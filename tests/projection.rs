@@ -306,7 +306,7 @@ async fn project_and_environment_cli_round_trip() {
     );
 
     let project_row = sqlx::query(
-        "SELECT project_id, project_name, slug, git_repo_url, default_branch, project_root FROM projects WHERE project_id = $1",
+        "SELECT project_id, project_name, git_repo_url, default_branch, project_root FROM projects WHERE project_id = $1",
     )
     .bind(&project_id)
     .fetch_one(db.pool())
@@ -314,7 +314,6 @@ async fn project_and_environment_cli_round_trip() {
     .expect("project row");
     assert_eq!(project_row.get::<String, _>("project_id"), project_id);
     assert_eq!(project_row.get::<String, _>("project_name"), "proj");
-    assert_eq!(project_row.get::<String, _>("slug"), "proj");
     assert_eq!(
         project_row
             .get::<Option<String>, _>("git_repo_url")
@@ -397,7 +396,7 @@ async fn environment_seed_from_copies_active_state_without_runs() {
         ],
     ));
 
-    let ids = project_environment_ids(db.pool(), "proj", "source").await;
+    let ids = project_environment_ids(db.pool(), &project_id, "source").await;
     let run_id = Uuid::new_v4();
     insert_run(
         db.pool(),
@@ -483,7 +482,7 @@ async fn environment_seed_from_copies_active_state_without_runs() {
     );
     assert_success(&seed_output);
 
-    let target_ids = project_environment_ids(db.pool(), "proj", "target").await;
+    let target_ids = project_environment_ids(db.pool(), &project_id, "target").await;
     let promoted_node_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM promoted_manifest_nodes WHERE project_id = $1 AND environment_id = $2",
     )
@@ -710,7 +709,7 @@ impl TestDatabase {
 
 async fn scope_ids(pool: &PgPool) -> ScopeIds {
     let project_id: i64 = sqlx::query_scalar(
-        "INSERT INTO projects (project_id, project_name, slug, git_repo_url, default_branch, project_root) VALUES ('proj', 'proj', 'proj', 'https://example.com/repo.git', 'main', '.') ON CONFLICT (project_id) DO UPDATE SET slug = EXCLUDED.slug RETURNING id",
+        "INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root) VALUES ('proj', 'proj', 'https://example.com/repo.git', 'main', '.') ON CONFLICT (project_id) DO UPDATE SET project_name = EXCLUDED.project_name RETURNING id",
     )
     .fetch_one(pool)
     .await
@@ -730,7 +729,7 @@ async fn scope_ids(pool: &PgPool) -> ScopeIds {
 
 async fn project_environment_ids(
     pool: &PgPool,
-    project_slug: &str,
+    project_ref: &str,
     environment_slug: &str,
 ) -> ScopeIds {
     let row = sqlx::query(
@@ -738,10 +737,10 @@ async fn project_environment_ids(
         SELECT p.id AS project_id, e.id AS environment_id
         FROM projects p
         JOIN environments e ON e.project_id = p.id
-        WHERE p.slug = $1 AND e.slug = $2
+        WHERE p.project_id = $1 AND e.slug = $2
         "#,
     )
-    .bind(project_slug)
+    .bind(project_ref)
     .bind(environment_slug)
     .fetch_one(pool)
     .await

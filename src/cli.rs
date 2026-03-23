@@ -84,8 +84,6 @@ pub enum ProjectCommand {
     #[command(about = "Initialize the current dbt project and write vars.dbtx.project_id")]
     Init {
         #[arg(long)]
-        slug: Option<String>,
-        #[arg(long)]
         git_repo_url: Option<String>,
         #[arg(long)]
         project_root: Option<String>,
@@ -96,8 +94,6 @@ pub enum ProjectCommand {
     },
     #[command(about = "Update the registered dbtx project to match the current repo state")]
     Update {
-        #[arg(long)]
-        slug: Option<String>,
         #[arg(long)]
         git_repo_url: Option<String>,
         #[arg(long)]
@@ -290,8 +286,6 @@ mod tests {
             "dbtx",
             "project",
             "init",
-            "--slug",
-            "jaffle",
             "--git-repo-url",
             "https://github.com/example/repo.git",
             "--project-root",
@@ -299,13 +293,11 @@ mod tests {
         ]);
         match cli.command {
             Command::Project(ProjectCommand::Init {
-                slug,
                 git_repo_url,
                 project_root,
                 default_branch,
                 force,
             }) => {
-                assert_eq!(slug.as_deref(), Some("jaffle"));
                 assert_eq!(
                     git_repo_url.as_deref(),
                     Some("https://github.com/example/repo.git")
@@ -323,12 +315,10 @@ mod tests {
         let cli = Cli::parse_from(["dbtx", "project", "update", "--default-branch", "main"]);
         match cli.command {
             Command::Project(ProjectCommand::Update {
-                slug,
                 git_repo_url,
                 project_root,
                 default_branch,
             }) => {
-                assert!(slug.is_none());
                 assert!(git_repo_url.is_none());
                 assert!(project_root.is_none());
                 assert_eq!(default_branch.as_deref(), Some("main"));
