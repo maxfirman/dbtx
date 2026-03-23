@@ -664,29 +664,6 @@ impl Db {
         Ok(())
     }
 
-    pub async fn replay_projection(&self, run_id: Uuid) -> AppResult<u64> {
-        let row = sqlx::query(
-            r#"
-            SELECT id, project_id, environment_id
-            FROM runs
-            WHERE run_id = $1
-            "#,
-        )
-        .bind(run_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(AppError::RunNotFound(run_id))?;
-
-        let run_pk: i64 = row.get("id");
-        let project_id: i64 = row.get("project_id");
-        let environment_id: i64 = row.get("environment_id");
-
-        self.rebuild_promoted_manifest_state_up_to(project_id, environment_id, Some(run_pk))
-            .await?;
-        self.rebuild_current_state_up_to(project_id, environment_id, Some(run_pk))
-            .await
-    }
-
     pub(crate) async fn resolve_local_project(&self, project_dir: &Path) -> AppResult<ProjectRecord> {
         let project_id = read_dbtx_project_id(project_dir)?.ok_or(AppError::ProjectIdMissing)?;
         let project = self.get_project_by_project_id(&project_id).await?;
@@ -1203,26 +1180,6 @@ impl Db {
         Ok(())
     }
 
-    async fn promote_manifest_state(
-        &self,
-        run_id: Uuid,
-        project_id: i64,
-        environment_id: i64,
-        promote_base_manifest: bool,
-    ) -> AppResult<()> {
-        let mut tx = self.pool.begin().await?;
-        self.promote_manifest_state_in_tx(
-            &mut tx,
-            run_id,
-            project_id,
-            environment_id,
-            promote_base_manifest,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
     async fn promote_manifest_state_in_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -1282,120 +1239,6 @@ impl Db {
         .await?;
 
         Ok(())
-    }
-
-    async fn rebuild_promoted_manifest_state_up_to(
-        &self,
-        project_id: i64,
-        environment_id: i64,
-        max_run_pk: Option<i64>,
-    ) -> AppResult<()> {
-        sqlx::query(
-            r#"
-            DELETE FROM promoted_manifest_nodes
-            WHERE project_id = $1 AND environment_id = $2
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_id)
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            DELETE FROM promoted_manifest_meta
-            WHERE project_id = $1 AND environment_id = $2
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_id)
-        .execute(&self.pool)
-        .await?;
-
-        let base_run = sqlx::query(
-            r#"
-            SELECT r.run_id
-            FROM runs r
-            JOIN manifest_snapshots ms ON ms.run_id = r.run_id
-            WHERE r.project_id = $1
-              AND r.environment_id = $2
-              AND r.terminal_status = 'success'
-              AND r.is_full_graph_run = TRUE
-              AND r.command IN ('run', 'build')
-              AND ($3::BIGINT IS NULL OR r.id <= $3)
-            ORDER BY r.id DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_id)
-        .bind(max_run_pk)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some(base_run) = base_run {
-            let run_id: Uuid = base_run.get("run_id");
-            self.promote_manifest_state(run_id, project_id, environment_id, true)
-                .await?;
-        }
-
-        sqlx::query(
-            r#"
-            WITH latest_success AS (
-                SELECT DISTINCT ON (ne.unique_id)
-                    ne.unique_id,
-                    ne.run_id,
-                    ne.checksum
-                FROM node_executions ne
-                JOIN runs r ON r.run_id = ne.run_id
-                WHERE r.project_id = $1
-                  AND r.environment_id = $2
-                  AND r.command IN ('run', 'build')
-                  AND ne.status IN ('success', 'pass', 'created')
-                  AND ($3::BIGINT IS NULL OR r.id <= $3)
-                ORDER BY ne.unique_id, r.id DESC
-            )
-            INSERT INTO promoted_manifest_nodes (
-                project_id, environment_id, unique_id, source_run_id, checksum, raw_node
-            )
-            SELECT
-                $1,
-                $2,
-                ls.unique_id,
-                ls.run_id,
-                ls.checksum,
-                ms.manifest -> 'nodes' -> ls.unique_id
-            FROM latest_success ls
-            JOIN manifest_snapshots ms ON ms.run_id = ls.run_id
-            WHERE ms.manifest -> 'nodes' -> ls.unique_id IS NOT NULL
-            ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE SET
-                source_run_id = EXCLUDED.source_run_id,
-                checksum = EXCLUDED.checksum,
-                raw_node = EXCLUDED.raw_node,
-                promoted_at = NOW()
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_id)
-        .bind(max_run_pk)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
-    async fn rebuild_current_state_up_to(
-        &self,
-        project_id: i64,
-        environment_id: i64,
-        max_run_pk: Option<i64>,
-    ) -> AppResult<u64> {
-        let mut tx = self.pool.begin().await?;
-        let rows = self
-            .rebuild_current_state_up_to_in_tx(&mut tx, project_id, environment_id, max_run_pk)
-            .await?;
-        tx.commit().await?;
-        Ok(rows)
     }
 
     async fn rebuild_current_state_up_to_in_tx(

@@ -792,63 +792,6 @@ async fn seeded_environment_starts_with_empty_state_modified() {
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn dbtx_replay_rebuilds_real_current_state() {
-    let _guard = integration_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
-
-    let project = RealProject::new();
-    project.seed();
-    project.init_dbtx_project(db.url());
-    assert_success(&run_dbtx(
-        db.url(),
-        &project,
-        &[
-            "run",
-            "--project-dir",
-            project.path_str(),
-            "--profiles-dir",
-            project.path_str(),
-            "--select",
-            "stg_customers",
-        ],
-    ));
-
-    let run_id: uuid::Uuid = sqlx::query("SELECT run_id FROM runs ORDER BY id DESC LIMIT 1")
-        .fetch_one(db.pool())
-        .await
-        .expect("run row")
-        .get("run_id");
-
-    sqlx::query("DELETE FROM current_node_state")
-        .execute(db.pool())
-        .await
-        .expect("delete current state");
-
-    let empty_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM current_node_state")
-        .fetch_one(db.pool())
-        .await
-        .expect("empty count");
-    assert_eq!(empty_count, 0);
-
-    let output = run_dbtx(
-        db.url(),
-        &project,
-        &["replay", "--run-id", &run_id.to_string()],
-    );
-    assert_success(&output);
-
-    let rebuilt_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM current_node_state")
-        .fetch_one(db.pool())
-        .await
-        .expect("rebuilt count");
-    assert_eq!(rebuilt_count, 1);
-}
-
-#[tokio::test]
-#[ignore = "requires local dbt fusion, duckdb, and docker"]
 async fn dbtx_ls_reports_modified_model_after_file_change() {
     let _guard = integration_lock()
         .lock()
@@ -954,33 +897,6 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
         "expected failed downstream model to remain modified, got: {modified_after:?}"
     );
 
-    let failed_run_id: uuid::Uuid = sqlx::query("SELECT run_id FROM runs ORDER BY id DESC LIMIT 1")
-        .fetch_one(db.pool())
-        .await
-        .expect("failed run row")
-        .get("run_id");
-
-    sqlx::query("DELETE FROM current_node_state")
-        .execute(db.pool())
-        .await
-        .expect("delete current state before replay");
-
-    let replay_output = run_dbtx(
-        db.url(),
-        &project,
-        &["replay", "--run-id", &failed_run_id.to_string()],
-    );
-    assert_success(&replay_output);
-
-    let modified_after_replay = modified_unique_ids(db.url(), &project);
-    assert!(
-        !modified_after_replay.contains("model.jaffle_shop_project.stg_orders"),
-        "expected successful upstream model to stay out of modified set after replay, got: {modified_after_replay:?}"
-    );
-    assert!(
-        modified_after_replay.contains("model.jaffle_shop_project.orders"),
-        "expected failed downstream model to remain modified after replay, got: {modified_after_replay:?}"
-    );
 }
 
 struct RealProject {

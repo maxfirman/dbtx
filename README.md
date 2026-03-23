@@ -10,7 +10,6 @@ Phase 1 supports:
 - `dbtx ls ...`
 - `dbtx test ...`
 - `dbtx seed ...`
-- `dbtx replay --run-id <uuid>`
 
 ## Configuration
 
@@ -37,12 +36,6 @@ Build dbt resources with state capture:
 
 ```bash
 DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- build --target dev
-```
-
-Replay projections:
-
-```bash
-DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- replay --run-id <uuid>
 ```
 
 List nodes using reconstructed state:

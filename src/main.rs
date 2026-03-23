@@ -61,14 +61,6 @@ async fn run() -> AppResult<()> {
         Command::Seed { args } => {
             handle_persisting_command(InvocationCommand::Seed, args, cli.database_url).await?
         }
-        Command::Replay { run_id } => {
-            let current_dir = std::env::current_dir()?;
-            let config = RuntimeConfig::resolve(cli.database_url, Some(&current_dir))?;
-            let db = connect_db(&config).await?;
-            let service = InvocationService::new(&db);
-            let updated = service.replay(run_id).await?;
-            println!("Rebuilt current state for {} nodes.", updated.updated_nodes);
-        }
     }
 
     Ok(())

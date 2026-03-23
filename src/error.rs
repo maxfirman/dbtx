@@ -42,8 +42,6 @@ pub enum AppError {
     DbtFailed(i32),
     #[error("missing manifest at {0}")]
     MissingManifest(String),
-    #[error("run {0} was not found")]
-    RunNotFound(uuid::Uuid),
     #[error("current directory is not a dbt project root: missing dbt_project.yml")]
     NotDbtProjectRoot,
     #[error("failed to infer git repository from current directory")]

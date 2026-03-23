@@ -60,11 +60,6 @@ pub struct InvocationResult {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReplayResult {
-    pub updated_nodes: u64,
-}
-
-#[derive(Debug, Clone)]
 pub struct ProjectInitRequest {
     pub current_dir: PathBuf,
     pub git_repo_url: Option<String>,
@@ -348,12 +343,6 @@ impl<'a> InvocationService<'a> {
                 .await
             }
         }
-    }
-
-    pub async fn replay(&self, run_id: Uuid) -> AppResult<ReplayResult> {
-        self.db.require_current_schema().await?;
-        let updated_nodes = self.db.replay_projection(run_id).await?;
-        Ok(ReplayResult { updated_nodes })
     }
 
     async fn invoke_persisting<O: InvocationObserver>(

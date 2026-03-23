@@ -1,7 +1,5 @@
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
-use uuid::Uuid;
-
 #[derive(Debug, Parser)]
 #[command(name = "dbtx")]
 #[command(about = "dbt-compatible wrapper with state persistence")]
@@ -64,11 +62,6 @@ pub enum Command {
     Seed {
         #[arg()]
         args: Vec<OsString>,
-    },
-    #[command(about = "Rebuild current-state projections from persisted facts")]
-    Replay {
-        #[arg(long)]
-        run_id: Uuid,
     },
 }
 
