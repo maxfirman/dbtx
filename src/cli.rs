@@ -74,13 +74,13 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum StateCommand {
-    #[command(about = "Initialize the dbtx database schema")]
-    Init,
+    #[command(about = "Apply dbtx database migrations")]
+    Migrate,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ProjectCommand {
-    #[command(about = "Initialize the current dbt project and write vars.dbtx.project_id")]
+    #[command(about = "Initialize the current dbt project and write dbtx.toml")]
     Init {
         #[arg(long)]
         git_repo_url: Option<String>,
@@ -188,18 +188,18 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn state_init_accepts_database_url() {
+    fn state_migrate_accepts_database_url() {
         let cli = Cli::parse_from([
             "dbtx",
             "--database-url",
             "postgres://example",
             "state",
-            "init",
+            "migrate",
         ]);
         assert_eq!(cli.database_url.as_deref(), Some("postgres://example"));
         match cli.command {
-            Command::State(StateCommand::Init) => {}
-            _ => panic!("expected state init command"),
+            Command::State(StateCommand::Migrate) => {}
+            _ => panic!("expected state migrate command"),
         }
     }
 

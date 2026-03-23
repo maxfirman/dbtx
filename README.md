@@ -4,7 +4,7 @@
 
 Phase 1 supports:
 
-- `dbtx state init`
+- `dbtx state migrate`
 - `dbtx build ...`
 - `dbtx run ...`
 - `dbtx ls ...`
@@ -24,7 +24,7 @@ Phase 1 supports:
 Initialize the schema:
 
 ```bash
-DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- state init
+DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run -- state migrate
 ```
 
 Run dbt with state capture:

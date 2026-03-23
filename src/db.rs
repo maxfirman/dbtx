@@ -6,7 +6,7 @@ use serde_json::Value;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
@@ -15,6 +15,12 @@ use tokio::process::{Child, Command};
 use uuid::Uuid;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+#[derive(Debug, Clone)]
+pub struct AppliedMigration {
+    pub version: i64,
+    pub description: String,
+}
 
 pub struct Db {
     pool: PgPool,
@@ -118,6 +124,16 @@ impl Db {
     pub async fn init(&self) -> AppResult<()> {
         MIGRATOR.run(&self.pool).await?;
         Ok(())
+    }
+
+    pub async fn migrate(&self) -> AppResult<Vec<AppliedMigration>> {
+        let before_versions = self.migration_versions().await?;
+        MIGRATOR.run(&self.pool).await?;
+        let after = self.migration_rows().await?;
+        Ok(after
+            .into_iter()
+            .filter(|migration| !before_versions.contains(&migration.version))
+            .collect())
     }
 
     pub async fn create_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
@@ -1620,6 +1636,37 @@ impl Db {
         })??;
 
         Ok(status)
+    }
+}
+
+impl Db {
+    async fn migration_versions(&self) -> AppResult<BTreeSet<i64>> {
+        Ok(self
+            .migration_rows()
+            .await?
+            .into_iter()
+            .map(|migration| migration.version)
+            .collect())
+    }
+
+    async fn migration_rows(&self) -> AppResult<Vec<AppliedMigration>> {
+        let rows =
+            sqlx::query("SELECT version, description FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&self.pool)
+                .await;
+        match rows {
+            Ok(rows) => Ok(rows
+                .into_iter()
+                .map(|row| AppliedMigration {
+                    version: row.get("version"),
+                    description: row.get("description"),
+                })
+                .collect()),
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("42P01") => {
+                Ok(Vec::new())
+            }
+            Err(err) => Err(AppError::Sqlx(err)),
+        }
     }
 }
 

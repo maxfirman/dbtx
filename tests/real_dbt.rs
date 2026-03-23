@@ -1089,10 +1089,10 @@ impl TestDatabase {
 
 fn init_dbtx_schema(database_url: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_dbtx"))
-        .args(["state", "init"])
+        .args(["state", "migrate"])
         .env("DBTX_DATABASE_URL", database_url)
         .output()
-        .expect("run dbtx init");
+        .expect("run dbtx migrate");
     assert_success(&output);
 }
 

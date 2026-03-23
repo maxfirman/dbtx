@@ -14,6 +14,7 @@ use db::{
 };
 use error::{AppError, AppResult};
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use uuid::Uuid;
@@ -31,14 +32,12 @@ async fn run() -> AppResult<()> {
 
     match cli.command {
         Command::State(state_command) => match state_command {
-            StateCommand::Init => {
+            StateCommand::Migrate => {
                 let current_dir = std::env::current_dir()?;
-                let _db = connect_initialized_db(&RuntimeConfig::resolve(
-                    cli.database_url,
-                    Some(&current_dir),
-                )?)
-                .await?;
-                println!("Initialized dbtx database schema.");
+                let config = RuntimeConfig::resolve(cli.database_url, Some(&current_dir))?;
+                let db = connect_db(&config).await?;
+                let applied = db.migrate().await?;
+                print_migration_summary(&applied);
             }
         },
         Command::Project(project_command) => {
@@ -64,6 +63,85 @@ async fn run() -> AppResult<()> {
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum CliStyle {
+    Green,
+    Yellow,
+    Cyan,
+    Bold,
+    Dim,
+}
+
+fn print_migration_summary(applied: &[db::AppliedMigration]) {
+    let use_color = should_use_color();
+    println!(
+        "{}",
+        style(
+            "dbtx migrations",
+            &[CliStyle::Cyan, CliStyle::Bold],
+            use_color
+        )
+    );
+    if applied.is_empty() {
+        println!(
+            "{}",
+            style("  No pending migrations.", &[CliStyle::Dim], use_color)
+        );
+        return;
+    }
+
+    for migration in applied {
+        println!(
+            "  {} {}",
+            style("Applied", &[CliStyle::Green, CliStyle::Bold], use_color),
+            style(
+                &format!("{} {}", migration.version, migration.description),
+                &[CliStyle::Bold],
+                use_color,
+            )
+        );
+    }
+    println!(
+        "{}",
+        style(
+            &format!("  {} migration(s) applied.", applied.len()),
+            &[CliStyle::Yellow, CliStyle::Bold],
+            use_color,
+        )
+    );
+}
+
+fn should_use_color() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if matches!(std::env::var("TERM").ok().as_deref(), Some("dumb")) {
+        return false;
+    }
+    if matches!(std::env::var("CLICOLOR_FORCE").ok().as_deref(), Some("1")) {
+        return true;
+    }
+    std::io::stdout().is_terminal()
+}
+
+fn style(input: &str, styles: &[CliStyle], use_color: bool) -> String {
+    if !use_color || styles.is_empty() {
+        return input.to_string();
+    }
+    let prefix = styles
+        .iter()
+        .map(|style| match style {
+            CliStyle::Green => "32",
+            CliStyle::Yellow => "33",
+            CliStyle::Cyan => "36",
+            CliStyle::Bold => "1",
+            CliStyle::Dim => "2",
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    format!("\u{1b}[{prefix}m{input}\u{1b}[0m")
 }
 
 fn is_help_request(args: &[OsString]) -> bool {

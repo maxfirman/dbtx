@@ -879,10 +879,10 @@ fn manifest_with_nodes<const N: usize>(nodes: [serde_json::Value; N]) -> serde_j
 
 fn init_dbtx_schema(database_url: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_dbtx"))
-        .args(["state", "init"])
+        .args(["state", "migrate"])
         .env("DBTX_DATABASE_URL", database_url)
         .output()
-        .expect("run dbtx init");
+        .expect("run dbtx migrate");
     assert!(
         output.status.success(),
         "dbtx init failed\nstdout:\n{}\nstderr:\n{}",
