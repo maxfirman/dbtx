@@ -69,3 +69,9 @@ cargo test --test real_dbt -- --ignored
 Optional override:
 
 - `DBTX_TEST_DATABASE_URL`: PostgreSQL URL for the integration test database; if unset, the tests start an ephemeral Postgres container automatically
+
+## Licensing
+
+`dbtx` is licensed under Apache License 2.0. The `dbtx` source code in this repository is independent of dbt Fusion and does not include dbt Fusion source code or binaries.
+
+`dbtx` invokes a separately installed `dbt` / `dbt-fusion` executable. dbt Fusion is licensed separately by dbt Labs, and users of `dbtx` are responsible for obtaining and using dbt Fusion in compliance with the applicable dbt Labs license terms.
