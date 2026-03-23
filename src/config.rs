@@ -23,8 +23,8 @@ pub struct InvocationContext {
 
 impl RuntimeConfig {
     pub fn from_env() -> AppResult<Self> {
-        let database_url = env::var("DBTX_DATABASE_URL")
-            .map_err(|_| AppError::MissingEnv("DBTX_DATABASE_URL"))?;
+        let database_url =
+            env::var("DBTX_DATABASE_URL").map_err(|_| AppError::MissingEnv("DBTX_DATABASE_URL"))?;
         let dbt_path = env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
         Ok(Self {
             database_url,
@@ -73,10 +73,8 @@ impl InvocationContext {
                 .or_else(|| env::var("DBT_TARGET").ok())
                 .unwrap_or_else(|| "default".to_string())
         });
-        let is_full_graph_run = !has_any_option(
-            args,
-            &["--select", "-s", "--exclude", "-x", "--selector"],
-        );
+        let is_full_graph_run =
+            !has_any_option(args, &["--select", "-s", "--exclude", "-x", "--selector"]);
         let wants_state_modified = args.iter().any(|arg| {
             let value = arg.to_string_lossy();
             value.contains("state:modified")

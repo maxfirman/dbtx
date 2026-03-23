@@ -55,10 +55,12 @@ impl LogEvent {
     fn render_text_line_with_color(&self, use_color: bool) -> Option<String> {
         match self.info.name.as_str() {
             "Generic" => render_generic_message(&self.info.msg, use_color),
-            "LogModelResult" | "LogSeedResult" | "LogSnapshotResult" | "LogTestResult"
-            | "LogFreshnessResult" | "LogSnapshotResultLine" => {
-                Some(render_result_line(self, use_color))
-            }
+            "LogModelResult"
+            | "LogSeedResult"
+            | "LogSnapshotResult"
+            | "LogTestResult"
+            | "LogFreshnessResult"
+            | "LogSnapshotResultLine" => Some(render_result_line(self, use_color)),
             "CommandCompleted" => Some(colorize_summary(&self.info.msg, use_color)),
             _ => None,
         }
@@ -74,7 +76,12 @@ impl LogEvent {
             .and_then(|value| value.get("status"))
             .and_then(Value::as_str)
             .map(ToString::to_string)
-            .or_else(|| self.data.get("status").and_then(Value::as_str).map(ToString::to_string))
+            .or_else(|| {
+                self.data
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
             .or_else(|| {
                 node_info
                     .get("node_status")
@@ -130,12 +137,8 @@ impl LogEvent {
                 .get("node_checksum")
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
-            started_at: parse_timestamp(
-                node_info.get("node_started_at").and_then(Value::as_str),
-            ),
-            finished_at: parse_timestamp(
-                node_info.get("node_finished_at").and_then(Value::as_str),
-            ),
+            started_at: parse_timestamp(node_info.get("node_started_at").and_then(Value::as_str)),
+            finished_at: parse_timestamp(node_info.get("node_finished_at").and_then(Value::as_str)),
             execution_time_seconds,
         })
     }
@@ -194,7 +197,11 @@ fn render_generic_message(msg: &str, use_color: bool) -> Option<String> {
     if msg == "Loading profiles.yml" {
         return Some(format!(
             "{} profiles.yml",
-            style("   Loading", &[AnsiStyle::Green, AnsiStyle::Bold], use_color)
+            style(
+                "   Loading",
+                &[AnsiStyle::Green, AnsiStyle::Bold],
+                use_color
+            )
         ));
     }
 
@@ -327,7 +334,11 @@ fn format_relation_name(
     if let (Some(schema), Some(alias)) = (schema, alias) {
         return format!(
             "{}{}",
-            style(&format!("{schema}."), &[AnsiStyle::Cyan, AnsiStyle::Bold], use_color),
+            style(
+                &format!("{schema}."),
+                &[AnsiStyle::Cyan, AnsiStyle::Bold],
+                use_color
+            ),
             style(alias, &[AnsiStyle::Blue, AnsiStyle::Bold], use_color)
         );
     }
@@ -482,10 +493,12 @@ mod tests {
         }"#;
 
         let event = LogEvent::parse(raw).expect("event should parse");
-        assert!(event
-            .render_text_line_with_color(false)
-            .expect("summary should render")
-            .contains("Finished 'run' successfully"));
+        assert!(
+            event
+                .render_text_line_with_color(false)
+                .expect("summary should render")
+                .contains("Finished 'run' successfully")
+        );
     }
 
     #[test]
@@ -514,6 +527,9 @@ mod tests {
 
     #[test]
     fn color_helper_is_noop_when_disabled() {
-        assert_eq!(style("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold], false), "Succeeded");
+        assert_eq!(
+            style("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold], false),
+            "Succeeded"
+        );
     }
 }

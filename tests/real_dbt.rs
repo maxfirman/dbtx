@@ -1,7 +1,7 @@
 #![allow(clippy::await_holding_lock)]
 
-use sqlx::{PgPool, Row};
 use serde_json::Value;
+use sqlx::{PgPool, Row};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -9,11 +9,42 @@ use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 use testcontainers_modules::{
     postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ContainerAsync},
+    testcontainers::{ContainerAsync, runners::AsyncRunner},
 };
 use uuid::Uuid;
 
 const ENVIRONMENT_SLUG: &str = "dev";
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_ls_requires_project_init() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+
+    let output = run_dbtx(
+        db.url(),
+        &project,
+        &[
+            "ls",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
+    );
+    assert_failure(&output);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Run `dbtx project init` first"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
@@ -31,7 +62,15 @@ async fn dbtx_run_persists_real_jaffle_state() {
     let output = run_dbtx(
         db.url(),
         &project,
-        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str(), "--select", "stg_customers"],
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "--select",
+            "stg_customers",
+        ],
     );
     assert_success(&output);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -84,16 +123,24 @@ async fn dbtx_run_persists_real_jaffle_state() {
     assert_eq!(manifest_count, 1);
     assert_eq!(node_count, 1);
     assert_eq!(status, "success");
-    assert_eq!(run_row.get::<Option<String>, _>("git_branch").as_deref(), Some("main"));
     assert_eq!(
-        run_row.get::<Option<String>, _>("git_commit_sha").as_deref(),
+        run_row.get::<Option<String>, _>("git_branch").as_deref(),
+        Some("main")
+    );
+    assert_eq!(
+        run_row
+            .get::<Option<String>, _>("git_commit_sha")
+            .as_deref(),
         Some(project.head_sha().as_str())
     );
     assert_eq!(
         run_row.get::<Option<String>, _>("git_repo_url").as_deref(),
         Some("https://example.com/jaffle_shop_project.git")
     );
-    assert_eq!(run_row.get::<Option<String>, _>("project_root").as_deref(), Some("."));
+    assert_eq!(
+        run_row.get::<Option<String>, _>("project_root").as_deref(),
+        Some(".")
+    );
     assert_eq!(
         run_row.get::<Option<String>, _>("project_name").as_deref(),
         Some("jaffle_shop_project")
@@ -114,11 +161,18 @@ async fn dbtx_build_persists_real_jaffle_state() {
     reset_db(db.pool()).await;
 
     let project = RealProject::new();
+    project.init_dbtx_project(db.url());
 
     let output = run_dbtx(
         db.url(),
         &project,
-        &["build", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+        &[
+            "build",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
     );
     assert_success(&output);
 
@@ -132,16 +186,18 @@ async fn dbtx_build_persists_real_jaffle_state() {
         .await
         .expect("build command row")
         .get("command");
-    let model_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM current_node_state WHERE resource_type = 'model'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("model count");
+    let model_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM current_node_state WHERE resource_type = 'model'")
+            .fetch_one(db.pool())
+            .await
+            .expect("model count");
 
     assert_eq!(command, "build");
     assert_eq!(status, "success");
-    assert!(model_count >= 6, "expected build to persist multiple models, got {model_count}");
+    assert!(
+        model_count >= 6,
+        "expected build to persist multiple models, got {model_count}"
+    );
 }
 
 #[tokio::test]
@@ -154,11 +210,18 @@ async fn dbtx_seed_persists_seed_state() {
     reset_db(db.pool()).await;
 
     let project = RealProject::new();
+    project.init_dbtx_project(db.url());
 
     let output = run_dbtx(
         db.url(),
         &project,
-        &["seed", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+        &[
+            "seed",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
     );
     assert_success(&output);
 
@@ -167,12 +230,11 @@ async fn dbtx_seed_persists_seed_state() {
         .await
         .expect("seed command row")
         .get("command");
-    let seed_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM current_node_state WHERE resource_type = 'seed'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("seed node count");
+    let seed_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM current_node_state WHERE resource_type = 'seed'")
+            .fetch_one(db.pool())
+            .await
+            .expect("seed node count");
     let promoted_node_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM promoted_manifest_nodes")
             .fetch_one(db.pool())
@@ -201,27 +263,41 @@ async fn dbtx_test_persists_test_state() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
     assert_success(&run_dbtx(
         db.url(),
         &project,
-        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
     ));
     let promoted_node_count_before: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM promoted_manifest_nodes")
             .fetch_one(db.pool())
             .await
             .expect("promoted node count before test");
-    let promoted_meta_source_before: Uuid = sqlx::query_scalar(
-        "SELECT source_run_id FROM promoted_manifest_meta LIMIT 1",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("promoted meta source before test");
+    let promoted_meta_source_before: Uuid =
+        sqlx::query_scalar("SELECT source_run_id FROM promoted_manifest_meta LIMIT 1")
+            .fetch_one(db.pool())
+            .await
+            .expect("promoted meta source before test");
 
     let output = run_dbtx(
         db.url(),
         &project,
-        &["test", "--project-dir", project.path_str(), "--profiles-dir", project.path_str(), "--select", "stg_customers"],
+        &[
+            "test",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "--select",
+            "stg_customers",
+        ],
     );
     assert_success(&output);
 
@@ -241,15 +317,17 @@ async fn dbtx_test_persists_test_state() {
             .fetch_one(db.pool())
             .await
             .expect("promoted node count after test");
-    let promoted_meta_source_after: Uuid = sqlx::query_scalar(
-        "SELECT source_run_id FROM promoted_manifest_meta LIMIT 1",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("promoted meta source after test");
+    let promoted_meta_source_after: Uuid =
+        sqlx::query_scalar("SELECT source_run_id FROM promoted_manifest_meta LIMIT 1")
+            .fetch_one(db.pool())
+            .await
+            .expect("promoted meta source after test");
 
     assert_eq!(command, "test");
-    assert!(test_count >= 1, "expected persisted test node executions, got {test_count}");
+    assert!(
+        test_count >= 1,
+        "expected persisted test node executions, got {test_count}"
+    );
     assert_eq!(promoted_node_count_after, promoted_node_count_before);
     assert_eq!(promoted_meta_source_after, promoted_meta_source_before);
 }
@@ -265,10 +343,19 @@ async fn dbtx_ls_uses_real_project_and_does_not_write_runs() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
     assert_success(&run_dbtx(
         db.url(),
         &project,
-        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str(), "--select", "stg_customers"],
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "--select",
+            "stg_customers",
+        ],
     ));
 
     let runs_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
@@ -331,6 +418,7 @@ async fn dbtx_ls_without_prior_state_succeeds() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
 
     let output = run_dbtx(
         db.url(),
@@ -379,6 +467,7 @@ async fn dbtx_ls_state_modified_without_prior_state_returns_all_node_types() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
 
     let modified = modified_unique_ids(db.url(), &project);
     assert!(
@@ -425,7 +514,13 @@ async fn project_init_and_force_reset_state_modified_baseline() {
     let build_output = run_dbtx(
         db.url(),
         &project,
-        &["build", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+        &[
+            "build",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
     );
     assert_success(&build_output);
 
@@ -477,11 +572,18 @@ async fn dbtx_full_run_clears_state_modified() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
 
     let output = run_dbtx(
         db.url(),
         &project,
-        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
     );
     assert_success(&output);
 
@@ -503,11 +605,18 @@ async fn dbtx_build_state_modified_clears_modified_set() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
 
     assert_success(&run_dbtx(
         db.url(),
         &project,
-        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
     ));
 
     project.append_to_file(
@@ -633,10 +742,19 @@ async fn dbtx_replay_rebuilds_real_current_state() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
     assert_success(&run_dbtx(
         db.url(),
         &project,
-        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str(), "--select", "stg_customers"],
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "--select",
+            "stg_customers",
+        ],
     ));
 
     let run_id: uuid::Uuid = sqlx::query("SELECT run_id FROM runs ORDER BY id DESC LIMIT 1")
@@ -656,7 +774,11 @@ async fn dbtx_replay_rebuilds_real_current_state() {
         .expect("empty count");
     assert_eq!(empty_count, 0);
 
-    let output = run_dbtx(db.url(), &project, &["replay", "--run-id", &run_id.to_string()]);
+    let output = run_dbtx(
+        db.url(),
+        &project,
+        &["replay", "--run-id", &run_id.to_string()],
+    );
     assert_success(&output);
 
     let rebuilt_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM current_node_state")
@@ -677,11 +799,18 @@ async fn dbtx_ls_reports_modified_model_after_file_change() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
 
     assert_success(&run_dbtx(
         db.url(),
         &project,
-        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
     ));
 
     project.append_to_file(
@@ -707,11 +836,18 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
 
     assert_success(&run_dbtx(
         db.url(),
         &project,
-        &["run", "--project-dir", project.path_str(), "--profiles-dir", project.path_str()],
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
     ));
 
     project.append_to_file(
@@ -770,7 +906,11 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
         .await
         .expect("delete current state before replay");
 
-    let replay_output = run_dbtx(db.url(), &project, &["replay", "--run-id", &failed_run_id.to_string()]);
+    let replay_output = run_dbtx(
+        db.url(),
+        &project,
+        &["replay", "--run-id", &failed_run_id.to_string()],
+    );
     assert_success(&replay_output);
 
     let modified_after_replay = modified_unique_ids(db.url(), &project);
@@ -794,10 +934,18 @@ impl RealProject {
         copy_dir_all(&jaffle_fixture_dir(), temp_dir.path());
         clean_runtime_artifacts(temp_dir.path());
         git_cmd(["init", "-b", "main"], temp_dir.path());
-        git_cmd(["config", "user.email", "dbtx@example.com"], temp_dir.path());
+        git_cmd(
+            ["config", "user.email", "dbtx@example.com"],
+            temp_dir.path(),
+        );
         git_cmd(["config", "user.name", "dbtx"], temp_dir.path());
         git_cmd(
-            ["remote", "add", "origin", "https://example.com/jaffle_shop_project.git"],
+            [
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/jaffle_shop_project.git",
+            ],
             temp_dir.path(),
         );
         git_cmd(["add", "."], temp_dir.path());
@@ -891,7 +1039,9 @@ impl TestDatabase {
     async fn new() -> Self {
         if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
             init_dbtx_schema(&url);
-            let pool = PgPool::connect(&url).await.expect("connect external test db");
+            let pool = PgPool::connect(&url)
+                .await
+                .expect("connect external test db");
             return Self {
                 url,
                 pool,
@@ -914,7 +1064,9 @@ impl TestDatabase {
             .expect("postgres port");
         let url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx");
         init_dbtx_schema(&url);
-        let pool = PgPool::connect(&url).await.expect("connect testcontainer db");
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect testcontainer db");
 
         Self {
             url,
@@ -1012,11 +1164,17 @@ fn assert_failure(output: &Output) {
     );
 }
 
-fn modified_unique_ids(database_url: &str, project: &RealProject) -> std::collections::BTreeSet<String> {
+fn modified_unique_ids(
+    database_url: &str,
+    project: &RealProject,
+) -> std::collections::BTreeSet<String> {
     modified_unique_ids_for_env(database_url, project, ENVIRONMENT_SLUG)
 }
 
-fn listed_unique_ids(database_url: &str, project: &RealProject) -> std::collections::BTreeSet<String> {
+fn listed_unique_ids(
+    database_url: &str,
+    project: &RealProject,
+) -> std::collections::BTreeSet<String> {
     listed_unique_ids_for_env(database_url, project, ENVIRONMENT_SLUG)
 }
 
@@ -1038,7 +1196,12 @@ fn listed_unique_ids_for_env(
     project: &RealProject,
     environment_slug: &str,
 ) -> std::collections::BTreeSet<String> {
-    listed_unique_ids_for_env_impl(database_url, project, environment_slug, &["--output", "json"])
+    listed_unique_ids_for_env_impl(
+        database_url,
+        project,
+        environment_slug,
+        &["--output", "json"],
+    )
 }
 
 fn listed_unique_ids_for_env_impl(
@@ -1056,12 +1219,7 @@ fn listed_unique_ids_for_env_impl(
     ];
     args.extend_from_slice(extra_args);
 
-    let output = run_dbtx_with_environment_slug(
-        database_url,
-        project,
-        environment_slug,
-        &args,
-    );
+    let output = run_dbtx_with_environment_slug(database_url, project, environment_slug, &args);
     assert_success(&output);
 
     String::from_utf8_lossy(&output.stdout)

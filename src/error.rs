@@ -12,6 +12,8 @@ pub enum AppError {
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("yaml error: {0}")]
+    Yaml(#[from] serde_yaml::Error),
     #[error("dbt invocation failed with exit code {0}")]
     DbtFailed(i32),
     #[error("missing manifest at {0}")]
@@ -24,23 +26,35 @@ pub enum AppError {
     GitRepoNotFound,
     #[error("failed to infer git remote origin url from current repository")]
     GitRemoteNotFound,
-    #[error("dbtx project id is already configured in dbt_project.yml: {0}. Use `dbtx project init --force` to overwrite it.")]
+    #[error(
+        "dbtx project id is already configured in dbt_project.yml: {0}. Use `dbtx project init --force` to overwrite it."
+    )]
     ProjectIdAlreadyConfigured(String),
     #[error("dbtx project id is missing from dbt_project.yml. Run `dbtx project init` first.")]
     ProjectIdMissing,
-    #[error("project '{0}' was not found")]
-    ProjectNotFound(String),
-    #[error("project id '{0}' was not found")]
+    #[error(
+        "project id '{0}' was not found in the database. Run `dbtx project init --force` to re-initialize the project or `dbtx project update` to sync it."
+    )]
     ProjectIdNotFound(String),
-    #[error("environment '{1}' for project '{0}' was not found")]
+    #[error(
+        "environment '{1}' for project '{0}' was not found. Create it with `dbtx environment create --project {0} --slug {1}`."
+    )]
     EnvironmentNotFound(String, String),
+    #[error("environment '{1}' for project '{0}' already exists")]
+    EnvironmentAlreadyExists(String, String),
+    #[error("invalid environment kind '{0}'")]
+    InvalidEnvironmentKind(String),
+    #[error("invalid environment status '{0}'")]
+    InvalidEnvironmentStatus(String),
     #[error("commit environments require --git-commit-sha")]
     CommitEnvironmentRequiresSha,
     #[error("environment '{1}' for project '{0}' is immutable and cannot be updated")]
     ImmutableEnvironment(String, String),
     #[error("immutable environment '{1}' for project '{0}' does not match the current git state")]
     ImmutableEnvironmentGitMismatch(String, String),
-    #[error("registered project metadata does not match the current repo state for project id '{0}'. Run `dbtx project update` to sync the database, or `dbtx project init --force` to re-initialize the project.")]
+    #[error(
+        "registered project metadata does not match the current repo state for project id '{0}'. Run `dbtx project update` to sync the database, or `dbtx project init --force` to re-initialize the project."
+    )]
     ProjectValidationFailed(String),
     #[error("dbtx manages --state internally; remove the user-supplied --state argument")]
     UserStateNotAllowed,

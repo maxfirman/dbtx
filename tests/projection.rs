@@ -6,7 +6,7 @@ use std::process::Command;
 use tempfile::TempDir;
 use testcontainers_modules::{
     postgres::Postgres,
-    testcontainers::{runners::AsyncRunner, ContainerAsync},
+    testcontainers::{ContainerAsync, runners::AsyncRunner},
 };
 use uuid::Uuid;
 
@@ -33,8 +33,21 @@ async fn replay_ignores_seed_and_test_for_promoted_manifest_state() {
         },
     )
     .await;
-    insert_manifest(db.pool(), run_id, &manifest_with_nodes([node("model.pkg.a", "old")])).await;
-    insert_node_execution(db.pool(), run_id, "model.pkg.a", "model", "success", Some("old")).await;
+    insert_manifest(
+        db.pool(),
+        run_id,
+        &manifest_with_nodes([node("model.pkg.a", "old")]),
+    )
+    .await;
+    insert_node_execution(
+        db.pool(),
+        run_id,
+        "model.pkg.a",
+        "model",
+        "success",
+        Some("old"),
+    )
+    .await;
 
     insert_run(
         db.pool(),
@@ -115,16 +128,27 @@ async fn replay_rebuilds_promoted_and_current_state_for_partial_progress() {
     insert_manifest(
         db.pool(),
         base_run_id,
-        &manifest_with_nodes([
-            node("model.pkg.a", "old-a"),
-            node("model.pkg.b", "old-b"),
-        ]),
+        &manifest_with_nodes([node("model.pkg.a", "old-a"), node("model.pkg.b", "old-b")]),
     )
     .await;
-    insert_node_execution(db.pool(), base_run_id, "model.pkg.a", "model", "success", Some("old-a"))
-        .await;
-    insert_node_execution(db.pool(), base_run_id, "model.pkg.b", "model", "success", Some("old-b"))
-        .await;
+    insert_node_execution(
+        db.pool(),
+        base_run_id,
+        "model.pkg.a",
+        "model",
+        "success",
+        Some("old-a"),
+    )
+    .await;
+    insert_node_execution(
+        db.pool(),
+        base_run_id,
+        "model.pkg.b",
+        "model",
+        "success",
+        Some("old-b"),
+    )
+    .await;
 
     insert_run(
         db.pool(),
@@ -142,14 +166,18 @@ async fn replay_rebuilds_promoted_and_current_state_for_partial_progress() {
     insert_manifest(
         db.pool(),
         partial_run_id,
-        &manifest_with_nodes([
-            node("model.pkg.a", "new-a"),
-            node("model.pkg.b", "new-b"),
-        ]),
+        &manifest_with_nodes([node("model.pkg.a", "new-a"), node("model.pkg.b", "new-b")]),
     )
     .await;
-    insert_node_execution(db.pool(), partial_run_id, "model.pkg.a", "model", "success", Some("new-a"))
-        .await;
+    insert_node_execution(
+        db.pool(),
+        partial_run_id,
+        "model.pkg.a",
+        "model",
+        "success",
+        Some("new-a"),
+    )
+    .await;
 
     insert_run(
         db.pool(),
@@ -173,8 +201,15 @@ async fn replay_rebuilds_promoted_and_current_state_for_partial_progress() {
         ]),
     )
     .await;
-    insert_node_execution(db.pool(), failed_run_id, "model.pkg.b", "model", "failed", Some("failed-b"))
-        .await;
+    insert_node_execution(
+        db.pool(),
+        failed_run_id,
+        "model.pkg.b",
+        "model",
+        "failed",
+        Some("failed-b"),
+    )
+    .await;
 
     run_replay(db.url(), failed_run_id);
 
@@ -189,10 +224,16 @@ async fn replay_rebuilds_promoted_and_current_state_for_partial_progress() {
 
     assert_eq!(promoted.len(), 2);
     assert_eq!(promoted[0].get::<String, _>("unique_id"), "model.pkg.a");
-    assert_eq!(promoted[0].get::<Option<String>, _>("checksum").as_deref(), Some("new-a"));
+    assert_eq!(
+        promoted[0].get::<Option<String>, _>("checksum").as_deref(),
+        Some("new-a")
+    );
     assert_eq!(promoted[0].get::<Uuid, _>("source_run_id"), partial_run_id);
     assert_eq!(promoted[1].get::<String, _>("unique_id"), "model.pkg.b");
-    assert_eq!(promoted[1].get::<Option<String>, _>("checksum").as_deref(), Some("old-b"));
+    assert_eq!(
+        promoted[1].get::<Option<String>, _>("checksum").as_deref(),
+        Some("old-b")
+    );
     assert_eq!(promoted[1].get::<Uuid, _>("source_run_id"), base_run_id);
 
     let current = sqlx::query(
@@ -208,11 +249,17 @@ async fn replay_rebuilds_promoted_and_current_state_for_partial_progress() {
     assert_eq!(current[0].get::<String, _>("unique_id"), "model.pkg.a");
     assert_eq!(current[0].get::<Uuid, _>("last_run_id"), partial_run_id);
     assert_eq!(current[0].get::<String, _>("status"), "success");
-    assert_eq!(current[0].get::<Option<String>, _>("checksum").as_deref(), Some("new-a"));
+    assert_eq!(
+        current[0].get::<Option<String>, _>("checksum").as_deref(),
+        Some("new-a")
+    );
     assert_eq!(current[1].get::<String, _>("unique_id"), "model.pkg.b");
     assert_eq!(current[1].get::<Uuid, _>("last_run_id"), failed_run_id);
     assert_eq!(current[1].get::<String, _>("status"), "failed");
-    assert_eq!(current[1].get::<Option<String>, _>("checksum").as_deref(), Some("old-b"));
+    assert_eq!(
+        current[1].get::<Option<String>, _>("checksum").as_deref(),
+        Some("old-b")
+    );
 }
 
 #[tokio::test]
@@ -222,14 +269,7 @@ async fn project_and_environment_cli_round_trip() {
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
 
-    let output = run_dbtx_in_dir(
-        db.url(),
-        repo.project_dir(),
-        &[
-            "project",
-            "init",
-        ],
-    );
+    let output = run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]);
     assert_success(&output);
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
@@ -245,7 +285,6 @@ async fn project_and_environment_cli_round_trip() {
             "staging",
             "--kind",
             "persistent",
-            "--protected",
         ],
     );
     assert_success(&output);
@@ -257,7 +296,10 @@ async fn project_and_environment_cli_round_trip() {
     );
     assert_success(&list_output);
     let stdout = String::from_utf8_lossy(&list_output.stdout);
-    assert!(stdout.contains("slug=staging"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("slug=staging"),
+        "unexpected stdout: {stdout}"
+    );
     assert!(
         stdout.contains(&format!("project_id={project_id}")),
         "expected project id in stdout: {stdout}"
@@ -274,20 +316,39 @@ async fn project_and_environment_cli_round_trip() {
     assert_eq!(project_row.get::<String, _>("project_name"), "proj");
     assert_eq!(project_row.get::<String, _>("slug"), "proj");
     assert_eq!(
-        project_row.get::<Option<String>, _>("git_repo_url").as_deref(),
+        project_row
+            .get::<Option<String>, _>("git_repo_url")
+            .as_deref(),
         Some("https://example.com/repo.git")
     );
 
-    let environment_row = sqlx::query(
-        "SELECT slug, kind, protected, status FROM environments WHERE slug = 'staging'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("environment row");
+    let environment_row =
+        sqlx::query("SELECT slug, kind, status FROM environments WHERE slug = 'staging'")
+            .fetch_one(db.pool())
+            .await
+            .expect("environment row");
     assert_eq!(environment_row.get::<String, _>("slug"), "staging");
     assert_eq!(environment_row.get::<String, _>("kind"), "persistent");
-    assert!(environment_row.get::<bool, _>("protected"));
     assert_eq!(environment_row.get::<String, _>("status"), "active");
+
+    let duplicate_output = run_dbtx_in_dir(
+        db.url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "create",
+            "--project",
+            &project_id,
+            "--slug",
+            "staging",
+        ],
+    );
+    assert_failure(&duplicate_output);
+    assert!(
+        String::from_utf8_lossy(&duplicate_output.stderr).contains("already exists"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&duplicate_output.stderr)
+    );
 }
 
 #[tokio::test]
@@ -300,10 +361,7 @@ async fn environment_seed_from_copies_active_state_without_runs() {
     assert_success(&run_dbtx_in_dir(
         db.url(),
         repo.project_dir(),
-        &[
-            "project",
-            "init",
-        ],
+        &["project", "init"],
     ));
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
     assert_success(&run_dbtx_in_dir(
@@ -332,8 +390,8 @@ async fn environment_seed_from_copies_active_state_without_runs() {
             "ephemeral",
             "--baseline",
             "source",
-            "--git-ref",
-            "refs/pull/123/head",
+            "--git-branch",
+            "main",
             "--pr-number",
             "123",
         ],
@@ -354,9 +412,21 @@ async fn environment_seed_from_copies_active_state_without_runs() {
         },
     )
     .await;
-    insert_manifest(db.pool(), run_id, &manifest_with_nodes([node("model.pkg.a", "seeded")])).await;
-    insert_node_execution(db.pool(), run_id, "model.pkg.a", "model", "success", Some("seeded"))
-        .await;
+    insert_manifest(
+        db.pool(),
+        run_id,
+        &manifest_with_nodes([node("model.pkg.a", "seeded")]),
+    )
+    .await;
+    insert_node_execution(
+        db.pool(),
+        run_id,
+        "model.pkg.a",
+        "model",
+        "success",
+        Some("seeded"),
+    )
+    .await;
 
     sqlx::query(
         "INSERT INTO promoted_manifest_meta (project_id, environment_id, source_run_id, base_manifest) SELECT $1, $2, $3, manifest FROM manifest_snapshots WHERE run_id = $3",
@@ -455,7 +525,11 @@ async fn commit_environment_requires_commit_sha_and_records_version_history() {
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
 
-    assert_success(&run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]));
+    assert_success(&run_dbtx_in_dir(
+        db.url(),
+        repo.project_dir(),
+        &["project", "init"],
+    ));
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     let missing_sha = run_dbtx_in_dir(
@@ -515,7 +589,11 @@ async fn immutable_environment_rejects_identity_updates() {
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
 
-    assert_success(&run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]));
+    assert_success(&run_dbtx_in_dir(
+        db.url(),
+        repo.project_dir(),
+        &["project", "init"],
+    ));
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     assert_success(&run_dbtx_in_dir(
@@ -585,7 +663,9 @@ impl TestDatabase {
     async fn new() -> Self {
         if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
             init_dbtx_schema(&url);
-            let pool = PgPool::connect(&url).await.expect("connect external test db");
+            let pool = PgPool::connect(&url)
+                .await
+                .expect("connect external test db");
             return Self {
                 url,
                 pool,
@@ -608,7 +688,9 @@ impl TestDatabase {
             .expect("postgres port");
         let url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx");
         init_dbtx_schema(&url);
-        let pool = PgPool::connect(&url).await.expect("connect testcontainer db");
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect testcontainer db");
 
         Self {
             url,
@@ -646,7 +728,11 @@ async fn scope_ids(pool: &PgPool) -> ScopeIds {
     }
 }
 
-async fn project_environment_ids(pool: &PgPool, project_slug: &str, environment_slug: &str) -> ScopeIds {
+async fn project_environment_ids(
+    pool: &PgPool,
+    project_slug: &str,
+    environment_slug: &str,
+) -> ScopeIds {
     let row = sqlx::query(
         r#"
         SELECT p.id AS project_id, e.id AS environment_id
@@ -698,7 +784,10 @@ async fn insert_manifest(pool: &PgPool, run_id: Uuid, manifest: &serde_json::Val
     .bind(run_id)
     .bind(sqlx::types::Json(manifest))
     .bind(serde_json::to_vec(manifest).expect("manifest json").len() as i64)
-    .bind(format!("{:x}", md5::compute(serde_json::to_vec(manifest).expect("manifest bytes"))))
+    .bind(format!(
+        "{:x}",
+        md5::compute(serde_json::to_vec(manifest).expect("manifest bytes"))
+    ))
     .execute(pool)
     .await
     .expect("insert manifest");
@@ -842,7 +931,10 @@ impl TempProjectRepo {
         )
         .expect("write dbt project");
         git(&["init", "-b", "main"], temp_dir.path());
-        git(&["config", "user.email", "dbtx@example.com"], temp_dir.path());
+        git(
+            &["config", "user.email", "dbtx@example.com"],
+            temp_dir.path(),
+        );
         git(&["config", "user.name", "dbtx"], temp_dir.path());
         git(
             &["remote", "add", "origin", "https://example.com/repo.git"],
@@ -862,7 +954,8 @@ impl TempProjectRepo {
 }
 
 fn read_project_id_from_dbt_project(project_dir: &Path) -> String {
-    let content = fs::read_to_string(project_dir.join("dbt_project.yml")).expect("read dbt project");
+    let content =
+        fs::read_to_string(project_dir.join("dbt_project.yml")).expect("read dbt project");
     content
         .lines()
         .find_map(|line| line.trim().strip_prefix("project_id:").map(str::trim))

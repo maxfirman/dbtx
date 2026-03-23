@@ -44,10 +44,8 @@ pub struct EnvironmentRecord {
     pub baseline_environment_slug: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
-    pub git_ref: Option<String>,
     pub pr_number: Option<i32>,
     pub immutable: bool,
-    pub protected: bool,
     pub status: String,
     pub schema_prefix: Option<String>,
     pub metadata: Value,
@@ -71,10 +69,8 @@ pub struct CreateEnvironmentInput {
     pub baseline_slug: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
-    pub git_ref: Option<String>,
     pub pr_number: Option<i32>,
     pub immutable: bool,
-    pub protected: bool,
     pub status: String,
     pub schema_prefix: Option<String>,
 }
@@ -87,10 +83,8 @@ pub struct UpdateEnvironmentInput {
     pub baseline_slug: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
-    pub git_ref: Option<String>,
     pub pr_number: Option<i32>,
     pub immutable: bool,
-    pub protected: bool,
     pub status: Option<String>,
     pub schema_prefix: Option<String>,
 }
@@ -151,6 +145,32 @@ impl Db {
         .fetch_one(&self.pool)
         .await?;
         Ok(project_record_from_row(&row))
+    }
+
+    pub async fn ensure_default_environment(&self, project_id: &str) -> AppResult<()> {
+        let project = self.get_project_by_project_id(project_id).await?;
+        match self
+            .get_environment_by_project_id(project.id, &project.slug, "dev")
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(AppError::EnvironmentNotFound(_, _)) => self
+                .create_environment(CreateEnvironmentInput {
+                    project: project.project_id,
+                    slug: "dev".to_string(),
+                    kind: "persistent".to_string(),
+                    baseline_slug: None,
+                    git_branch: None,
+                    git_commit_sha: None,
+                    pr_number: None,
+                    immutable: false,
+                    status: "active".to_string(),
+                    schema_prefix: None,
+                })
+                .await
+                .map(|_| ()),
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn reinitialize_project_id(
@@ -216,17 +236,6 @@ impl Db {
         Ok(rows.iter().map(project_record_from_row).collect())
     }
 
-    pub async fn get_project_by_identifier(&self, project: &str) -> AppResult<ProjectRecord> {
-        let row = sqlx::query(
-            "SELECT id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1 OR slug = $1",
-        )
-        .bind(project)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::ProjectNotFound(project.to_string()))?;
-        Ok(project_record_from_row(&row))
-    }
-
     pub async fn get_project_by_project_id(&self, project_id: &str) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
             "SELECT id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1",
@@ -238,27 +247,13 @@ impl Db {
         Ok(project_record_from_row(&row))
     }
 
-    async fn get_project_by_repo_and_root(
-        &self,
-        git_repo_url: &str,
-        project_root: &str,
-    ) -> AppResult<Option<ProjectRecord>> {
-        let row = sqlx::query(
-            "SELECT id, project_id, project_name, slug, git_repo_url, default_branch, project_root, metadata FROM projects WHERE git_repo_url = $1 AND project_root = $2",
-        )
-        .bind(git_repo_url)
-        .bind(project_root)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.as_ref().map(project_record_from_row))
-    }
-
     pub async fn create_environment(
         &self,
         input: CreateEnvironmentInput,
     ) -> AppResult<EnvironmentRecord> {
         validate_environment_input(&input.kind, input.git_commit_sha.as_deref())?;
-        let project = self.get_project_by_identifier(&input.project).await?;
+        validate_environment_status(&input.status)?;
+        let project = self.get_project_by_project_id(&input.project).await?;
         let baseline = match input.baseline_slug.as_deref() {
             Some(baseline_slug) => Some(
                 self.get_environment_by_project_id(project.id, &project.slug, baseline_slug)
@@ -271,20 +266,9 @@ impl Db {
             r#"
             INSERT INTO environments (
                 project_id, slug, kind, baseline_environment_id, git_branch, git_commit_sha,
-                git_ref, pr_number, immutable, protected, status, schema_prefix
+                pr_number, immutable, status, schema_prefix
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            ON CONFLICT (project_id, slug) DO UPDATE SET
-                kind = EXCLUDED.kind,
-                baseline_environment_id = EXCLUDED.baseline_environment_id,
-                git_branch = EXCLUDED.git_branch,
-                git_commit_sha = EXCLUDED.git_commit_sha,
-                git_ref = EXCLUDED.git_ref,
-                pr_number = EXCLUDED.pr_number,
-                immutable = EXCLUDED.immutable,
-                protected = EXCLUDED.protected,
-                status = EXCLUDED.status,
-                schema_prefix = EXCLUDED.schema_prefix
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING id
             "#,
         )
@@ -294,17 +278,22 @@ impl Db {
         .bind(baseline.as_ref().map(|env| env.id))
         .bind(input.git_branch.as_deref())
         .bind(input.git_commit_sha.as_deref())
-        .bind(input.git_ref.as_deref())
         .bind(input.pr_number)
         .bind(input.immutable)
-        .bind(input.protected)
         .bind(&input.status)
         .bind(input.schema_prefix.as_deref())
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|err| match &err {
+            sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23505") => {
+                AppError::EnvironmentAlreadyExists(project.project_id.clone(), input.slug.clone())
+            }
+            _ => AppError::Sqlx(err),
+        })?;
         let environment_id: i64 = row.get("id");
         let environment = self.get_environment_by_id(environment_id).await?;
-        self.record_environment_version(&environment, "created").await?;
+        self.record_environment_version(&environment, "created")
+            .await?;
         Ok(environment)
     }
 
@@ -312,7 +301,7 @@ impl Db {
         &self,
         input: UpdateEnvironmentInput,
     ) -> AppResult<EnvironmentRecord> {
-        let project = self.get_project_by_identifier(&input.project).await?;
+        let project = self.get_project_by_project_id(&input.project).await?;
         let existing = self
             .get_environment_by_project_id(project.id, &project.slug, &input.slug)
             .await?;
@@ -345,6 +334,7 @@ impl Db {
         validate_environment_input(&kind, git_commit_sha.as_deref())?;
         let immutable = existing.immutable || input.immutable;
         let status = input.status.unwrap_or(existing.status.clone());
+        validate_environment_status(&status)?;
 
         sqlx::query(
             r#"
@@ -353,12 +343,10 @@ impl Db {
                 baseline_environment_id = $4,
                 git_branch = $5,
                 git_commit_sha = $6,
-                git_ref = $7,
-                pr_number = $8,
-                immutable = $9,
-                protected = $10,
-                status = $11,
-                schema_prefix = $12
+                pr_number = $7,
+                immutable = $8,
+                status = $9,
+                schema_prefix = $10
             WHERE id = $1 AND project_id = $2
             "#,
         )
@@ -368,22 +356,26 @@ impl Db {
         .bind(baseline_environment_id)
         .bind(git_branch.as_deref())
         .bind(git_commit_sha.as_deref())
-        .bind(input.git_ref.as_deref().or(existing.git_ref.as_deref()))
         .bind(input.pr_number.or(existing.pr_number))
         .bind(immutable)
-        .bind(input.protected || existing.protected)
         .bind(&status)
-        .bind(input.schema_prefix.as_deref().or(existing.schema_prefix.as_deref()))
+        .bind(
+            input
+                .schema_prefix
+                .as_deref()
+                .or(existing.schema_prefix.as_deref()),
+        )
         .execute(&self.pool)
         .await?;
 
         let environment = self.get_environment_by_id(existing.id).await?;
-        self.record_environment_version(&environment, "updated").await?;
+        self.record_environment_version(&environment, "updated")
+            .await?;
         Ok(environment)
     }
 
     pub async fn list_environments(&self, project: &str) -> AppResult<Vec<EnvironmentRecord>> {
-        let project = self.get_project_by_identifier(project).await?;
+        let project = self.get_project_by_project_id(project).await?;
         let rows = sqlx::query(
             r#"
             SELECT
@@ -397,10 +389,8 @@ impl Db {
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
-                e.git_ref,
                 e.pr_number,
                 e.immutable,
-                e.protected,
                 e.status,
                 e.schema_prefix,
                 e.metadata
@@ -422,7 +412,7 @@ impl Db {
         project: &str,
         environment_slug: &str,
     ) -> AppResult<EnvironmentRecord> {
-        let project = self.get_project_by_identifier(project).await?;
+        let project = self.get_project_by_project_id(project).await?;
         self.get_environment_by_project_id(project.id, &project.slug, environment_slug)
             .await
     }
@@ -434,7 +424,7 @@ impl Db {
         source_environment_slug: &str,
         seed_type: &str,
     ) -> AppResult<()> {
-        let project = self.get_project_by_identifier(project).await?;
+        let project = self.get_project_by_project_id(project).await?;
         let target = self
             .get_environment_by_project_id(project.id, &project.slug, target_environment_slug)
             .await?;
@@ -458,13 +448,11 @@ impl Db {
         .bind(target.id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "DELETE FROM current_node_state WHERE project_id = $1 AND environment_id = $2",
-        )
-        .bind(project.id)
-        .bind(target.id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("DELETE FROM current_node_state WHERE project_id = $1 AND environment_id = $2")
+            .bind(project.id)
+            .bind(target.id)
+            .execute(&mut *tx)
+            .await?;
 
         sqlx::query(
             r#"
@@ -561,9 +549,13 @@ impl Db {
             .resolve_local_project(&ctx.project_dir, &ctx.project_slug)
             .await?;
         let git_state = read_git_state(&ctx.project_dir);
+        let environment = self
+            .get_environment_by_project_id(project.id, &project.slug, &ctx.environment_slug)
+            .await?;
+        validate_environment_git_state(&project, &environment, &git_state)?;
         let run_id = Uuid::new_v4();
         let reconstructed_manifest = self
-            .load_reconstructed_manifest(&project.slug, &ctx.environment_slug)
+            .load_reconstructed_manifest(project.id, environment.id)
             .await?
             .or(if ctx.wants_state_modified {
                 Some(
@@ -586,11 +578,8 @@ impl Db {
                 .map(|value| Value::String(value.to_string_lossy().into_owned()))
                 .collect(),
         );
-        let (project_id, environment_id) = self
-            .ensure_environment(&project, &ctx.environment_slug)
-            .await?;
-        let environment = self.get_environment_by_id(environment_id).await?;
-        validate_environment_git_state(&project, &environment, &git_state)?;
+        let project_id = project.id;
+        let environment_id = environment.id;
 
         sqlx::query(
             r#"
@@ -616,15 +605,15 @@ impl Db {
         .execute(&self.pool)
         .await?;
 
-        let mut child = match spawn_dbt_child(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir)
-        {
-            Ok(child) => child,
-            Err(err) => {
-                self.mark_run_finished(run_id, None, 1, "wrapper_failed")
-                    .await?;
-                return Err(err);
-            }
-        };
+        let mut child =
+            match spawn_dbt_child(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir) {
+                Ok(child) => child,
+                Err(err) => {
+                    self.mark_run_finished(run_id, None, 1, "wrapper_failed")
+                        .await?;
+                    return Err(err);
+                }
+            };
 
         let stdout = child
             .stdout
@@ -669,9 +658,7 @@ impl Db {
 
         let status = child.wait().await?;
         stderr_handle.await.map_err(|err| {
-            AppError::Io(std::io::Error::other(format!(
-                "stderr task failed: {err}"
-            )))
+            AppError::Io(std::io::Error::other(format!("stderr task failed: {err}")))
         })??;
 
         let manifest_path = ctx.target_path.join("manifest.json");
@@ -713,13 +700,12 @@ impl Db {
             .resolve_local_project(&ctx.project_dir, &ctx.project_slug)
             .await?;
         let git_state = read_git_state(&ctx.project_dir);
-        let (_, environment_id) = self
-            .ensure_environment(&project, &ctx.environment_slug)
+        let environment = self
+            .get_environment_by_project_id(project.id, &project.slug, &ctx.environment_slug)
             .await?;
-        let environment = self.get_environment_by_id(environment_id).await?;
         validate_environment_git_state(&project, &environment, &git_state)?;
         let reconstructed_manifest = self
-            .load_reconstructed_manifest(&project.slug, &ctx.environment_slug)
+            .load_reconstructed_manifest(project.id, environment.id)
             .await?
             .or(if ctx.wants_state_modified {
                 Some(
@@ -770,42 +756,12 @@ impl Db {
     async fn resolve_local_project(
         &self,
         project_dir: &Path,
-        fallback_slug: &str,
+        _fallback_slug: &str,
     ) -> AppResult<ProjectRecord> {
-        let project_name = read_dbt_project_name(project_dir);
-        if let Some(project_id) = read_dbtx_project_id(project_dir)? {
-            let project = self.get_project_by_project_id(&project_id).await?;
-            validate_project_record(&project, project_dir)?;
-            return Ok(project);
-        }
-
-        let git_context = git_repo_root(project_dir)
-            .and_then(|repo_root| {
-                let git_repo_url = git_remote_origin_url(&repo_root)?;
-                let project_root = relative_project_root(&repo_root, project_dir);
-                Ok((git_repo_url, project_root))
-            })
-            .ok();
-
-        if let Some((git_repo_url, project_root)) = git_context.clone()
-            && let Some(project) = self
-                .get_project_by_repo_and_root(&git_repo_url, &project_root)
-                .await?
-        {
-            validate_project_record(&project, project_dir)?;
-            return Ok(project);
-        }
-
-        Ok(ProjectRecord {
-            id: 0,
-            project_id: fallback_slug.to_string(),
-            project_name,
-            slug: fallback_slug.to_string(),
-            git_repo_url: git_context.as_ref().map(|(git_repo_url, _)| git_repo_url.clone()),
-            default_branch: None,
-            project_root: git_context.map(|(_, project_root)| project_root),
-            metadata: Value::Object(Default::default()),
-        })
+        let project_id = read_dbtx_project_id(project_dir)?.ok_or(AppError::ProjectIdMissing)?;
+        let project = self.get_project_by_project_id(&project_id).await?;
+        validate_project_record(&project, project_dir)?;
+        Ok(project)
     }
 
     async fn finalize_run(&self, finalization: RunFinalization<'_>) -> AppResult<()> {
@@ -817,7 +773,7 @@ impl Db {
             finalization.exit_code,
             finalization.terminal_status,
         )
-            .await?;
+        .await?;
 
         if let Some(manifest) = finalization.manifest {
             self.persist_manifest_in_tx(&mut tx, finalization.run_id, manifest)
@@ -926,49 +882,6 @@ impl Db {
         Ok(())
     }
 
-    async fn ensure_environment(
-        &self,
-        project: &ProjectRecord,
-        environment_slug: &str,
-    ) -> AppResult<(i64, i64)> {
-        let project_id: i64 = sqlx::query_scalar(
-            r#"
-            INSERT INTO projects (project_id, project_name, slug, git_repo_url, default_branch, project_root)
-            VALUES ($1, $2, $3, $4, COALESCE($5, 'main'), $6)
-            ON CONFLICT (project_id) DO UPDATE SET
-                project_name = EXCLUDED.project_name,
-                slug = EXCLUDED.slug,
-                git_repo_url = COALESCE(EXCLUDED.git_repo_url, projects.git_repo_url),
-                default_branch = COALESCE(EXCLUDED.default_branch, projects.default_branch),
-                project_root = COALESCE(EXCLUDED.project_root, projects.project_root)
-            RETURNING id
-            "#,
-        )
-        .bind(&project.project_id)
-        .bind(&project.project_name)
-        .bind(&project.slug)
-        .bind(project.git_repo_url.as_deref())
-        .bind(project.default_branch.as_deref())
-        .bind(project.project_root.as_deref())
-        .fetch_one(&self.pool)
-        .await?;
-
-        let environment_id: i64 = sqlx::query_scalar(
-            r#"
-            INSERT INTO environments (project_id, slug)
-            VALUES ($1, $2)
-            ON CONFLICT (project_id, slug) DO UPDATE SET slug = EXCLUDED.slug
-            RETURNING id
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_slug)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok((project_id, environment_id))
-    }
-
     async fn get_environment_by_project_id(
         &self,
         project_id: i64,
@@ -988,10 +901,8 @@ impl Db {
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
-                e.git_ref,
                 e.pr_number,
                 e.immutable,
-                e.protected,
                 e.status,
                 e.schema_prefix,
                 e.metadata
@@ -1026,10 +937,8 @@ impl Db {
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
-                e.git_ref,
                 e.pr_number,
                 e.immutable,
-                e.protected,
                 e.status,
                 e.schema_prefix,
                 e.metadata
@@ -1074,10 +983,7 @@ impl Db {
         .await?;
 
         if let Some(node) = event.normalized_node_event() {
-            let promote_manifest_state = node
-                .status
-                .as_deref()
-                .is_some_and(is_promotable_status);
+            let promote_manifest_state = node.status.as_deref().is_some_and(is_promotable_status);
             let resource_type = node.resource_type.clone();
             let node_name = node.node_name.clone();
             let node_path = node.node_path.clone();
@@ -1624,8 +1530,8 @@ impl Db {
 
     async fn load_reconstructed_manifest(
         &self,
-        project_slug: &str,
-        environment_slug: &str,
+        project_id: i64,
+        environment_id: i64,
     ) -> AppResult<Option<ReconstructedManifest>> {
         let base_row = sqlx::query(
             r#"
@@ -1634,14 +1540,12 @@ impl Db {
                 pmm.environment_id,
                 pmm.base_manifest
             FROM promoted_manifest_meta pmm
-            JOIN projects p ON p.id = pmm.project_id
-            JOIN environments e ON e.id = pmm.environment_id
-            WHERE p.slug = $1
-              AND e.slug = $2
+            WHERE pmm.project_id = $1
+              AND pmm.environment_id = $2
             "#,
         )
-        .bind(project_slug)
-        .bind(environment_slug)
+        .bind(project_id)
+        .bind(environment_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -1715,14 +1619,10 @@ impl Db {
 
         let status = child.wait().await?;
         stdout_handle.await.map_err(|err| {
-            AppError::Io(std::io::Error::other(format!(
-                "stdout task failed: {err}"
-            )))
+            AppError::Io(std::io::Error::other(format!("stdout task failed: {err}")))
         })??;
         stderr_handle.await.map_err(|err| {
-            AppError::Io(std::io::Error::other(format!(
-                "stderr task failed: {err}"
-            )))
+            AppError::Io(std::io::Error::other(format!("stderr task failed: {err}")))
         })??;
 
         Ok(status)
@@ -1741,7 +1641,13 @@ fn append_state_dir(
 ) -> Vec<OsString> {
     if let Some(reconstructed_manifest) = reconstructed_manifest {
         args.push("--state".into());
-        args.push(reconstructed_manifest.temp_dir.path().as_os_str().to_os_string());
+        args.push(
+            reconstructed_manifest
+                .temp_dir
+                .path()
+                .as_os_str()
+                .to_os_string(),
+        );
     }
     args
 }
@@ -1763,11 +1669,7 @@ fn spawn_dbt_child(
 }
 
 fn null_if_empty(value: &str) -> Option<&str> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn should_promote_manifest(subcommand: &str) -> bool {
@@ -1779,10 +1681,21 @@ fn is_promotable_status(status: &str) -> bool {
 }
 
 fn validate_environment_input(kind: &str, git_commit_sha: Option<&str>) -> AppResult<()> {
+    if !matches!(kind, "persistent" | "ephemeral" | "commit") {
+        return Err(AppError::InvalidEnvironmentKind(kind.to_string()));
+    }
     if kind == "commit" && git_commit_sha.is_none() {
         return Err(AppError::CommitEnvironmentRequiresSha);
     }
     Ok(())
+}
+
+fn validate_environment_status(status: &str) -> AppResult<()> {
+    if matches!(status, "active" | "archived" | "failed" | "deleting") {
+        Ok(())
+    } else {
+        Err(AppError::InvalidEnvironmentStatus(status.to_string()))
+    }
 }
 
 fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
@@ -1812,10 +1725,8 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         baseline_environment_slug: row.get("baseline_environment_slug"),
         git_branch: row.get("git_branch"),
         git_commit_sha: row.get("git_commit_sha"),
-        git_ref: row.get("git_ref"),
         pr_number: row.get("pr_number"),
         immutable: row.get("immutable"),
-        protected: row.get("protected"),
         status: row.get("status"),
         schema_prefix: row.get("schema_prefix"),
         metadata: metadata.0,
@@ -1823,7 +1734,13 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
 }
 
 fn read_dbt_project_name(project_dir: &Path) -> String {
-    read_yaml_scalar(&project_dir.join("dbt_project.yml"), "name")
+    read_dbt_project_yaml(project_dir)
+        .ok()
+        .and_then(|yaml| {
+            yaml.get("name")
+                .and_then(serde_yaml::Value::as_str)
+                .map(ToString::to_string)
+        })
         .unwrap_or_else(|| {
             project_dir
                 .file_name()
@@ -1834,48 +1751,24 @@ fn read_dbt_project_name(project_dir: &Path) -> String {
 }
 
 fn read_dbtx_project_id(project_dir: &Path) -> AppResult<Option<String>> {
+    let yaml = read_dbt_project_yaml(project_dir)?;
+    Ok(yaml
+        .get("vars")
+        .and_then(serde_yaml::Value::as_mapping)
+        .and_then(|vars| vars.get(serde_yaml::Value::String("dbtx".to_string())))
+        .and_then(serde_yaml::Value::as_mapping)
+        .and_then(|dbtx| dbtx.get(serde_yaml::Value::String("project_id".to_string())))
+        .and_then(serde_yaml::Value::as_str)
+        .map(ToString::to_string))
+}
+
+fn read_dbt_project_yaml(project_dir: &Path) -> AppResult<serde_yaml::Value> {
     let path = project_dir.join("dbt_project.yml");
-    let content = std::fs::read_to_string(path)?;
-    let mut in_vars = false;
-    let mut vars_indent = 0usize;
-    let mut in_dbtx = false;
-    let mut dbtx_indent = 0usize;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let indent = line.len() - line.trim_start().len();
-        if in_dbtx && indent <= dbtx_indent {
-            in_dbtx = false;
-        }
-        if in_vars && indent <= vars_indent && trimmed != "vars:" {
-            in_vars = false;
-            in_dbtx = false;
-        }
-        if trimmed == "vars:" {
-            in_vars = true;
-            vars_indent = indent;
-            in_dbtx = false;
-            continue;
-        }
-        if in_vars && trimmed == "dbtx:" {
-            in_dbtx = true;
-            dbtx_indent = indent;
-            continue;
-        }
-        if in_dbtx
-            && let Some(rest) = trimmed.strip_prefix("project_id:")
-        {
-            let value = rest.trim().trim_matches('"').trim_matches('\'');
-            if !value.is_empty() {
-                return Ok(Some(value.to_string()));
-            }
-        }
+    if !path.is_file() {
+        return Err(AppError::NotDbtProjectRoot);
     }
-
-    Ok(None)
+    let content = std::fs::read_to_string(path)?;
+    Ok(serde_yaml::from_str(&content)?)
 }
 
 fn git_repo_root(current_dir: &Path) -> AppResult<std::path::PathBuf> {
@@ -1909,7 +1802,9 @@ fn validate_project_record(project: &ProjectRecord, project_dir: &Path) -> AppRe
     if matches {
         Ok(())
     } else {
-        Err(AppError::ProjectValidationFailed(project.project_id.clone()))
+        Err(AppError::ProjectValidationFailed(
+            project.project_id.clone(),
+        ))
     }
 }
 
@@ -1942,10 +1837,10 @@ fn validate_environment_git_state(
         return Ok(());
     }
 
-    let branch_matches = environment.git_branch.is_none()
-        || environment.git_branch == git_state.branch;
-    let commit_matches = environment.git_commit_sha.is_none()
-        || environment.git_commit_sha == git_state.commit_sha;
+    let branch_matches =
+        environment.git_branch.is_none() || environment.git_branch == git_state.branch;
+    let commit_matches =
+        environment.git_commit_sha.is_none() || environment.git_commit_sha == git_state.commit_sha;
 
     if branch_matches && commit_matches {
         Ok(())
@@ -1987,7 +1882,13 @@ fn read_yaml_scalar(path: &Path, key: &str) -> Option<String> {
         let prefix = format!("{key}:");
         trimmed
             .strip_prefix(&prefix)
-            .map(|value| value.trim().trim_matches('"').trim_matches('\'').to_string())
+            .map(|value| {
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string()
+            })
             .filter(|value| !value.is_empty())
     })
 }

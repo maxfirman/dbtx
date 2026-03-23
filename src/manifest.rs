@@ -51,10 +51,7 @@ impl ManifestSnapshot {
         Ok(Self { raw, nodes, edges })
     }
 
-    pub fn reconstruct(
-        raw_manifest: Value,
-        successful_nodes: &BTreeMap<String, Value>,
-    ) -> Value {
+    pub fn reconstruct(raw_manifest: Value, successful_nodes: &BTreeMap<String, Value>) -> Value {
         let mut raw_manifest = raw_manifest;
 
         if let Some(nodes) = raw_manifest.get_mut("nodes").and_then(Value::as_object_mut) {
@@ -129,7 +126,10 @@ fn extract_nodes(raw: &Value) -> Vec<ManifestNode> {
                 .get("resource_type")
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
-            name: node.get("name").and_then(Value::as_str).map(ToString::to_string),
+            name: node
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
             package_name: node
                 .get("package_name")
                 .and_then(Value::as_str)
@@ -138,9 +138,15 @@ fn extract_nodes(raw: &Value) -> Vec<ManifestNode> {
                 .get("original_file_path")
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
-            tags: node.get("tags").cloned().unwrap_or(Value::Array(Vec::new())),
+            tags: node
+                .get("tags")
+                .cloned()
+                .unwrap_or(Value::Array(Vec::new())),
             fqn: node.get("fqn").cloned().unwrap_or(Value::Array(Vec::new())),
-            config: node.get("config").cloned().unwrap_or(Value::Object(Default::default())),
+            config: node
+                .get("config")
+                .cloned()
+                .unwrap_or(Value::Object(Default::default())),
             checksum: node
                 .get("checksum")
                 .and_then(|value| value.get("checksum"))
@@ -154,7 +160,10 @@ fn extract_nodes(raw: &Value) -> Vec<ManifestNode> {
                 .get("schema")
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
-            alias: node.get("alias").and_then(Value::as_str).map(ToString::to_string),
+            alias: node
+                .get("alias")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
             relation_name: node
                 .get("relation_name")
                 .and_then(Value::as_str)
@@ -182,7 +191,9 @@ fn extract_edges(raw: &Value) -> Vec<ManifestEdge> {
     edges
 }
 
-fn rebuild_dependency_maps(raw_manifest: &Value) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, Vec<String>>) {
+fn rebuild_dependency_maps(
+    raw_manifest: &Value,
+) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, Vec<String>>) {
     let mut parent_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut child_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
@@ -383,7 +394,13 @@ mod tests {
         )]);
 
         let reconstructed = ManifestSnapshot::reconstruct(raw, &successful_nodes);
-        assert_eq!(reconstructed["nodes"]["model.pkg.a"]["raw_code"], "old code");
-        assert_eq!(reconstructed["nodes"]["model.pkg.a"]["checksum"]["checksum"], "old");
+        assert_eq!(
+            reconstructed["nodes"]["model.pkg.a"]["raw_code"],
+            "old code"
+        );
+        assert_eq!(
+            reconstructed["nodes"]["model.pkg.a"]["checksum"]["checksum"],
+            "old"
+        );
     }
 }

@@ -116,7 +116,7 @@ pub enum ProjectCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum EnvironmentCommand {
-    #[command(about = "Create or update a registered dbtx environment")]
+    #[command(about = "Create a registered dbtx environment")]
     Create {
         #[arg(long)]
         project: String,
@@ -131,13 +131,9 @@ pub enum EnvironmentCommand {
         #[arg(long)]
         git_commit_sha: Option<String>,
         #[arg(long)]
-        git_ref: Option<String>,
-        #[arg(long)]
         pr_number: Option<i32>,
         #[arg(long)]
         immutable: bool,
-        #[arg(long)]
-        protected: bool,
         #[arg(long, default_value = "active")]
         status: String,
         #[arg(long)]
@@ -158,13 +154,9 @@ pub enum EnvironmentCommand {
         #[arg(long)]
         git_commit_sha: Option<String>,
         #[arg(long)]
-        git_ref: Option<String>,
-        #[arg(long)]
         pr_number: Option<i32>,
         #[arg(long)]
         immutable: bool,
-        #[arg(long)]
-        protected: bool,
         #[arg(long)]
         status: Option<String>,
         #[arg(long)]
@@ -202,7 +194,13 @@ mod tests {
 
     #[test]
     fn state_init_accepts_database_url() {
-        let cli = Cli::parse_from(["dbtx", "state", "init", "--database-url", "postgres://example"]);
+        let cli = Cli::parse_from([
+            "dbtx",
+            "state",
+            "init",
+            "--database-url",
+            "postgres://example",
+        ]);
         match cli.command {
             Command::State(StateCommand::Init { database_url }) => {
                 assert_eq!(database_url.as_deref(), Some("postgres://example"));
@@ -308,7 +306,10 @@ mod tests {
                 force,
             }) => {
                 assert_eq!(slug.as_deref(), Some("jaffle"));
-                assert_eq!(git_repo_url.as_deref(), Some("https://github.com/example/repo.git"));
+                assert_eq!(
+                    git_repo_url.as_deref(),
+                    Some("https://github.com/example/repo.git")
+                );
                 assert_eq!(project_root.as_deref(), Some("analytics"));
                 assert_eq!(default_branch.as_deref(), None);
                 assert!(!force);
