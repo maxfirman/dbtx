@@ -34,6 +34,12 @@ pub enum AppError {
     ProjectIdNotFound(String),
     #[error("environment '{1}' for project '{0}' was not found")]
     EnvironmentNotFound(String, String),
+    #[error("commit environments require --git-commit-sha")]
+    CommitEnvironmentRequiresSha,
+    #[error("environment '{1}' for project '{0}' is immutable and cannot be updated")]
+    ImmutableEnvironment(String, String),
+    #[error("immutable environment '{1}' for project '{0}' does not match the current git state")]
+    ImmutableEnvironmentGitMismatch(String, String),
     #[error("registered project metadata does not match the current repo state for project id '{0}'. Run `dbtx project update` to sync the database, or `dbtx project init --force` to re-initialize the project.")]
     ProjectValidationFailed(String),
     #[error("dbtx manages --state internally; remove the user-supplied --state argument")]

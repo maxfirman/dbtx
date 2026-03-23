@@ -127,13 +127,46 @@ pub enum EnvironmentCommand {
         #[arg(long)]
         baseline: Option<String>,
         #[arg(long)]
+        git_branch: Option<String>,
+        #[arg(long)]
+        git_commit_sha: Option<String>,
+        #[arg(long)]
         git_ref: Option<String>,
         #[arg(long)]
         pr_number: Option<i32>,
         #[arg(long)]
+        immutable: bool,
+        #[arg(long)]
         protected: bool,
         #[arg(long, default_value = "active")]
         status: String,
+        #[arg(long)]
+        schema_prefix: Option<String>,
+    },
+    #[command(about = "Update a registered dbtx environment")]
+    Update {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        baseline: Option<String>,
+        #[arg(long)]
+        git_branch: Option<String>,
+        #[arg(long)]
+        git_commit_sha: Option<String>,
+        #[arg(long)]
+        git_ref: Option<String>,
+        #[arg(long)]
+        pr_number: Option<i32>,
+        #[arg(long)]
+        immutable: bool,
+        #[arg(long)]
+        protected: bool,
+        #[arg(long)]
+        status: Option<String>,
         #[arg(long)]
         schema_prefix: Option<String>,
     },
@@ -329,6 +362,45 @@ mod tests {
                 assert_eq!(seed_type, "clone");
             }
             _ => panic!("expected environment seed-from command"),
+        }
+    }
+
+    #[test]
+    fn environment_update_parses() {
+        let cli = Cli::parse_from([
+            "dbtx",
+            "environment",
+            "update",
+            "--project",
+            "prj_123",
+            "--slug",
+            "ci-main",
+            "--git-branch",
+            "main",
+            "--git-commit-sha",
+            "abc123",
+            "--immutable",
+        ]);
+        match cli.command {
+            Command::Environment(EnvironmentCommand::Update {
+                project,
+                slug,
+                kind,
+                baseline,
+                git_branch,
+                git_commit_sha,
+                immutable,
+                ..
+            }) => {
+                assert_eq!(project, "prj_123");
+                assert_eq!(slug, "ci-main");
+                assert!(kind.is_none());
+                assert!(baseline.is_none());
+                assert_eq!(git_branch.as_deref(), Some("main"));
+                assert_eq!(git_commit_sha.as_deref(), Some("abc123"));
+                assert!(immutable);
+            }
+            _ => panic!("expected environment update command"),
         }
     }
 }

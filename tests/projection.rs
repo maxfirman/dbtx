@@ -448,6 +448,118 @@ async fn environment_seed_from_copies_active_state_without_runs() {
     assert_eq!(runs_count, 1);
 }
 
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn commit_environment_requires_commit_sha_and_records_version_history() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+
+    assert_success(&run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]));
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+
+    let missing_sha = run_dbtx_in_dir(
+        db.url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "create",
+            "--project",
+            &project_id,
+            "--slug",
+            "ci-main",
+            "--kind",
+            "commit",
+        ],
+    );
+    assert_failure(&missing_sha);
+    assert!(
+        String::from_utf8_lossy(&missing_sha.stderr).contains("require --git-commit-sha"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&missing_sha.stderr)
+    );
+
+    assert_success(&run_dbtx_in_dir(
+        db.url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "create",
+            "--project",
+            &project_id,
+            "--slug",
+            "ci-main",
+            "--kind",
+            "commit",
+            "--git-branch",
+            "main",
+            "--git-commit-sha",
+            "abc123",
+            "--immutable",
+        ],
+    ));
+
+    let versions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM environment_versions ev JOIN environments e ON e.id = ev.environment_id WHERE e.slug = 'ci-main'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("environment versions");
+    assert_eq!(versions, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn immutable_environment_rejects_identity_updates() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+
+    assert_success(&run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]));
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+
+    assert_success(&run_dbtx_in_dir(
+        db.url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "create",
+            "--project",
+            &project_id,
+            "--slug",
+            "ci-main",
+            "--kind",
+            "commit",
+            "--git-branch",
+            "main",
+            "--git-commit-sha",
+            "abc123",
+            "--immutable",
+        ],
+    ));
+
+    let update = run_dbtx_in_dir(
+        db.url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "update",
+            "--project",
+            &project_id,
+            "--slug",
+            "ci-main",
+            "--git-commit-sha",
+            "def456",
+        ],
+    );
+    assert_failure(&update);
+    assert!(
+        String::from_utf8_lossy(&update.stderr).contains("immutable"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+}
+
 struct ScopeIds {
     project_id: i64,
     environment_id: i64,
@@ -729,11 +841,15 @@ impl TempProjectRepo {
             format!("name: {project_name}\nversion: '1.0'\n"),
         )
         .expect("write dbt project");
-        git(&["init"], temp_dir.path());
+        git(&["init", "-b", "main"], temp_dir.path());
+        git(&["config", "user.email", "dbtx@example.com"], temp_dir.path());
+        git(&["config", "user.name", "dbtx"], temp_dir.path());
         git(
             &["remote", "add", "origin", "https://example.com/repo.git"],
             temp_dir.path(),
         );
+        git(&["add", "."], temp_dir.path());
+        git(&["commit", "-m", "initial"], temp_dir.path());
         Self {
             _temp_dir: temp_dir,
             project_dir,
@@ -773,6 +889,15 @@ fn assert_success(output: &std::process::Output) {
         output.status.success(),
         "command failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
         output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn assert_failure(output: &std::process::Output) {
+    assert!(
+        !output.status.success(),
+        "expected failure but command succeeded\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

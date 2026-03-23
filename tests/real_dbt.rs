@@ -26,6 +26,7 @@ async fn dbtx_run_persists_real_jaffle_state() {
 
     let project = RealProject::new();
     project.seed();
+    project.init_dbtx_project(db.url());
 
     let output = run_dbtx(
         db.url(),
@@ -72,11 +73,35 @@ async fn dbtx_run_persists_real_jaffle_state() {
         .await
         .expect("run row")
         .get("terminal_status");
+    let run_row = sqlx::query(
+        "SELECT git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref FROM runs ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("run provenance row");
 
     assert_eq!(run_count, 1);
     assert_eq!(manifest_count, 1);
     assert_eq!(node_count, 1);
     assert_eq!(status, "success");
+    assert_eq!(run_row.get::<Option<String>, _>("git_branch").as_deref(), Some("main"));
+    assert_eq!(
+        run_row.get::<Option<String>, _>("git_commit_sha").as_deref(),
+        Some(project.head_sha().as_str())
+    );
+    assert_eq!(
+        run_row.get::<Option<String>, _>("git_repo_url").as_deref(),
+        Some("https://example.com/jaffle_shop_project.git")
+    );
+    assert_eq!(run_row.get::<Option<String>, _>("project_root").as_deref(), Some("."));
+    assert_eq!(
+        run_row.get::<Option<String>, _>("project_name").as_deref(),
+        Some("jaffle_shop_project")
+    );
+    assert_eq!(
+        run_row.get::<Option<String>, _>("project_ref").as_deref(),
+        Some(project.project_id().as_str())
+    );
 }
 
 #[tokio::test]
@@ -768,11 +793,15 @@ impl RealProject {
         let temp_dir = TempDir::new().expect("temp dir");
         copy_dir_all(&jaffle_fixture_dir(), temp_dir.path());
         clean_runtime_artifacts(temp_dir.path());
-        git_cmd(["init"], temp_dir.path());
+        git_cmd(["init", "-b", "main"], temp_dir.path());
+        git_cmd(["config", "user.email", "dbtx@example.com"], temp_dir.path());
+        git_cmd(["config", "user.name", "dbtx"], temp_dir.path());
         git_cmd(
             ["remote", "add", "origin", "https://example.com/jaffle_shop_project.git"],
             temp_dir.path(),
         );
+        git_cmd(["add", "."], temp_dir.path());
+        git_cmd(["commit", "-m", "initial"], temp_dir.path());
         Self { temp_dir }
     }
 
@@ -801,6 +830,16 @@ impl RealProject {
             .find_map(|line| line.trim().strip_prefix("project_id:").map(str::trim))
             .expect("project id line")
             .to_string()
+    }
+
+    fn head_sha(&self) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(self.path())
+            .output()
+            .expect("git rev-parse");
+        assert_success(&output);
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn seed(&self) {

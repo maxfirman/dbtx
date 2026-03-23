@@ -42,8 +42,11 @@ pub struct EnvironmentRecord {
     pub kind: String,
     pub baseline_environment_id: Option<i64>,
     pub baseline_environment_slug: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
     pub git_ref: Option<String>,
     pub pr_number: Option<i32>,
+    pub immutable: bool,
     pub protected: bool,
     pub status: String,
     pub schema_prefix: Option<String>,
@@ -66,11 +69,37 @@ pub struct CreateEnvironmentInput {
     pub slug: String,
     pub kind: String,
     pub baseline_slug: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
     pub git_ref: Option<String>,
     pub pr_number: Option<i32>,
+    pub immutable: bool,
     pub protected: bool,
     pub status: String,
     pub schema_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateEnvironmentInput {
+    pub project: String,
+    pub slug: String,
+    pub kind: Option<String>,
+    pub baseline_slug: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
+    pub git_ref: Option<String>,
+    pub pr_number: Option<i32>,
+    pub immutable: bool,
+    pub protected: bool,
+    pub status: Option<String>,
+    pub schema_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GitState {
+    branch: Option<String>,
+    commit_sha: Option<String>,
+    repo_url: Option<String>,
 }
 
 struct RunFinalization<'a> {
@@ -228,6 +257,7 @@ impl Db {
         &self,
         input: CreateEnvironmentInput,
     ) -> AppResult<EnvironmentRecord> {
+        validate_environment_input(&input.kind, input.git_commit_sha.as_deref())?;
         let project = self.get_project_by_identifier(&input.project).await?;
         let baseline = match input.baseline_slug.as_deref() {
             Some(baseline_slug) => Some(
@@ -240,15 +270,18 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO environments (
-                project_id, slug, kind, baseline_environment_id, git_ref, pr_number,
-                protected, status, schema_prefix
+                project_id, slug, kind, baseline_environment_id, git_branch, git_commit_sha,
+                git_ref, pr_number, immutable, protected, status, schema_prefix
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (project_id, slug) DO UPDATE SET
                 kind = EXCLUDED.kind,
                 baseline_environment_id = EXCLUDED.baseline_environment_id,
+                git_branch = EXCLUDED.git_branch,
+                git_commit_sha = EXCLUDED.git_commit_sha,
                 git_ref = EXCLUDED.git_ref,
                 pr_number = EXCLUDED.pr_number,
+                immutable = EXCLUDED.immutable,
                 protected = EXCLUDED.protected,
                 status = EXCLUDED.status,
                 schema_prefix = EXCLUDED.schema_prefix
@@ -259,15 +292,94 @@ impl Db {
         .bind(&input.slug)
         .bind(&input.kind)
         .bind(baseline.as_ref().map(|env| env.id))
+        .bind(input.git_branch.as_deref())
+        .bind(input.git_commit_sha.as_deref())
         .bind(input.git_ref.as_deref())
         .bind(input.pr_number)
+        .bind(input.immutable)
         .bind(input.protected)
         .bind(&input.status)
         .bind(input.schema_prefix.as_deref())
         .fetch_one(&self.pool)
         .await?;
         let environment_id: i64 = row.get("id");
-        self.get_environment_by_id(environment_id).await
+        let environment = self.get_environment_by_id(environment_id).await?;
+        self.record_environment_version(&environment, "created").await?;
+        Ok(environment)
+    }
+
+    pub async fn update_environment(
+        &self,
+        input: UpdateEnvironmentInput,
+    ) -> AppResult<EnvironmentRecord> {
+        let project = self.get_project_by_identifier(&input.project).await?;
+        let existing = self
+            .get_environment_by_project_id(project.id, &project.slug, &input.slug)
+            .await?;
+
+        if existing.immutable {
+            let changing_identity = input.kind.is_some()
+                || input.baseline_slug.is_some()
+                || input.git_branch.is_some()
+                || input.git_commit_sha.is_some()
+                || input.immutable;
+            if changing_identity {
+                return Err(AppError::ImmutableEnvironment(
+                    project.project_id,
+                    existing.slug,
+                ));
+            }
+        }
+
+        let kind = input.kind.as_deref().unwrap_or(&existing.kind).to_string();
+        let baseline_environment_id = match input.baseline_slug.as_deref() {
+            Some(baseline_slug) => Some(
+                self.get_environment_by_project_id(project.id, &project.slug, baseline_slug)
+                    .await?
+                    .id,
+            ),
+            None => existing.baseline_environment_id,
+        };
+        let git_branch = input.git_branch.or(existing.git_branch.clone());
+        let git_commit_sha = input.git_commit_sha.or(existing.git_commit_sha.clone());
+        validate_environment_input(&kind, git_commit_sha.as_deref())?;
+        let immutable = existing.immutable || input.immutable;
+        let status = input.status.unwrap_or(existing.status.clone());
+
+        sqlx::query(
+            r#"
+            UPDATE environments
+            SET kind = $3,
+                baseline_environment_id = $4,
+                git_branch = $5,
+                git_commit_sha = $6,
+                git_ref = $7,
+                pr_number = $8,
+                immutable = $9,
+                protected = $10,
+                status = $11,
+                schema_prefix = $12
+            WHERE id = $1 AND project_id = $2
+            "#,
+        )
+        .bind(existing.id)
+        .bind(project.id)
+        .bind(&kind)
+        .bind(baseline_environment_id)
+        .bind(git_branch.as_deref())
+        .bind(git_commit_sha.as_deref())
+        .bind(input.git_ref.as_deref().or(existing.git_ref.as_deref()))
+        .bind(input.pr_number.or(existing.pr_number))
+        .bind(immutable)
+        .bind(input.protected || existing.protected)
+        .bind(&status)
+        .bind(input.schema_prefix.as_deref().or(existing.schema_prefix.as_deref()))
+        .execute(&self.pool)
+        .await?;
+
+        let environment = self.get_environment_by_id(existing.id).await?;
+        self.record_environment_version(&environment, "updated").await?;
+        Ok(environment)
     }
 
     pub async fn list_environments(&self, project: &str) -> AppResult<Vec<EnvironmentRecord>> {
@@ -283,8 +395,11 @@ impl Db {
                 e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
+                e.git_branch,
+                e.git_commit_sha,
                 e.git_ref,
                 e.pr_number,
+                e.immutable,
                 e.protected,
                 e.status,
                 e.schema_prefix,
@@ -430,6 +545,8 @@ impl Db {
         .await?;
 
         tx.commit().await?;
+        let target = self.get_environment_by_id(target.id).await?;
+        self.record_environment_version(&target, "seeded").await?;
         Ok(())
     }
 
@@ -443,6 +560,7 @@ impl Db {
         let project = self
             .resolve_local_project(&ctx.project_dir, &ctx.project_slug)
             .await?;
+        let git_state = read_git_state(&ctx.project_dir);
         let run_id = Uuid::new_v4();
         let reconstructed_manifest = self
             .load_reconstructed_manifest(&project.slug, &ctx.environment_slug)
@@ -471,11 +589,16 @@ impl Db {
         let (project_id, environment_id) = self
             .ensure_environment(&project, &ctx.environment_slug)
             .await?;
+        let environment = self.get_environment_by_id(environment_id).await?;
+        validate_environment_git_state(&project, &environment, &git_state)?;
 
         sqlx::query(
             r#"
-            INSERT INTO runs (run_id, project_id, environment_id, dbt_invocation_id, command, args, is_full_graph_run)
-            VALUES ($1, $2, $3, $1, $4, $5, $6)
+            INSERT INTO runs (
+                run_id, project_id, environment_id, dbt_invocation_id, command, args, is_full_graph_run,
+                git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref
+            )
+            VALUES ($1, $2, $3, $1, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(run_id)
@@ -484,6 +607,12 @@ impl Db {
         .bind(subcommand)
         .bind(args_json)
         .bind(ctx.is_full_graph_run)
+        .bind(git_state.branch.as_deref())
+        .bind(git_state.commit_sha.as_deref())
+        .bind(git_state.repo_url.as_deref().or(project.git_repo_url.as_deref()))
+        .bind(project.project_root.as_deref())
+        .bind(&project.project_name)
+        .bind(&project.project_id)
         .execute(&self.pool)
         .await?;
 
@@ -583,6 +712,12 @@ impl Db {
         let project = self
             .resolve_local_project(&ctx.project_dir, &ctx.project_slug)
             .await?;
+        let git_state = read_git_state(&ctx.project_dir);
+        let (_, environment_id) = self
+            .ensure_environment(&project, &ctx.environment_slug)
+            .await?;
+        let environment = self.get_environment_by_id(environment_id).await?;
+        validate_environment_git_state(&project, &environment, &git_state)?;
         let reconstructed_manifest = self
             .load_reconstructed_manifest(&project.slug, &ctx.environment_slug)
             .await?
@@ -710,6 +845,34 @@ impl Db {
         Ok(())
     }
 
+    async fn record_environment_version(
+        &self,
+        environment: &EnvironmentRecord,
+        reason: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO environment_versions (
+                environment_id, project_id, reason, git_branch, git_commit_sha, kind,
+                immutable, baseline_environment_id, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(environment.id)
+        .bind(environment.project_id)
+        .bind(reason)
+        .bind(environment.git_branch.as_deref())
+        .bind(environment.git_commit_sha.as_deref())
+        .bind(&environment.kind)
+        .bind(environment.immutable)
+        .bind(environment.baseline_environment_id)
+        .bind(sqlx::types::Json(&environment.metadata))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn mark_run_finished(
         &self,
         run_id: Uuid,
@@ -823,8 +986,11 @@ impl Db {
                 e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
+                e.git_branch,
+                e.git_commit_sha,
                 e.git_ref,
                 e.pr_number,
+                e.immutable,
                 e.protected,
                 e.status,
                 e.schema_prefix,
@@ -858,8 +1024,11 @@ impl Db {
                 e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
+                e.git_branch,
+                e.git_commit_sha,
                 e.git_ref,
                 e.pr_number,
+                e.immutable,
                 e.protected,
                 e.status,
                 e.schema_prefix,
@@ -1609,6 +1778,13 @@ fn is_promotable_status(status: &str) -> bool {
     matches!(status, "success" | "pass" | "created")
 }
 
+fn validate_environment_input(kind: &str, git_commit_sha: Option<&str>) -> AppResult<()> {
+    if kind == "commit" && git_commit_sha.is_none() {
+        return Err(AppError::CommitEnvironmentRequiresSha);
+    }
+    Ok(())
+}
+
 fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
     let metadata: sqlx::types::Json<Value> = row.get("metadata");
     ProjectRecord {
@@ -1634,8 +1810,11 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         kind: row.get("kind"),
         baseline_environment_id: row.get("baseline_environment_id"),
         baseline_environment_slug: row.get("baseline_environment_slug"),
+        git_branch: row.get("git_branch"),
+        git_commit_sha: row.get("git_commit_sha"),
         git_ref: row.get("git_ref"),
         pr_number: row.get("pr_number"),
+        immutable: row.get("immutable"),
         protected: row.get("protected"),
         status: row.get("status"),
         schema_prefix: row.get("schema_prefix"),
@@ -1731,6 +1910,50 @@ fn validate_project_record(project: &ProjectRecord, project_dir: &Path) -> AppRe
         Ok(())
     } else {
         Err(AppError::ProjectValidationFailed(project.project_id.clone()))
+    }
+}
+
+fn read_git_state(project_dir: &Path) -> GitState {
+    let repo_root = git_repo_root(project_dir).ok();
+    let repo_url = repo_root
+        .as_deref()
+        .and_then(|root| git_remote_origin_url(root).ok());
+    let branch = repo_root.as_deref().and_then(|root| {
+        run_git(["rev-parse", "--abbrev-ref", "HEAD"], root)
+            .ok()
+            .filter(|value| value != "HEAD")
+    });
+    let commit_sha = repo_root
+        .as_deref()
+        .and_then(|root| run_git(["rev-parse", "HEAD"], root).ok());
+    GitState {
+        branch,
+        commit_sha,
+        repo_url,
+    }
+}
+
+fn validate_environment_git_state(
+    project: &ProjectRecord,
+    environment: &EnvironmentRecord,
+    git_state: &GitState,
+) -> AppResult<()> {
+    if !environment.immutable {
+        return Ok(());
+    }
+
+    let branch_matches = environment.git_branch.is_none()
+        || environment.git_branch == git_state.branch;
+    let commit_matches = environment.git_commit_sha.is_none()
+        || environment.git_commit_sha == git_state.commit_sha;
+
+    if branch_matches && commit_matches {
+        Ok(())
+    } else {
+        Err(AppError::ImmutableEnvironmentGitMismatch(
+            project.project_id.clone(),
+            environment.slug.clone(),
+        ))
     }
 }
 

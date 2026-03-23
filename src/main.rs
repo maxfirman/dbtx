@@ -8,7 +8,10 @@ mod manifest;
 use clap::Parser;
 use cli::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
 use config::RuntimeConfig;
-use db::{CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, ProjectRecord};
+use db::{
+    CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, ProjectRecord,
+    UpdateEnvironmentInput,
+};
 use error::{AppError, AppResult};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -185,8 +188,11 @@ async fn handle_environment_command(command: EnvironmentCommand) -> AppResult<()
             slug,
             kind,
             baseline,
+            git_branch,
+            git_commit_sha,
             git_ref,
             pr_number,
+            immutable,
             protected,
             status,
             schema_prefix,
@@ -197,8 +203,43 @@ async fn handle_environment_command(command: EnvironmentCommand) -> AppResult<()
                     slug,
                     kind,
                     baseline_slug: baseline,
+                    git_branch,
+                    git_commit_sha,
                     git_ref,
                     pr_number,
+                    immutable,
+                    protected,
+                    status,
+                    schema_prefix,
+                })
+                .await?;
+            print_environment(&environment);
+        }
+        EnvironmentCommand::Update {
+            project,
+            slug,
+            kind,
+            baseline,
+            git_branch,
+            git_commit_sha,
+            git_ref,
+            pr_number,
+            immutable,
+            protected,
+            status,
+            schema_prefix,
+        } => {
+            let environment = db
+                .update_environment(UpdateEnvironmentInput {
+                    project,
+                    slug,
+                    kind,
+                    baseline_slug: baseline,
+                    git_branch,
+                    git_commit_sha,
+                    git_ref,
+                    pr_number,
+                    immutable,
                     protected,
                     status,
                     schema_prefix,
@@ -248,7 +289,7 @@ fn print_project(project: &ProjectRecord) {
 
 fn print_environment(environment: &EnvironmentRecord) {
     println!(
-        "environment id={} project_pk={} project_id={} project={} slug={} kind={} baseline_id={} baseline={} git_ref={} pr_number={} protected={} status={} schema_prefix={} metadata={}",
+        "environment id={} project_pk={} project_id={} project={} slug={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} git_ref={} pr_number={} immutable={} protected={} status={} schema_prefix={} metadata={}",
         environment.id,
         environment.project_id,
         environment.project_ref,
@@ -260,11 +301,14 @@ fn print_environment(environment: &EnvironmentRecord) {
             .map(|value| value.to_string())
             .unwrap_or_default(),
         environment.baseline_environment_slug.as_deref().unwrap_or(""),
+        environment.git_branch.as_deref().unwrap_or(""),
+        environment.git_commit_sha.as_deref().unwrap_or(""),
         environment.git_ref.as_deref().unwrap_or(""),
         environment
             .pr_number
             .map(|value| value.to_string())
             .unwrap_or_default(),
+        environment.immutable,
         environment.protected,
         environment.status,
         environment.schema_prefix.as_deref().unwrap_or(""),
