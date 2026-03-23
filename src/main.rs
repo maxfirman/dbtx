@@ -59,6 +59,7 @@ async fn run() -> AppResult<()> {
             let current_dir = std::env::current_dir()?;
             let config = RuntimeConfig::resolve(cli.database_url, Some(&current_dir))?;
             let db = connect_db(&config).await?;
+            db.require_current_schema().await?;
             let updated = db.replay_projection(run_id).await?;
             println!("Rebuilt current state for {updated} nodes.");
         }
@@ -170,7 +171,8 @@ async fn handle_persisting_command(
     let ctx = config::InvocationContext::from_args(&args, false)?;
     let project_dir = ctx.project_dir;
     let config = RuntimeConfig::resolve(database_url_override, Some(&project_dir))?;
-    let db = connect_initialized_db(&config).await?;
+    let db = connect_db(&config).await?;
+    db.require_current_schema().await?;
     db.persisting_invocation(subcommand, &config, &args).await
 }
 
@@ -186,17 +188,12 @@ async fn handle_passthrough_command(
     let project_dir = ctx.project_dir;
     let config = RuntimeConfig::resolve(database_url_override, Some(&project_dir))?;
     let db = connect_db(&config).await?;
+    db.require_current_schema().await?;
     db.ls_invocation(&config, &args).await
 }
 
 async fn connect_db(config: &RuntimeConfig) -> AppResult<Db> {
     Db::connect(&config.database_url).await
-}
-
-async fn connect_initialized_db(config: &RuntimeConfig) -> AppResult<Db> {
-    let db = connect_db(config).await?;
-    db.init().await?;
-    Ok(db)
 }
 
 async fn handle_project_command(
@@ -205,7 +202,8 @@ async fn handle_project_command(
 ) -> AppResult<()> {
     let current_dir = std::env::current_dir()?;
     let config = RuntimeConfig::resolve(database_url_override, Some(&current_dir))?;
-    let db = connect_initialized_db(&config).await?;
+    let db = connect_db(&config).await?;
+    db.require_current_schema().await?;
     match command {
         ProjectCommand::Init {
             git_repo_url,
@@ -227,14 +225,8 @@ async fn handle_project_command(
                 ));
             }
             let project_id = format!("prj_{}", Uuid::new_v4().simple());
-            write_dbtx_toml(
-                &current_dir,
-                Some(&project_id),
-                Some(&config.database_url),
-                force,
-            )?;
             let input = CreateProjectInput {
-                project_id,
+                project_id: project_id.clone(),
                 project_name: inferred.project_name,
                 git_repo_url: inferred.git_repo_url,
                 default_branch: inferred.default_branch,
@@ -246,6 +238,12 @@ async fn handle_project_command(
             } else {
                 db.create_project(input).await?
             };
+            write_dbtx_toml(
+                &current_dir,
+                Some(&project_id),
+                Some(&config.database_url),
+                force,
+            )?;
             print_project(&project);
         }
         ProjectCommand::Update {
@@ -261,7 +259,7 @@ async fn handle_project_command(
                 default_branch.as_deref(),
             )?;
             let project = db
-                .create_project(CreateProjectInput {
+                .update_project(CreateProjectInput {
                     project_id,
                     project_name: inferred.project_name,
                     git_repo_url: inferred.git_repo_url,
@@ -297,7 +295,8 @@ async fn handle_environment_command(
 ) -> AppResult<()> {
     let current_dir = std::env::current_dir()?;
     let config = RuntimeConfig::resolve(database_url_override, Some(&current_dir))?;
-    let db = connect_initialized_db(&config).await?;
+    let db = connect_db(&config).await?;
+    db.require_current_schema().await?;
     match command {
         EnvironmentCommand::Create {
             project,
@@ -321,6 +320,7 @@ async fn handle_environment_command(
                 .create_environment(CreateEnvironmentInput {
                     project,
                     slug,
+                    target_name: local_profile.target_name,
                     kind,
                     baseline_slug: baseline,
                     git_branch,
@@ -364,6 +364,7 @@ async fn handle_environment_command(
                     immutable,
                     status,
                     adapter_type,
+                    target_name: None,
                     schema_name,
                     threads,
                     profile_config: None,
@@ -402,12 +403,13 @@ fn print_project(project: &ProjectRecord) {
 
 fn print_environment(environment: &EnvironmentRecord) {
     println!(
-        "environment id={} project_pk={} project_id={} project={} slug={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} immutable={} status={} adapter_type={} schema_name={} threads={} profile_config={} metadata={}",
+        "environment id={} project_pk={} project_id={} project={} slug={} target_name={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} immutable={} status={} adapter_type={} schema_name={} threads={} profile_config={} metadata={}",
         environment.id,
         environment.project_id,
         environment.project_ref,
         environment.project_name,
         environment.slug,
+        environment.target_name,
         environment.kind,
         environment
             .baseline_environment_id

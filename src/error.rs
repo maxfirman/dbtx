@@ -61,6 +61,10 @@ pub enum AppError {
     )]
     MissingDatabaseUrl,
     #[error(
+        "database schema is not up to date. Run `dbtx state migrate` before invoking other commands."
+    )]
+    SchemaOutOfDate,
+    #[error(
         "project id '{0}' was not found in the database. Run `dbtx project init --force` to re-initialize the project or `dbtx project update` to sync it."
     )]
     ProjectIdNotFound(String),
@@ -86,6 +90,10 @@ pub enum AppError {
     ProjectValidationFailed(String),
     #[error("dbtx manages --state internally; remove the user-supplied --state argument")]
     UserStateNotAllowed,
+    #[error(
+        "dbtx manages dbt target selection through the registered environment; remove the user-supplied --target argument"
+    )]
+    UserTargetNotAllowed,
     #[error(
         "dbtx manages warehouse profiles internally; remove the user-supplied --profiles-dir argument"
     )]

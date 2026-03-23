@@ -48,6 +48,7 @@ pub struct EnvironmentRecord {
     pub project_ref: String,
     pub project_name: String,
     pub slug: String,
+    pub target_name: String,
     pub kind: String,
     pub baseline_environment_id: Option<i64>,
     pub baseline_environment_slug: Option<String>,
@@ -77,6 +78,7 @@ pub struct CreateProjectInput {
 pub struct CreateEnvironmentInput {
     pub project: String,
     pub slug: String,
+    pub target_name: String,
     pub kind: String,
     pub baseline_slug: Option<String>,
     pub git_branch: Option<String>,
@@ -103,6 +105,7 @@ pub struct UpdateEnvironmentInput {
     pub immutable: bool,
     pub status: Option<String>,
     pub adapter_type: Option<String>,
+    pub target_name: Option<String>,
     pub schema_name: Option<String>,
     pub threads: Option<i32>,
     pub profile_config: Option<Value>,
@@ -137,9 +140,14 @@ impl Db {
         Ok(Self { pool })
     }
 
-    pub async fn init(&self) -> AppResult<()> {
-        MIGRATOR.run(&self.pool).await?;
-        Ok(())
+    pub async fn require_current_schema(&self) -> AppResult<()> {
+        let applied = self.migration_versions().await?;
+        let expected: BTreeSet<i64> = MIGRATOR.iter().map(|migration| migration.version).collect();
+        if applied == expected {
+            Ok(())
+        } else {
+            Err(AppError::SchemaOutOfDate)
+        }
     }
 
     pub async fn migrate(&self) -> AppResult<Vec<AppliedMigration>> {
@@ -157,11 +165,6 @@ impl Db {
             r#"
             INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root)
             VALUES ($1, $2, $3, COALESCE($4, 'main'), $5)
-            ON CONFLICT (project_id) DO UPDATE SET
-                project_name = EXCLUDED.project_name,
-                git_repo_url = EXCLUDED.git_repo_url,
-                default_branch = EXCLUDED.default_branch,
-                project_root = EXCLUDED.project_root
             RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
             "#,
         )
@@ -172,6 +175,29 @@ impl Db {
         .bind(&input.project_root)
         .fetch_one(&self.pool)
         .await?;
+        Ok(project_record_from_row(&row))
+    }
+
+    pub async fn update_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
+        let row = sqlx::query(
+            r#"
+            UPDATE projects
+            SET project_name = $2,
+                git_repo_url = $3,
+                default_branch = COALESCE($4, 'main'),
+                project_root = $5
+            WHERE project_id = $1
+            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
+            "#,
+        )
+        .bind(&input.project_id)
+        .bind(&input.project_name)
+        .bind(&input.git_repo_url)
+        .bind(input.default_branch.as_deref())
+        .bind(&input.project_root)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::ProjectIdNotFound(input.project_id.clone()))?;
         Ok(project_record_from_row(&row))
     }
 
@@ -273,16 +299,17 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO environments (
-                project_id, slug, kind, baseline_environment_id, git_branch, git_commit_sha,
+                project_id, slug, target_name, kind, baseline_environment_id, git_branch, git_commit_sha,
                 pr_number, immutable, status, adapter_type, schema_name, threads, profile_config,
                 profile_secrets
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING id
             "#,
         )
         .bind(project.id)
         .bind(&input.slug)
+        .bind(&input.target_name)
         .bind(&input.kind)
         .bind(baseline.as_ref().map(|env| env.id))
         .bind(input.git_branch.as_deref())
@@ -357,6 +384,11 @@ impl Db {
             .as_deref()
             .unwrap_or(&existing.adapter_type)
             .to_string();
+        let target_name = input
+            .target_name
+            .as_deref()
+            .unwrap_or(&existing.target_name)
+            .to_string();
         let schema_name = input
             .schema_name
             .as_deref()
@@ -392,10 +424,11 @@ impl Db {
                 immutable = $8,
                 status = $9,
                 adapter_type = $10,
-                schema_name = $11,
-                threads = $12,
-                profile_config = $13,
-                profile_secrets = $14
+                target_name = $11,
+                schema_name = $12,
+                threads = $13,
+                profile_config = $14,
+                profile_secrets = $15
             WHERE id = $1 AND project_id = $2
             "#,
         )
@@ -409,6 +442,7 @@ impl Db {
         .bind(immutable)
         .bind(&status)
         .bind(&adapter_type)
+        .bind(&target_name)
         .bind(&schema_name)
         .bind(threads)
         .bind(sqlx::types::Json(
@@ -442,6 +476,7 @@ impl Db {
                 p.project_id AS project_ref,
                 p.project_name,
                 e.slug,
+                e.target_name,
                 e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
@@ -595,9 +630,7 @@ impl Db {
         incoming_args: &[OsString],
     ) -> AppResult<()> {
         let ctx = InvocationContext::from_args(incoming_args, true)?;
-        let project = self
-            .resolve_local_project(&ctx.project_dir, &ctx.project_slug)
-            .await?;
+        let project = self.resolve_local_project(&ctx.project_dir).await?;
         let git_state = read_git_state(&ctx.project_dir);
         let environment = self
             .get_environment_by_project_id(project.id, &project.project_id, &ctx.environment_slug)
@@ -750,9 +783,7 @@ impl Db {
         incoming_args: &[OsString],
     ) -> AppResult<()> {
         let ctx = InvocationContext::from_args(incoming_args, false)?;
-        let project = self
-            .resolve_local_project(&ctx.project_dir, &ctx.project_slug)
-            .await?;
+        let project = self.resolve_local_project(&ctx.project_dir).await?;
         let git_state = read_git_state(&ctx.project_dir);
         let environment = self
             .get_environment_by_project_id(project.id, &project.project_id, &ctx.environment_slug)
@@ -811,11 +842,7 @@ impl Db {
             .await
     }
 
-    async fn resolve_local_project(
-        &self,
-        project_dir: &Path,
-        _fallback_slug: &str,
-    ) -> AppResult<ProjectRecord> {
+    async fn resolve_local_project(&self, project_dir: &Path) -> AppResult<ProjectRecord> {
         let project_id = read_dbtx_project_id(project_dir)?.ok_or(AppError::ProjectIdMissing)?;
         let project = self.get_project_by_project_id(&project_id).await?;
         validate_project_record(&project, project_dir)?;
@@ -881,7 +908,11 @@ impl Db {
         .bind(&environment.kind)
         .bind(environment.immutable)
         .bind(environment.baseline_environment_id)
-        .bind(sqlx::types::Json(&environment.metadata))
+        .bind(sqlx::types::Json(serde_json::json!({
+            "environment_slug": environment.slug,
+            "target_name": environment.target_name,
+            "environment_metadata": environment.metadata,
+        })))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -954,6 +985,7 @@ impl Db {
                 p.project_id AS project_ref,
                 p.project_name,
                 e.slug,
+                e.target_name,
                 e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
@@ -994,6 +1026,7 @@ impl Db {
                 p.project_id AS project_ref,
                 p.project_name,
                 e.slug,
+                e.target_name,
                 e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
@@ -1033,6 +1066,7 @@ impl Db {
                 p.project_id AS project_ref,
                 p.project_name,
                 e.slug,
+                e.target_name,
                 e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
@@ -1872,6 +1906,7 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         project_ref: row.get("project_ref"),
         project_name: row.get("project_name"),
         slug: row.get("slug"),
+        target_name: row.get("target_name"),
         kind: row.get("kind"),
         baseline_environment_id: row.get("baseline_environment_id"),
         baseline_environment_slug: row.get("baseline_environment_slug"),
@@ -2003,7 +2038,7 @@ fn build_generated_profiles(
     let profile_name = read_dbt_profile_name(project_dir)?;
     let resolved = resolve_runtime_profile(
         &profile_name,
-        &environment.slug,
+        &environment.target_name,
         &EnvironmentProfileRecord {
             adapter_type: environment.adapter_type.clone(),
             schema_name: environment.schema_name.clone(),

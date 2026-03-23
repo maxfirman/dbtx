@@ -12,7 +12,6 @@ pub struct RuntimeConfig {
 
 #[derive(Debug, Clone)]
 pub struct InvocationContext {
-    pub project_slug: String,
     pub environment_slug: String,
     pub project_dir: PathBuf,
     pub target_path: PathBuf,
@@ -66,6 +65,9 @@ impl InvocationContext {
         if has_option(args, "--state") {
             return Err(AppError::UserStateNotAllowed);
         }
+        if has_any_option(args, &["--target"]) {
+            return Err(AppError::UserTargetNotAllowed);
+        }
         if has_option(args, "--profiles-dir") {
             return Err(AppError::UserProfilesDirNotAllowed);
         }
@@ -78,18 +80,8 @@ impl InvocationContext {
             .map(|path| absolutize(&current_dir, &path))
             .unwrap_or_else(|| project_dir.join("target"));
 
-        let project_slug = env::var("DBTX_PROJECT_SLUG").unwrap_or_else(|_| {
-            project_dir
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .replace(' ', "-")
-        });
-        let environment_slug = env::var("DBTX_ENVIRONMENT_SLUG").unwrap_or_else(|_| {
-            parse_string_option(args, "--target")
-                .or_else(|| env::var("DBT_TARGET").ok())
-                .unwrap_or_else(|| "default".to_string())
-        });
+        let environment_slug =
+            env::var("DBTX_ENVIRONMENT_SLUG").unwrap_or_else(|_| "default".to_string());
         let is_full_graph_run =
             !has_any_option(args, &["--select", "-s", "--exclude", "-x", "--selector"]);
         let wants_state_modified = args.iter().any(|arg| {
@@ -105,7 +97,6 @@ impl InvocationContext {
         }
 
         Ok(Self {
-            project_slug,
             environment_slug,
             project_dir,
             target_path,
@@ -208,28 +199,28 @@ fn absolutize(base: &Path, path: &Path) -> PathBuf {
 mod tests {
     use super::{DbtxToml, InvocationContext, read_dbtx_project_id, write_dbtx_toml};
     use crate::error::AppError;
+    use std::env;
     use std::ffi::OsString;
     use tempfile::TempDir;
 
     #[test]
     fn derives_context_from_args() {
+        unsafe { env::set_var("DBTX_ENVIRONMENT_SLUG", "prod") };
         let args = vec![
             OsString::from("--project-dir"),
             OsString::from("/tmp/example"),
-            OsString::from("--target"),
-            OsString::from("prod"),
             OsString::from("--target-path=artifacts"),
             OsString::from("--select"),
             OsString::from("state:modified"),
         ];
 
         let ctx = InvocationContext::from_args(&args, true).expect("context should build");
-        assert_eq!(ctx.project_slug, "example");
         assert_eq!(ctx.environment_slug, "prod");
         assert!(ctx.target_path.ends_with("artifacts"));
         assert!(!ctx.is_full_graph_run);
         assert!(ctx.wants_state_modified);
         assert!(ctx.dbt_args.iter().any(|arg| arg == "--log-format"));
+        unsafe { env::remove_var("DBTX_ENVIRONMENT_SLUG") };
     }
 
     #[test]
@@ -247,6 +238,13 @@ mod tests {
         ];
         let err = InvocationContext::from_args(&args, false).expect_err("profiles dir should fail");
         assert!(matches!(err, AppError::UserProfilesDirNotAllowed));
+    }
+
+    #[test]
+    fn rejects_user_supplied_target() {
+        let args = vec![OsString::from("--target"), OsString::from("prod")];
+        let err = InvocationContext::from_args(&args, false).expect_err("target should fail");
+        assert!(matches!(err, AppError::UserTargetNotAllowed));
     }
 
     #[test]

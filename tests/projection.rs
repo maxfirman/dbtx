@@ -12,6 +12,26 @@ use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn commands_require_explicit_migration() {
+    let db = TestDatabase::new_unmigrated().await;
+    let repo = TempProjectRepo::new("proj");
+
+    let output = run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]);
+    assert_failure(&output);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("dbtx state migrate"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    init_dbtx_schema(db.url());
+
+    let output = run_dbtx_in_dir(db.url(), repo.project_dir(), &["project", "init"]);
+    assert_success(&output);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn replay_ignores_seed_and_test_for_promoted_manifest_state() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -301,6 +321,10 @@ async fn project_and_environment_cli_round_trip() {
         "unexpected stdout: {stdout}"
     );
     assert!(
+        stdout.contains("target_name=dev"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
         stdout.contains(&format!("project_id={project_id}")),
         "expected project id in stdout: {stdout}"
     );
@@ -321,12 +345,14 @@ async fn project_and_environment_cli_round_trip() {
         Some("https://example.com/repo.git")
     );
 
-    let environment_row =
-        sqlx::query("SELECT slug, kind, status FROM environments WHERE slug = 'staging'")
-            .fetch_one(db.pool())
-            .await
-            .expect("environment row");
+    let environment_row = sqlx::query(
+        "SELECT slug, target_name, kind, status FROM environments WHERE slug = 'staging'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("environment row");
     assert_eq!(environment_row.get::<String, _>("slug"), "staging");
+    assert_eq!(environment_row.get::<String, _>("target_name"), "dev");
     assert_eq!(environment_row.get::<String, _>("kind"), "persistent");
     assert_eq!(environment_row.get::<String, _>("status"), "active");
 
@@ -680,6 +706,43 @@ impl TestDatabase {
         }
     }
 
+    async fn new_unmigrated() -> Self {
+        if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
+            let pool = PgPool::connect(&url)
+                .await
+                .expect("connect external test db");
+            return Self {
+                url,
+                pool,
+                _container: None,
+            };
+        }
+
+        let container = Postgres::default()
+            .with_db_name("dbtx")
+            .with_user("dbtx")
+            .with_password("dbtx")
+            .start()
+            .await
+            .expect("start postgres container");
+
+        let host = container.get_host().await.expect("postgres host");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("postgres port");
+        let url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx");
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect testcontainer db");
+
+        Self {
+            url,
+            pool,
+            _container: Some(container),
+        }
+    }
+
     fn url(&self) -> &str {
         &self.url
     }
@@ -697,7 +760,7 @@ async fn scope_ids(pool: &PgPool) -> ScopeIds {
     .await
     .expect("project id");
     let environment_id: i64 = sqlx::query_scalar(
-        "INSERT INTO environments (project_id, slug, adapter_type, schema_name, threads, profile_config, profile_secrets) VALUES ($1, 'dev', 'duckdb', 'main', 4, '{\"path\":\"warehouse.duckdb\"}'::jsonb, '{}'::jsonb) ON CONFLICT (project_id, slug) DO UPDATE SET slug = EXCLUDED.slug RETURNING id",
+        "INSERT INTO environments (project_id, slug, target_name, adapter_type, schema_name, threads, profile_config, profile_secrets) VALUES ($1, 'dev', 'dev', 'duckdb', 'main', 4, '{\"path\":\"warehouse.duckdb\"}'::jsonb, '{}'::jsonb) ON CONFLICT (project_id, slug) DO UPDATE SET slug = EXCLUDED.slug RETURNING id",
     )
     .bind(project_id)
     .fetch_one(pool)

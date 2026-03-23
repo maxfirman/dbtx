@@ -17,6 +17,69 @@ const ENVIRONMENT_SLUG: &str = "dev";
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_environment_uses_stored_target_name_when_slug_differs() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    let marker_model = project
+        .path()
+        .join("models")
+        .join("marts")
+        .join("target_name_marker.sql");
+    fs::write(
+        &marker_model,
+        "{{ config(materialized='table') }}\nselect '{{ target.name }}' as target_name\n",
+    )
+    .expect("write marker model");
+
+    assert_success(&run_dbtx(db.url(), &project, &["project", "init"]));
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &["environment", "create", "--slug", "staging", "--target", "dev"],
+    ));
+
+    let output = run_dbtx_with_environment_slug(
+        db.url(),
+        &project,
+        "staging",
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "--select",
+            "target_name_marker",
+        ],
+    );
+    assert_success(&output);
+
+    let query = Command::new("duckdb")
+        .args([
+            project.path().join("warehouse.duckdb").to_str().expect("utf8 db"),
+            "-csv",
+            "-c",
+            "select target_name from main.target_name_marker",
+        ])
+        .output()
+        .expect("query duckdb");
+    assert_success(&query);
+    let value = String::from_utf8_lossy(&query.stdout)
+        .lines()
+        .nth(1)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    assert_eq!(value, "dev");
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
 async fn dbtx_ls_requires_project_init() {
     let _guard = integration_lock()
         .lock()
@@ -957,16 +1020,6 @@ impl RealProject {
         self.path().to_str().expect("utf8 path")
     }
 
-    fn project_slug(&self) -> String {
-        format!(
-            "jaffle-it-{}",
-            self.path()
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-        )
-    }
-
     fn project_id(&self) -> String {
         let content = fs::read_to_string(self.path().join("dbtx.toml")).expect("read dbtx config");
         let config: toml::Value = toml::from_str(&content).expect("parse dbtx config");
@@ -1126,7 +1179,6 @@ fn run_dbtx_with_environment_slug(
     command.args(strip_profiles_dir_args(args));
     command.env("DBTX_DATABASE_URL", database_url);
     command.env("DBTX_SECRET_KEY", "test-secret-key");
-    command.env("DBTX_PROJECT_SLUG", project.project_slug());
     command.env("DBTX_ENVIRONMENT_SLUG", environment_slug);
     command.current_dir(project.path());
     command.output().expect("run dbtx")
