@@ -178,6 +178,13 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
             }
         }
         ProjectCommand::Show { project } => {
+            let project = match project {
+                Some(project) => project,
+                None => {
+                    let current_dir = std::env::current_dir()?;
+                    read_dbtx_project_id(&current_dir)?.ok_or(AppError::ProjectIdMissing)?
+                }
+            };
             let project = db.get_project_by_project_id(&project).await?;
             print_project(&project);
         }

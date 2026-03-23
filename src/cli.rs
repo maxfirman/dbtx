@@ -110,7 +110,7 @@ pub enum ProjectCommand {
     #[command(about = "Show one registered dbtx project")]
     Show {
         #[arg(long)]
-        project: String,
+        project: Option<String>,
     },
 }
 
@@ -363,6 +363,17 @@ mod tests {
                 assert_eq!(seed_type, "clone");
             }
             _ => panic!("expected environment seed-from command"),
+        }
+    }
+
+    #[test]
+    fn project_show_allows_omitted_project_flag() {
+        let cli = Cli::parse_from(["dbtx", "project", "show"]);
+        match cli.command {
+            Command::Project(ProjectCommand::Show { project }) => {
+                assert!(project.is_none());
+            }
+            _ => panic!("expected project show command"),
         }
     }
 
