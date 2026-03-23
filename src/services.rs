@@ -52,6 +52,7 @@ pub struct InvocationRequest {
     pub args: Vec<OsString>,
     pub config: RuntimeConfig,
     pub current_dir: Option<PathBuf>,
+    pub environment_slug: String,
 }
 
 #[derive(Debug, Clone)]
@@ -317,6 +318,10 @@ impl<'a> InvocationService<'a> {
             .unwrap_or(std::env::current_dir()?);
         let ctx =
             InvocationContext::from_args_in_dir(&request.args, inject_json_logging, &current_dir)?;
+        let ctx = InvocationContext {
+            environment_slug: request.environment_slug.clone(),
+            ..ctx
+        };
         let project = self.db.resolve_local_project(&ctx.project_dir).await?;
         let git_state = read_git_state(&ctx.project_dir);
         let environment = self
@@ -448,9 +453,6 @@ impl<'a> InvocationService<'a> {
             if let Some(event) = LogEvent::parse(&line) {
                 let rendered = event.render_text_line();
                 observer.dbt_log(&event, rendered.as_deref());
-                if let Some(rendered) = rendered {
-                    observer.stdout_line(&rendered);
-                }
                 if dbt_version.is_none() && event.info.name == "MainReportVersion" {
                     dbt_version = event
                         .data

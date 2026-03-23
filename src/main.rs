@@ -156,10 +156,10 @@ async fn handle_persisting_command(
         exit_with_dbt_help(command.as_str())?;
     }
     let ctx = config::InvocationContext::from_args(&args, false)?;
-    let project_dir = ctx.project_dir;
+    let project_dir = ctx.project_dir.clone();
     let service_url = resolve_service_url(service_url_override, Some(&project_dir))?
         .ok_or(AppError::MissingServiceUrl)?;
-    invoke_via_daemon(service_url, command, args, &project_dir).await?;
+    invoke_via_daemon(service_url, command, args, &ctx).await?;
     Ok(())
 }
 
@@ -171,10 +171,10 @@ async fn handle_passthrough_command(
         exit_with_dbt_help(InvocationCommand::Ls.as_str())?;
     }
     let ctx = config::InvocationContext::from_args(&args, false)?;
-    let project_dir = ctx.project_dir;
+    let project_dir = ctx.project_dir.clone();
     let service_url = resolve_service_url(service_url_override, Some(&project_dir))?
         .ok_or(AppError::MissingServiceUrl)?;
-    invoke_via_daemon(service_url, InvocationCommand::Ls, args, &project_dir).await?;
+    invoke_via_daemon(service_url, InvocationCommand::Ls, args, &ctx).await?;
     Ok(())
 }
 
@@ -349,7 +349,7 @@ async fn invoke_via_daemon(
     service_url: String,
     command: InvocationCommand,
     args: Vec<OsString>,
-    project_dir: &Path,
+    ctx: &config::InvocationContext,
 ) -> AppResult<()> {
     let client = client::DaemonClient::new(service_url);
     let response = client
@@ -365,7 +365,8 @@ async fn invoke_via_daemon(
                 .into_iter()
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect(),
-            current_dir: project_dir.display().to_string(),
+            current_dir: ctx.project_dir.display().to_string(),
+            environment_slug: ctx.environment_slug.clone(),
         })
         .await?;
     client
@@ -387,7 +388,13 @@ async fn invoke_via_daemon(
     let status = client.invocation_status(response.invocation_id).await?;
     match status.exit_code.unwrap_or(1) {
         0 => Ok(()),
-        code => Err(AppError::DbtFailed(code)),
+        code => {
+            if let Some(error) = status.error {
+                Err(AppError::Io(std::io::Error::other(error)))
+            } else {
+                Err(AppError::DbtFailed(code))
+            }
+        }
     }
 }
 

@@ -89,6 +89,7 @@ pub struct InvocationCreateApiRequest {
     pub command: InvocationCommandApi,
     pub args: Vec<String>,
     pub current_dir: String,
+    pub environment_slug: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

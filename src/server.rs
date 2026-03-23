@@ -444,6 +444,7 @@ async fn invocation_create(
                     args: request.args.into_iter().map(Into::into).collect(),
                     config: runtime_config,
                     current_dir: Some(PathBuf::from(request.current_dir)),
+                    environment_slug: request.environment_slug,
                 },
                 &mut observer,
             )

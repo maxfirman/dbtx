@@ -160,7 +160,11 @@ impl DaemonClient {
                 let frame = buffer[..idx].to_string();
                 buffer.drain(..idx + 2);
                 if let Some(event) = parse_sse_frame(&frame)? {
+                    let is_completed = event.event_type == "invocation.completed";
                     on_event(event);
+                    if is_completed {
+                        return Ok(());
+                    }
                 }
             }
         }
