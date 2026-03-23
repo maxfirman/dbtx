@@ -719,20 +719,6 @@ async fn seeded_environment_starts_with_empty_state_modified() {
             "123",
         ],
     ));
-    assert_success(&run_dbtx(
-        db.url(),
-        &project,
-        &[
-            "environment",
-            "seed-from",
-            "--project",
-            &project_id,
-            "--target",
-            "pr-123",
-            "--source",
-            "staging",
-        ],
-    ));
 
     let modified = modified_unique_ids_for_env(db.url(), &project, "pr-123");
     assert!(

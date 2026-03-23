@@ -375,27 +375,6 @@ async fn environment_seed_from_copies_active_state_without_runs() {
             "source",
         ],
     ));
-    assert_success(&run_dbtx_in_dir(
-        db.url(),
-        repo.project_dir(),
-        &[
-            "environment",
-            "create",
-            "--project",
-            &project_id,
-            "--slug",
-            "target",
-            "--kind",
-            "ephemeral",
-            "--baseline",
-            "source",
-            "--git-branch",
-            "main",
-            "--pr-number",
-            "123",
-        ],
-    ));
-
     let ids = project_environment_ids(db.pool(), &project_id, "source").await;
     let run_id = Uuid::new_v4();
     insert_run(
@@ -464,23 +443,26 @@ async fn environment_seed_from_copies_active_state_without_runs() {
     .await
     .expect("insert current state");
 
-    let seed_output = run_dbtx_in_dir(
+    assert_success(&run_dbtx_in_dir(
         db.url(),
         repo.project_dir(),
         &[
             "environment",
-            "seed-from",
+            "create",
             "--project",
             &project_id,
-            "--target",
+            "--slug",
             "target",
-            "--source",
+            "--kind",
+            "ephemeral",
+            "--baseline",
             "source",
-            "--seed-type",
-            "clone",
+            "--git-branch",
+            "main",
+            "--pr-number",
+            "123",
         ],
-    );
-    assert_success(&seed_output);
+    ));
 
     let target_ids = project_environment_ids(db.pool(), &project_id, "target").await;
     let promoted_node_count: i64 = sqlx::query_scalar(

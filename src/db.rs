@@ -269,7 +269,7 @@ impl Db {
             ),
             None => None,
         };
-
+        let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             r#"
             INSERT INTO environments (
@@ -295,7 +295,7 @@ impl Db {
         .bind(input.threads)
         .bind(sqlx::types::Json(&input.profile_config))
         .bind(sqlx::types::Json(&input.profile_secrets))
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|err| match &err {
             sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23505") => {
@@ -304,7 +304,14 @@ impl Db {
             _ => AppError::Sqlx(err),
         })?;
         let environment_id: i64 = row.get("id");
-        let environment = self.get_environment_by_id(environment_id).await?;
+        let environment = self
+            .get_environment_by_id_in_tx(&mut tx, environment_id)
+            .await?;
+        if let Some(source) = baseline.as_ref() {
+            self.seed_environment_from_tx(&mut tx, &project, &environment, source, "clone")
+                .await?;
+        }
+        tx.commit().await?;
         self.record_environment_version(&environment, "created")
             .await?;
         Ok(environment)
@@ -472,41 +479,32 @@ impl Db {
             .await
     }
 
-    pub async fn seed_environment_from(
+    async fn seed_environment_from_tx(
         &self,
-        project: &str,
-        target_environment_slug: &str,
-        source_environment_slug: &str,
+        tx: &mut Transaction<'_, Postgres>,
+        project: &ProjectRecord,
+        target: &EnvironmentRecord,
+        source: &EnvironmentRecord,
         seed_type: &str,
     ) -> AppResult<()> {
-        let project = self.get_project_by_project_id(project).await?;
-        let target = self
-            .get_environment_by_project_id(project.id, &project.project_id, target_environment_slug)
-            .await?;
-        let source = self
-            .get_environment_by_project_id(project.id, &project.project_id, source_environment_slug)
-            .await?;
-
-        let mut tx = self.pool.begin().await?;
-
         sqlx::query(
             "DELETE FROM promoted_manifest_nodes WHERE project_id = $1 AND environment_id = $2",
         )
         .bind(project.id)
         .bind(target.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         sqlx::query(
             "DELETE FROM promoted_manifest_meta WHERE project_id = $1 AND environment_id = $2",
         )
         .bind(project.id)
         .bind(target.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         sqlx::query("DELETE FROM current_node_state WHERE project_id = $1 AND environment_id = $2")
             .bind(project.id)
             .bind(target.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
 
         sqlx::query(
@@ -520,7 +518,7 @@ impl Db {
         .bind(project.id)
         .bind(target.id)
         .bind(source.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         sqlx::query(
@@ -536,7 +534,7 @@ impl Db {
         .bind(project.id)
         .bind(target.id)
         .bind(source.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         sqlx::query(
@@ -559,7 +557,7 @@ impl Db {
         .bind(project.id)
         .bind(target.id)
         .bind(source.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         let source_run_id: Option<Uuid> = sqlx::query_scalar(
@@ -567,7 +565,7 @@ impl Db {
         )
         .bind(project.id)
         .bind(source.id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .flatten();
 
@@ -584,12 +582,9 @@ impl Db {
         .bind(source.id)
         .bind(seed_type)
         .bind(source_run_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
-        tx.commit().await?;
-        let target = self.get_environment_by_id(target.id).await?;
-        self.record_environment_version(&target, "seeded").await?;
         Ok(())
     }
 
@@ -1021,6 +1016,45 @@ impl Db {
         )
         .bind(environment_id)
         .fetch_one(&self.pool)
+        .await?;
+        Ok(environment_record_from_row(&row))
+    }
+
+    async fn get_environment_by_id_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        environment_id: i64,
+    ) -> AppResult<EnvironmentRecord> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                e.id,
+                e.project_id,
+                p.project_id AS project_ref,
+                p.project_name,
+                e.slug,
+                e.kind,
+                e.baseline_environment_id,
+                be.slug AS baseline_environment_slug,
+                e.git_branch,
+                e.git_commit_sha,
+                e.pr_number,
+                e.immutable,
+                e.status,
+                e.adapter_type,
+                e.schema_name,
+                e.threads,
+                e.profile_config,
+                e.profile_secrets,
+                e.metadata
+            FROM environments e
+            JOIN projects p ON p.id = e.project_id
+            LEFT JOIN environments be ON be.id = e.baseline_environment_id
+            WHERE e.id = $1
+            "#,
+        )
+        .bind(environment_id)
+        .fetch_one(&mut **tx)
         .await?;
         Ok(environment_record_from_row(&row))
     }

@@ -175,17 +175,6 @@ pub enum EnvironmentCommand {
         #[arg(long)]
         slug: String,
     },
-    #[command(about = "Seed one environment's active state from another")]
-    SeedFrom {
-        #[arg(long)]
-        project: String,
-        #[arg(long)]
-        target: String,
-        #[arg(long)]
-        source: String,
-        #[arg(long, default_value = "clone")]
-        seed_type: String,
-    },
 }
 
 #[cfg(test)]
@@ -328,35 +317,6 @@ mod tests {
                 assert_eq!(default_branch.as_deref(), Some("main"));
             }
             _ => panic!("expected project update command"),
-        }
-    }
-
-    #[test]
-    fn environment_seed_from_parses() {
-        let cli = Cli::parse_from([
-            "dbtx",
-            "environment",
-            "seed-from",
-            "--project",
-            "jaffle",
-            "--target",
-            "pr-123",
-            "--source",
-            "staging",
-        ]);
-        match cli.command {
-            Command::Environment(EnvironmentCommand::SeedFrom {
-                project,
-                target,
-                source,
-                seed_type,
-            }) => {
-                assert_eq!(project, "jaffle");
-                assert_eq!(target, "pr-123");
-                assert_eq!(source, "staging");
-                assert_eq!(seed_type, "clone");
-            }
-            _ => panic!("expected environment seed-from command"),
         }
     }
 

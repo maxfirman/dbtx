@@ -383,20 +383,6 @@ async fn handle_environment_command(
             let environment = db.get_environment(&project, &slug).await?;
             print_environment(&environment);
         }
-        EnvironmentCommand::SeedFrom {
-            project,
-            target,
-            source,
-            seed_type,
-        } => {
-            let project = resolve_project_identifier(Some(project), &current_dir)?;
-            db.seed_environment_from(&project, &target, &source, &seed_type)
-                .await?;
-            println!(
-                "Seeded environment '{}' from '{}' in project '{}' via '{}'.",
-                target, source, project, seed_type
-            );
-        }
     }
     Ok(())
 }
