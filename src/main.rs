@@ -1,4 +1,6 @@
+mod api;
 mod cli;
+mod client;
 mod config;
 mod db;
 mod error;
@@ -9,7 +11,7 @@ mod services;
 
 use clap::Parser;
 use cli::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
-use config::RuntimeConfig;
+use config::{RuntimeConfig, resolve_database_url, resolve_service_url};
 use db::{Db, EnvironmentRecord, ProjectRecord};
 use error::AppResult;
 use services::{
@@ -20,6 +22,7 @@ use services::{
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::process::Command as StdCommand;
+use std::path::Path;
 
 #[tokio::main]
 async fn main() {
@@ -36,30 +39,66 @@ async fn run() -> AppResult<()> {
         Command::State(state_command) => match state_command {
             StateCommand::Migrate => {
                 let current_dir = std::env::current_dir()?;
-                let config = RuntimeConfig::resolve(cli.database_url, Some(&current_dir))?;
-                let db = connect_db(&config).await?;
-                let applied = db.migrate().await?;
-                print_migration_summary(&applied);
+                if let Some(service_url) =
+                    resolve_service_url(cli.service_url, Some(&current_dir))?
+                {
+                    let client = client::DaemonClient::new(service_url);
+                    let response = client.migrate().await?;
+                    print_migration_summary(&response.applied);
+                } else {
+                    let config =
+                        RuntimeConfig::resolve(cli.database_url, None, Some(&current_dir))?;
+                    let db = connect_db(&config).await?;
+                    let applied = db.migrate().await?;
+                    print_migration_summary(&applied);
+                }
             }
         },
         Command::Project(project_command) => {
-            handle_project_command(project_command, cli.database_url).await?
+            handle_project_command(project_command, cli.database_url, cli.service_url).await?
         }
         Command::Environment(environment_command) => {
-            handle_environment_command(environment_command, cli.database_url).await?
+            handle_environment_command(environment_command, cli.database_url, cli.service_url)
+                .await?
         }
         Command::Build { args } => {
-            handle_persisting_command(InvocationCommand::Build, args, cli.database_url).await?
+            handle_persisting_command(
+                InvocationCommand::Build,
+                args,
+                cli.database_url,
+                cli.service_url,
+            )
+            .await?
         }
         Command::Run { args } => {
-            handle_persisting_command(InvocationCommand::Run, args, cli.database_url).await?
+            handle_persisting_command(
+                InvocationCommand::Run,
+                args,
+                cli.database_url,
+                cli.service_url,
+            )
+            .await?
         }
-        Command::Ls { args } => handle_passthrough_command(args, cli.database_url).await?,
+        Command::Ls { args } => {
+            handle_passthrough_command(args, cli.database_url, cli.service_url).await?
+        }
         Command::Test { args } => {
-            handle_persisting_command(InvocationCommand::Test, args, cli.database_url).await?
+            handle_persisting_command(
+                InvocationCommand::Test,
+                args,
+                cli.database_url,
+                cli.service_url,
+            )
+            .await?
         }
         Command::Seed { args } => {
-            handle_persisting_command(InvocationCommand::Seed, args, cli.database_url).await?
+            handle_persisting_command(
+                InvocationCommand::Seed,
+                args,
+                cli.database_url,
+                cli.service_url,
+            )
+            .await?
         }
     }
 
@@ -162,52 +201,64 @@ async fn handle_persisting_command(
     command: InvocationCommand,
     args: Vec<OsString>,
     database_url_override: Option<String>,
+    service_url_override: Option<String>,
 ) -> AppResult<()> {
     if is_help_request(&args) {
         exit_with_dbt_help(command.as_str())?;
     }
     let ctx = config::InvocationContext::from_args(&args, false)?;
     let project_dir = ctx.project_dir;
-    let config = RuntimeConfig::resolve(database_url_override, Some(&project_dir))?;
-    let db = connect_db(&config).await?;
-    let service = InvocationService::new(&db);
-    let mut observer = TerminalInvocationObserver;
-    service
-        .invoke(
-            InvocationRequest {
-                command,
-                args,
-                config,
-            },
-            &mut observer,
-        )
-        .await?;
+    if let Some(service_url) = resolve_service_url(service_url_override, Some(&project_dir))? {
+        invoke_via_daemon(service_url, command, args, &project_dir).await?;
+    } else {
+        let config = RuntimeConfig::resolve(database_url_override, None, Some(&project_dir))?;
+        let db = connect_db(&config).await?;
+        let service = InvocationService::new(&db);
+        let mut observer = TerminalInvocationObserver;
+        service
+            .invoke(
+                InvocationRequest {
+                    command,
+                    args,
+                    config,
+                    current_dir: Some(project_dir),
+                },
+                &mut observer,
+            )
+            .await?;
+    }
     Ok(())
 }
 
 async fn handle_passthrough_command(
     args: Vec<OsString>,
     database_url_override: Option<String>,
+    service_url_override: Option<String>,
 ) -> AppResult<()> {
     if is_help_request(&args) {
         exit_with_dbt_help(InvocationCommand::Ls.as_str())?;
     }
     let ctx = config::InvocationContext::from_args(&args, false)?;
     let project_dir = ctx.project_dir;
-    let config = RuntimeConfig::resolve(database_url_override, Some(&project_dir))?;
-    let db = connect_db(&config).await?;
-    let service = InvocationService::new(&db);
-    let mut observer = TerminalInvocationObserver;
-    service
-        .invoke(
-            InvocationRequest {
-                command: InvocationCommand::Ls,
-                args,
-                config,
-            },
-            &mut observer,
-        )
-        .await?;
+    if let Some(service_url) = resolve_service_url(service_url_override, Some(&project_dir))? {
+        invoke_via_daemon(service_url, InvocationCommand::Ls, args, &project_dir).await?;
+    } else {
+        let config = RuntimeConfig::resolve(database_url_override, None, Some(&project_dir))?;
+        let db = connect_db(&config).await?;
+        let service = InvocationService::new(&db);
+        let mut observer = TerminalInvocationObserver;
+        service
+            .invoke(
+                InvocationRequest {
+                    command: InvocationCommand::Ls,
+                    args,
+                    config,
+                    current_dir: Some(project_dir),
+                },
+                &mut observer,
+            )
+            .await?;
+    }
     Ok(())
 }
 
@@ -218,9 +269,74 @@ async fn connect_db(config: &RuntimeConfig) -> AppResult<Db> {
 async fn handle_project_command(
     command: ProjectCommand,
     database_url_override: Option<String>,
+    service_url_override: Option<String>,
 ) -> AppResult<()> {
     let current_dir = std::env::current_dir()?;
-    let config = RuntimeConfig::resolve(database_url_override, Some(&current_dir))?;
+    if let Some(service_url) = resolve_service_url(service_url_override, Some(&current_dir))? {
+        let client = client::DaemonClient::new(service_url);
+        match command {
+            ProjectCommand::Init {
+                git_repo_url,
+                project_root,
+                default_branch,
+                force,
+            } => {
+                let database_url = resolve_database_url(database_url_override, Some(&current_dir))?;
+                let project = client
+                    .project_init(api::ProjectInitApiRequest {
+                        current_dir: current_dir.display().to_string(),
+                        git_repo_url,
+                        project_root,
+                        default_branch,
+                        force,
+                        database_url,
+                    })
+                    .await?
+                    .project;
+                print_project(&project);
+            }
+            ProjectCommand::Update {
+                git_repo_url,
+                project_root,
+                default_branch,
+            } => {
+                let project_id = config::read_dbtx_project_id(&current_dir)?
+                    .ok_or(error::AppError::ProjectIdMissing)?;
+                let project = client
+                    .project_update(
+                        &project_id,
+                        api::ProjectUpdateApiRequest {
+                            current_dir: current_dir.display().to_string(),
+                            git_repo_url,
+                            project_root,
+                            default_branch,
+                        },
+                    )
+                    .await?
+                    .project;
+                print_project(&project);
+            }
+            ProjectCommand::List => {
+                for project in client.project_list().await?.projects {
+                    print_project(&project);
+                }
+            }
+            ProjectCommand::Show { project } => {
+                let project = if let Some(project_id) = project.clone() {
+                    client.project_show_by_id(&project_id).await?.project
+                } else {
+                    client
+                        .project_show_with_context(&current_dir, project)
+                        .await?
+                        .project
+                };
+                print_project(&project);
+            }
+        }
+        return Ok(());
+    }
+
+    let config = RuntimeConfig::resolve(database_url_override, None, Some(&current_dir))?;
     let db = connect_db(&config).await?;
     let service = ProjectService::new(&db);
     match command {
@@ -273,9 +389,95 @@ async fn handle_project_command(
 async fn handle_environment_command(
     command: EnvironmentCommand,
     database_url_override: Option<String>,
+    service_url_override: Option<String>,
 ) -> AppResult<()> {
     let current_dir = std::env::current_dir()?;
-    let config = RuntimeConfig::resolve(database_url_override, Some(&current_dir))?;
+    if let Some(service_url) = resolve_service_url(service_url_override, Some(&current_dir))? {
+        let client = client::DaemonClient::new(service_url);
+        match command {
+            EnvironmentCommand::Create {
+                project,
+                slug,
+                target,
+                kind,
+                baseline,
+                git_branch,
+                git_commit_sha,
+                pr_number,
+                immutable,
+                status,
+                schema_name,
+            } => {
+                let environment = client
+                    .environment_create(api::EnvironmentCreateApiRequest {
+                        current_dir: current_dir.display().to_string(),
+                        project,
+                        slug,
+                        target,
+                        kind,
+                        baseline,
+                        git_branch,
+                        git_commit_sha,
+                        pr_number,
+                        immutable,
+                        status,
+                        schema_name,
+                    })
+                    .await?
+                    .environment;
+                print_environment(&environment);
+            }
+            EnvironmentCommand::Update {
+                project,
+                slug,
+                kind,
+                baseline,
+                git_branch,
+                git_commit_sha,
+                pr_number,
+                immutable,
+                status,
+                adapter_type,
+                schema_name,
+                threads,
+            } => {
+                let environment = client
+                    .environment_update(
+                        &project,
+                        &slug,
+                        api::EnvironmentUpdateApiRequest {
+                            current_dir: current_dir.display().to_string(),
+                            project: project.clone(),
+                            slug: slug.clone(),
+                            kind,
+                            baseline,
+                            git_branch,
+                            git_commit_sha,
+                            pr_number,
+                            immutable,
+                            status,
+                            adapter_type,
+                            schema_name,
+                            threads,
+                        },
+                    )
+                    .await?
+                    .environment;
+                print_environment(&environment);
+            }
+            EnvironmentCommand::List { project } => {
+                for environment in client.environment_list(&project).await?.environments {
+                    print_environment(&environment);
+                }
+            }
+            EnvironmentCommand::Show { project, slug } => {
+                let environment = client.environment_show_by_id(&project, &slug).await?.environment;
+                print_environment(&environment);
+            }
+        }
+        return Ok(());
+    }
+    let config = RuntimeConfig::resolve(database_url_override, None, Some(&current_dir))?;
     let db = connect_db(&config).await?;
     let service = EnvironmentService::new(&db);
     match command {
@@ -354,6 +556,50 @@ async fn handle_environment_command(
         }
     }
     Ok(())
+}
+
+async fn invoke_via_daemon(
+    service_url: String,
+    command: InvocationCommand,
+    args: Vec<OsString>,
+    project_dir: &Path,
+) -> AppResult<()> {
+    let client = client::DaemonClient::new(service_url);
+    let response = client
+        .invocation_create(api::InvocationCreateApiRequest {
+            command: match command {
+                InvocationCommand::Build => api::InvocationCommandApi::Build,
+                InvocationCommand::Run => api::InvocationCommandApi::Run,
+                InvocationCommand::Ls => api::InvocationCommandApi::Ls,
+                InvocationCommand::Test => api::InvocationCommandApi::Test,
+                InvocationCommand::Seed => api::InvocationCommandApi::Seed,
+            },
+            args: args
+                .into_iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect(),
+            current_dir: project_dir.display().to_string(),
+        })
+        .await?;
+    client
+        .stream_invocation_events(response.invocation_id, |event| match event.stream.as_deref() {
+            Some("stderr") => {
+                if let Some(text) = event.text.as_deref() {
+                    eprintln!("{text}");
+                }
+            }
+            _ => {
+                if let Some(text) = event.text.as_deref() {
+                    println!("{text}");
+                }
+            }
+        })
+        .await?;
+    let status = client.invocation_status(response.invocation_id).await?;
+    match status.exit_code.unwrap_or(1) {
+        0 => Ok(()),
+        code => Err(error::AppError::DbtFailed(code)),
+    }
 }
 
 fn print_project(project: &ProjectRecord) {

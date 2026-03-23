@@ -6,6 +6,7 @@ use crate::profile::{
     EnvironmentProfileRecord, GeneratedProfiles, resolve_runtime_profile,
     validate_environment_profile,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
@@ -19,17 +20,18 @@ use uuid::Uuid;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppliedMigration {
     pub version: i64,
     pub description: String,
 }
 
+#[derive(Clone)]
 pub struct Db {
     pool: PgPool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRecord {
     pub id: i64,
     pub project_id: String,
@@ -40,7 +42,7 @@ pub struct ProjectRecord {
     pub metadata: Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentRecord {
     pub id: i64,
     pub project_id: i64,

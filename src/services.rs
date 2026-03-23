@@ -20,6 +20,7 @@ use uuid::Uuid;
 pub trait InvocationObserver {
     fn stdout_line(&mut self, line: &str);
     fn stderr_line(&mut self, line: &str);
+    fn dbt_log(&mut self, _event: &LogEvent, _rendered: Option<&str>) {}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,6 +53,7 @@ pub struct InvocationRequest {
     pub command: InvocationCommand,
     pub args: Vec<OsString>,
     pub config: RuntimeConfig,
+    pub current_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -305,7 +307,12 @@ impl<'a> InvocationService<'a> {
     ) -> AppResult<InvocationResult> {
         self.db.require_current_schema().await?;
         let inject_json_logging = request.command.persists_state();
-        let ctx = InvocationContext::from_args(&request.args, inject_json_logging)?;
+        let current_dir = request
+            .current_dir
+            .clone()
+            .unwrap_or(std::env::current_dir()?);
+        let ctx =
+            InvocationContext::from_args_in_dir(&request.args, inject_json_logging, &current_dir)?;
         let project = self.db.resolve_local_project(&ctx.project_dir).await?;
         let git_state = read_git_state(&ctx.project_dir);
         let environment = self
@@ -433,7 +440,9 @@ impl<'a> InvocationService<'a> {
         while let Some(line) = reader.next_line().await? {
             sequence_no += 1;
             if let Some(event) = LogEvent::parse(&line) {
-                if let Some(rendered) = event.render_text_line() {
+                let rendered = event.render_text_line();
+                observer.dbt_log(&event, rendered.as_deref());
+                if let Some(rendered) = rendered {
                     observer.stdout_line(&rendered);
                 }
                 if dbt_version.is_none() && event.info.name == "MainReportVersion" {

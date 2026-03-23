@@ -26,6 +26,8 @@ pub struct DbtxToml {
     pub project: ProjectConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub service: ServiceConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -38,21 +40,20 @@ pub struct DatabaseConfig {
     pub url: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    pub url: Option<String>,
+}
+
 impl RuntimeConfig {
     pub fn resolve(
         database_url_override: Option<String>,
+        service_url_override: Option<String>,
         project_dir: Option<&Path>,
     ) -> AppResult<Self> {
-        let file_database_url = project_dir
-            .map(read_dbtx_toml)
-            .transpose()?
-            .flatten()
-            .and_then(|config| config.database.url);
-        let database_url = database_url_override
-            .or_else(|| env::var("DBTX_DATABASE_URL").ok())
-            .or(file_database_url)
-            .ok_or(AppError::MissingDatabaseUrl)?;
+        let database_url = resolve_database_url(database_url_override, project_dir)?;
         let dbt_path = env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
+        let _service_url = resolve_service_url(service_url_override, project_dir)?;
         Ok(Self {
             database_url,
             dbt_path,
@@ -61,7 +62,17 @@ impl RuntimeConfig {
 }
 
 impl InvocationContext {
+    #[allow(dead_code)]
     pub fn from_args(args: &[OsString], inject_json_logging: bool) -> AppResult<Self> {
+        let current_dir = env::current_dir().map_err(AppError::Io)?;
+        Self::from_args_in_dir(args, inject_json_logging, &current_dir)
+    }
+
+    pub fn from_args_in_dir(
+        args: &[OsString],
+        inject_json_logging: bool,
+        current_dir: &Path,
+    ) -> AppResult<Self> {
         if has_option(args, "--state") {
             return Err(AppError::UserStateNotAllowed);
         }
@@ -72,12 +83,11 @@ impl InvocationContext {
             return Err(AppError::UserProfilesDirNotAllowed);
         }
 
-        let current_dir = env::current_dir().map_err(AppError::Io)?;
         let project_dir = parse_path_option(args, "--project-dir")
-            .map(|path| absolutize(&current_dir, &path))
-            .unwrap_or(current_dir.clone());
+            .map(|path| absolutize(current_dir, &path))
+            .unwrap_or_else(|| current_dir.to_path_buf());
         let target_path = parse_path_option(args, "--target-path")
-            .map(|path| absolutize(&current_dir, &path))
+            .map(|path| absolutize(current_dir, &path))
             .unwrap_or_else(|| project_dir.join("target"));
 
         let environment_slug =
@@ -120,6 +130,35 @@ pub fn read_dbtx_project_id(project_root: &Path) -> AppResult<Option<String>> {
     Ok(read_dbtx_toml(project_root)?
         .and_then(|config| config.project.id)
         .filter(|value| !value.is_empty()))
+}
+
+pub fn resolve_database_url(
+    database_url_override: Option<String>,
+    project_dir: Option<&Path>,
+) -> AppResult<String> {
+    let file_database_url = project_dir
+        .map(read_dbtx_toml)
+        .transpose()?
+        .flatten()
+        .and_then(|config| config.database.url);
+    database_url_override
+        .or_else(|| env::var("DBTX_DATABASE_URL").ok())
+        .or(file_database_url)
+        .ok_or(AppError::MissingDatabaseUrl)
+}
+
+pub fn resolve_service_url(
+    service_url_override: Option<String>,
+    project_dir: Option<&Path>,
+) -> AppResult<Option<String>> {
+    let file_service_url = project_dir
+        .map(read_dbtx_toml)
+        .transpose()?
+        .flatten()
+        .and_then(|config| config.service.url);
+    Ok(service_url_override
+        .or_else(|| env::var("DBTX_SERVICE_URL").ok())
+        .or(file_service_url))
 }
 
 pub fn write_dbtx_toml(
@@ -279,10 +318,14 @@ mod tests {
             database: super::DatabaseConfig {
                 url: Some("postgres://localhost/dbtx".to_string()),
             },
+            service: super::ServiceConfig {
+                url: Some("http://127.0.0.1:8585".to_string()),
+            },
         };
         let rendered = toml::to_string_pretty(&config).expect("render toml");
         assert!(rendered.contains("[project]"));
         assert!(rendered.contains("id = \"prj_123\""));
         assert!(rendered.contains("[database]"));
+        assert!(rendered.contains("[service]"));
     }
 }
