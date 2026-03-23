@@ -455,6 +455,98 @@ async fn dbtx_build_state_modified_clears_modified_set() {
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn seeded_environment_starts_with_empty_state_modified() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &[
+            "project",
+            "create",
+            "--slug",
+            &project.project_slug(),
+            "--git-repo-url",
+            "https://example.com/repo.git",
+            "--project-root",
+            ".",
+        ],
+    ));
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &[
+            "environment",
+            "create",
+            "--project",
+            &project.project_slug(),
+            "--slug",
+            "staging",
+        ],
+    ));
+
+    assert_success(&run_dbtx_with_environment_slug(
+        db.url(),
+        &project,
+        "staging",
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+        ],
+    ));
+
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &[
+            "environment",
+            "create",
+            "--project",
+            &project.project_slug(),
+            "--slug",
+            "pr-123",
+            "--kind",
+            "ephemeral",
+            "--baseline",
+            "staging",
+            "--pr-number",
+            "123",
+        ],
+    ));
+    assert_success(&run_dbtx(
+        db.url(),
+        &project,
+        &[
+            "environment",
+            "seed-from",
+            "--project",
+            &project.project_slug(),
+            "--target",
+            "pr-123",
+            "--source",
+            "staging",
+        ],
+    ));
+
+    let modified = modified_unique_ids_for_env(db.url(), &project, "pr-123");
+    assert!(
+        modified.is_empty(),
+        "expected seeded environment to start with empty state:modified, got: {modified:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
 async fn dbtx_replay_rebuilds_real_current_state() {
     let _guard = integration_lock()
         .lock()
@@ -740,7 +832,7 @@ fn init_dbtx_schema(database_url: &str) {
 
 async fn reset_db(pool: &PgPool) {
     sqlx::query(
-        "TRUNCATE promoted_manifest_nodes, promoted_manifest_meta, current_node_state, manifest_edges, manifest_nodes, manifest_snapshots, node_executions, run_events, runs, environments, projects CASCADE",
+        "TRUNCATE environment_seeds, promoted_manifest_nodes, promoted_manifest_meta, current_node_state, manifest_edges, manifest_nodes, manifest_snapshots, node_executions, run_events, runs, environments, projects CASCADE",
     )
     .execute(pool)
     .await
@@ -748,13 +840,43 @@ async fn reset_db(pool: &PgPool) {
 }
 
 fn run_dbtx(database_url: &str, project: &RealProject, args: &[&str]) -> Output {
+    run_dbtx_with_environment_slug(
+        database_url,
+        project,
+        environment_slug_from_args(args).unwrap_or(ENVIRONMENT_SLUG),
+        args,
+    )
+}
+
+fn run_dbtx_with_environment_slug(
+    database_url: &str,
+    project: &RealProject,
+    environment_slug: &str,
+    args: &[&str],
+) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx"));
     command.args(args);
     command.env("DBTX_DATABASE_URL", database_url);
     command.env("DBTX_PROJECT_SLUG", project.project_slug());
-    command.env("DBTX_ENVIRONMENT_SLUG", ENVIRONMENT_SLUG);
+    command.env("DBTX_ENVIRONMENT_SLUG", environment_slug);
     command.current_dir(project.path());
     command.output().expect("run dbtx")
+}
+
+fn environment_slug_from_args<'a>(args: &'a [&'a str]) -> Option<&'a str> {
+    let mut idx = 0;
+    while idx < args.len() {
+        if args[idx] == "--target" {
+            return args.get(idx + 1).copied();
+        }
+        if let Some((flag, value)) = args[idx].split_once('=')
+            && flag == "--target"
+        {
+            return Some(value);
+        }
+        idx += 1;
+    }
+    None
 }
 
 fn assert_success(output: &Output) {
@@ -780,9 +902,18 @@ fn assert_failure(output: &Output) {
 }
 
 fn modified_unique_ids(database_url: &str, project: &RealProject) -> std::collections::BTreeSet<String> {
-    let output = run_dbtx(
+    modified_unique_ids_for_env(database_url, project, ENVIRONMENT_SLUG)
+}
+
+fn modified_unique_ids_for_env(
+    database_url: &str,
+    project: &RealProject,
+    environment_slug: &str,
+) -> std::collections::BTreeSet<String> {
+    let output = run_dbtx_with_environment_slug(
         database_url,
         project,
+        environment_slug,
         &[
             "ls",
             "--project-dir",

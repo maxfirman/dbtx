@@ -6,11 +6,12 @@ mod event;
 mod manifest;
 
 use clap::Parser;
-use cli::{Cli, Command, StateCommand};
+use cli::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
 use config::RuntimeConfig;
-use db::Db;
-use error::AppResult;
+use db::{CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, ProjectRecord};
+use error::{AppError, AppResult};
 use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 
 #[tokio::main]
@@ -33,6 +34,10 @@ async fn run() -> AppResult<()> {
                 println!("Initialized dbtx database schema.");
             }
         },
+        Command::Project(project_command) => handle_project_command(project_command).await?,
+        Command::Environment(environment_command) => {
+            handle_environment_command(environment_command).await?
+        }
         Command::Build { args } => handle_persisting_command("build", args).await?,
         Command::Run { args } => handle_persisting_command("run", args).await?,
         Command::Ls { args } => handle_passthrough_command("ls", args).await?,
@@ -88,4 +93,282 @@ async fn connect_initialized_db(config: &RuntimeConfig) -> AppResult<Db> {
     let db = connect_db(config).await?;
     db.init().await?;
     Ok(db)
+}
+
+async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
+    let config = RuntimeConfig::from_env()?;
+    let db = connect_initialized_db(&config).await?;
+    match command {
+        ProjectCommand::Create {
+            slug,
+            git_repo_url,
+            project_root,
+            default_branch,
+        } => {
+            let inferred = infer_project_create_defaults(
+                slug.as_deref(),
+                git_repo_url.as_deref(),
+                project_root.as_deref(),
+                default_branch.as_deref(),
+            )?;
+            let project = db
+                .create_project(CreateProjectInput {
+                    slug: inferred.slug,
+                    git_repo_url: inferred.git_repo_url,
+                    default_branch: inferred.default_branch,
+                    project_root: inferred.project_root,
+                })
+                .await?;
+            print_project(&project);
+        }
+        ProjectCommand::List => {
+            for project in db.list_projects().await? {
+                print_project(&project);
+            }
+        }
+        ProjectCommand::Show { slug } => {
+            let project = db.get_project(&slug).await?;
+            print_project(&project);
+        }
+    }
+    Ok(())
+}
+
+async fn handle_environment_command(command: EnvironmentCommand) -> AppResult<()> {
+    let config = RuntimeConfig::from_env()?;
+    let db = connect_initialized_db(&config).await?;
+    match command {
+        EnvironmentCommand::Create {
+            project,
+            slug,
+            kind,
+            baseline,
+            git_ref,
+            pr_number,
+            protected,
+            status,
+            schema_prefix,
+        } => {
+            let environment = db
+                .create_environment(CreateEnvironmentInput {
+                    project_slug: project,
+                    slug,
+                    kind,
+                    baseline_slug: baseline,
+                    git_ref,
+                    pr_number,
+                    protected,
+                    status,
+                    schema_prefix,
+                })
+                .await?;
+            print_environment(&environment);
+        }
+        EnvironmentCommand::List { project } => {
+            for environment in db.list_environments(&project).await? {
+                print_environment(&environment);
+            }
+        }
+        EnvironmentCommand::Show { project, slug } => {
+            let environment = db.get_environment(&project, &slug).await?;
+            print_environment(&environment);
+        }
+        EnvironmentCommand::SeedFrom {
+            project,
+            target,
+            source,
+            seed_type,
+        } => {
+            db.seed_environment_from(&project, &target, &source, &seed_type)
+                .await?;
+            println!(
+                "Seeded environment '{}' from '{}' in project '{}' via '{}'.",
+                target, source, project, seed_type
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_project(project: &ProjectRecord) {
+    println!(
+        "project id={} slug={} git_repo_url={} default_branch={} project_root={} metadata={}",
+        project.id,
+        project.slug,
+        project.git_repo_url.as_deref().unwrap_or(""),
+        project.default_branch.as_deref().unwrap_or(""),
+        project.project_root.as_deref().unwrap_or(""),
+        project.metadata,
+    );
+}
+
+fn print_environment(environment: &EnvironmentRecord) {
+    println!(
+        "environment id={} project_id={} project={} slug={} kind={} baseline_id={} baseline={} git_ref={} pr_number={} protected={} status={} schema_prefix={} metadata={}",
+        environment.id,
+        environment.project_id,
+        environment.project_slug,
+        environment.slug,
+        environment.kind,
+        environment
+            .baseline_environment_id
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        environment.baseline_environment_slug.as_deref().unwrap_or(""),
+        environment.git_ref.as_deref().unwrap_or(""),
+        environment
+            .pr_number
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        environment.protected,
+        environment.status,
+        environment.schema_prefix.as_deref().unwrap_or(""),
+        environment.metadata,
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InferredProjectCreateInput {
+    slug: String,
+    git_repo_url: String,
+    default_branch: Option<String>,
+    project_root: String,
+}
+
+fn infer_project_create_defaults(
+    slug: Option<&str>,
+    git_repo_url: Option<&str>,
+    project_root: Option<&str>,
+    default_branch: Option<&str>,
+) -> AppResult<InferredProjectCreateInput> {
+    let current_dir = std::env::current_dir()?;
+    let project_name = read_dbt_project_name_from_root(&current_dir)?;
+    let repo_root = git_repo_root(&current_dir)?;
+
+    Ok(InferredProjectCreateInput {
+        slug: slug
+            .map(ToString::to_string)
+            .unwrap_or_else(|| project_name.replace(' ', "-")),
+        git_repo_url: git_repo_url
+            .map(ToString::to_string)
+            .or_else(|| git_remote_origin_url(&repo_root).ok())
+            .ok_or(AppError::GitRemoteNotFound)?,
+        default_branch: default_branch.map(ToString::to_string),
+        project_root: project_root
+            .map(ToString::to_string)
+            .unwrap_or(relative_project_root(&repo_root, &current_dir)),
+    })
+}
+
+fn read_dbt_project_name_from_root(project_root: &Path) -> AppResult<String> {
+    let path = project_root.join("dbt_project.yml");
+    if !path.is_file() {
+        return Err(AppError::NotDbtProjectRoot);
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("name:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Ok(value.to_string());
+            }
+        }
+    }
+
+    project_root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or(AppError::NotDbtProjectRoot)
+}
+
+fn git_repo_root(current_dir: &Path) -> AppResult<PathBuf> {
+    let output = run_git(["rev-parse", "--show-toplevel"], current_dir)?;
+    Ok(PathBuf::from(output))
+}
+
+fn git_remote_origin_url(repo_root: &Path) -> AppResult<String> {
+    run_git(["config", "--get", "remote.origin.url"], repo_root)
+        .map_err(|_| AppError::GitRemoteNotFound)
+}
+
+fn relative_project_root(repo_root: &Path, project_root: &Path) -> String {
+    match project_root.strip_prefix(repo_root) {
+        Ok(path) if path.as_os_str().is_empty() => ".".to_string(),
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(_) => project_root.to_string_lossy().into_owned(),
+    }
+}
+
+fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
+    let output = StdCommand::new("git").args(args).current_dir(cwd).output()?;
+    if !output.status.success() {
+        return Err(AppError::GitRepoNotFound);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Err(AppError::GitRepoNotFound);
+    }
+    Ok(stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        infer_project_create_defaults, read_dbt_project_name_from_root, relative_project_root,
+    };
+    use crate::error::AppError;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    #[test]
+    fn infers_project_create_defaults_from_current_repo_and_dbt_project() {
+        let temp = TempDir::new().expect("temp dir");
+        let repo_root = temp.path();
+        let project_root = repo_root.join("analytics");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("dbt_project.yml"), "name: jaffle_shop_project\n")
+            .expect("dbt project");
+
+        run_git_cmd(["init"], repo_root);
+        run_git_cmd(["remote", "add", "origin", "git@github.com:example/repo.git"], repo_root);
+
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&project_root).expect("set cwd");
+        let inferred = infer_project_create_defaults(None, None, None, None).expect("inferred");
+        std::env::set_current_dir(original_dir).expect("restore cwd");
+
+        assert_eq!(inferred.slug, "jaffle_shop_project");
+        assert_eq!(inferred.git_repo_url, "git@github.com:example/repo.git");
+        assert_eq!(inferred.project_root, "analytics");
+        assert_eq!(inferred.default_branch, None);
+    }
+
+    #[test]
+    fn rejects_non_dbt_project_root() {
+        let temp = TempDir::new().expect("temp dir");
+        let err = read_dbt_project_name_from_root(temp.path()).expect_err("should fail");
+        assert!(matches!(err, AppError::NotDbtProjectRoot));
+    }
+
+    #[test]
+    fn relative_project_root_uses_dot_for_repo_root() {
+        let temp = TempDir::new().expect("temp dir");
+        assert_eq!(relative_project_root(temp.path(), temp.path()), ".");
+    }
+
+    fn run_git_cmd<const N: usize>(args: [&str; N], cwd: &std::path::Path) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }

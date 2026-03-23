@@ -14,6 +14,10 @@ pub struct Cli {
 pub enum Command {
     #[command(subcommand)]
     State(StateCommand),
+    #[command(subcommand)]
+    Project(ProjectCommand),
+    #[command(subcommand)]
+    Environment(EnvironmentCommand),
     #[command(
         about = "Build dbt resources and persist execution state",
         trailing_var_arg = true,
@@ -75,9 +79,79 @@ pub enum StateCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum ProjectCommand {
+    #[command(about = "Create or update a registered dbtx project")]
+    Create {
+        #[arg(long)]
+        slug: Option<String>,
+        #[arg(long)]
+        git_repo_url: Option<String>,
+        #[arg(long)]
+        project_root: Option<String>,
+        #[arg(long)]
+        default_branch: Option<String>,
+    },
+    #[command(about = "List registered dbtx projects")]
+    List,
+    #[command(about = "Show one registered dbtx project")]
+    Show {
+        #[arg(long)]
+        slug: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EnvironmentCommand {
+    #[command(about = "Create or update a registered dbtx environment")]
+    Create {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        slug: String,
+        #[arg(long, default_value = "persistent")]
+        kind: String,
+        #[arg(long)]
+        baseline: Option<String>,
+        #[arg(long)]
+        git_ref: Option<String>,
+        #[arg(long)]
+        pr_number: Option<i32>,
+        #[arg(long)]
+        protected: bool,
+        #[arg(long, default_value = "active")]
+        status: String,
+        #[arg(long)]
+        schema_prefix: Option<String>,
+    },
+    #[command(about = "List registered dbtx environments for a project")]
+    List {
+        #[arg(long)]
+        project: String,
+    },
+    #[command(about = "Show one registered dbtx environment")]
+    Show {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        slug: String,
+    },
+    #[command(about = "Seed one environment's active state from another")]
+    SeedFrom {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long, default_value = "clone")]
+        seed_type: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, StateCommand};
+    use super::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
     use clap::Parser;
 
     #[test]
@@ -163,6 +237,64 @@ mod tests {
                 assert_eq!(args, vec!["--full-refresh"]);
             }
             _ => panic!("expected seed command"),
+        }
+    }
+
+    #[test]
+    fn project_create_parses() {
+        let cli = Cli::parse_from([
+            "dbtx",
+            "project",
+            "create",
+            "--slug",
+            "jaffle",
+            "--git-repo-url",
+            "https://github.com/example/repo.git",
+            "--project-root",
+            "analytics",
+        ]);
+        match cli.command {
+            Command::Project(ProjectCommand::Create {
+                slug,
+                git_repo_url,
+                project_root,
+                default_branch,
+            }) => {
+                assert_eq!(slug.as_deref(), Some("jaffle"));
+                assert_eq!(git_repo_url.as_deref(), Some("https://github.com/example/repo.git"));
+                assert_eq!(project_root.as_deref(), Some("analytics"));
+                assert_eq!(default_branch.as_deref(), None);
+            }
+            _ => panic!("expected project create command"),
+        }
+    }
+
+    #[test]
+    fn environment_seed_from_parses() {
+        let cli = Cli::parse_from([
+            "dbtx",
+            "environment",
+            "seed-from",
+            "--project",
+            "jaffle",
+            "--target",
+            "pr-123",
+            "--source",
+            "staging",
+        ]);
+        match cli.command {
+            Command::Environment(EnvironmentCommand::SeedFrom {
+                project,
+                target,
+                source,
+                seed_type,
+            }) => {
+                assert_eq!(project, "jaffle");
+                assert_eq!(target, "pr-123");
+                assert_eq!(source, "staging");
+                assert_eq!(seed_type, "clone");
+            }
+            _ => panic!("expected environment seed-from command"),
         }
     }
 }

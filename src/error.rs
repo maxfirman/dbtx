@@ -18,6 +18,16 @@ pub enum AppError {
     MissingManifest(String),
     #[error("run {0} was not found")]
     RunNotFound(uuid::Uuid),
+    #[error("current directory is not a dbt project root: missing dbt_project.yml")]
+    NotDbtProjectRoot,
+    #[error("failed to infer git repository from current directory")]
+    GitRepoNotFound,
+    #[error("failed to infer git remote origin url from current repository")]
+    GitRemoteNotFound,
+    #[error("project '{0}' was not found")]
+    ProjectNotFound(String),
+    #[error("environment '{1}' for project '{0}' was not found")]
+    EnvironmentNotFound(String, String),
     #[error("dbtx manages --state internally; remove the user-supplied --state argument")]
     UserStateNotAllowed,
 }

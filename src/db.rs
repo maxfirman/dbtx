@@ -20,6 +20,54 @@ pub struct Db {
     pool: PgPool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectRecord {
+    pub id: i64,
+    pub slug: String,
+    pub git_repo_url: Option<String>,
+    pub default_branch: Option<String>,
+    pub project_root: Option<String>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentRecord {
+    pub id: i64,
+    pub project_id: i64,
+    pub project_slug: String,
+    pub slug: String,
+    pub kind: String,
+    pub baseline_environment_id: Option<i64>,
+    pub baseline_environment_slug: Option<String>,
+    pub git_ref: Option<String>,
+    pub pr_number: Option<i32>,
+    pub protected: bool,
+    pub status: String,
+    pub schema_prefix: Option<String>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateProjectInput {
+    pub slug: String,
+    pub git_repo_url: String,
+    pub default_branch: Option<String>,
+    pub project_root: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateEnvironmentInput {
+    pub project_slug: String,
+    pub slug: String,
+    pub kind: String,
+    pub baseline_slug: Option<String>,
+    pub git_ref: Option<String>,
+    pub pr_number: Option<i32>,
+    pub protected: bool,
+    pub status: String,
+    pub schema_prefix: Option<String>,
+}
+
 struct RunFinalization<'a> {
     run_id: Uuid,
     project_id: i64,
@@ -43,6 +91,255 @@ impl Db {
 
     pub async fn init(&self) -> AppResult<()> {
         MIGRATOR.run(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn create_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO projects (slug, git_repo_url, default_branch, project_root)
+            VALUES ($1, $2, COALESCE($3, 'main'), $4)
+            ON CONFLICT (slug) DO UPDATE SET
+                git_repo_url = EXCLUDED.git_repo_url,
+                default_branch = EXCLUDED.default_branch,
+                project_root = EXCLUDED.project_root
+            RETURNING id, slug, git_repo_url, default_branch, project_root, metadata
+            "#,
+        )
+        .bind(&input.slug)
+        .bind(&input.git_repo_url)
+        .bind(input.default_branch.as_deref())
+        .bind(&input.project_root)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(project_record_from_row(&row))
+    }
+
+    pub async fn list_projects(&self) -> AppResult<Vec<ProjectRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, slug, git_repo_url, default_branch, project_root, metadata FROM projects ORDER BY slug",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(project_record_from_row).collect())
+    }
+
+    pub async fn get_project(&self, slug: &str) -> AppResult<ProjectRecord> {
+        let row = sqlx::query(
+            "SELECT id, slug, git_repo_url, default_branch, project_root, metadata FROM projects WHERE slug = $1",
+        )
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::ProjectNotFound(slug.to_string()))?;
+        Ok(project_record_from_row(&row))
+    }
+
+    pub async fn create_environment(
+        &self,
+        input: CreateEnvironmentInput,
+    ) -> AppResult<EnvironmentRecord> {
+        let project = self.get_project(&input.project_slug).await?;
+        let baseline = match input.baseline_slug.as_deref() {
+            Some(baseline_slug) => Some(
+                self.get_environment_by_project_id(project.id, &project.slug, baseline_slug)
+                    .await?,
+            ),
+            None => None,
+        };
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO environments (
+                project_id, slug, kind, baseline_environment_id, git_ref, pr_number,
+                protected, status, schema_prefix
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (project_id, slug) DO UPDATE SET
+                kind = EXCLUDED.kind,
+                baseline_environment_id = EXCLUDED.baseline_environment_id,
+                git_ref = EXCLUDED.git_ref,
+                pr_number = EXCLUDED.pr_number,
+                protected = EXCLUDED.protected,
+                status = EXCLUDED.status,
+                schema_prefix = EXCLUDED.schema_prefix
+            RETURNING id
+            "#,
+        )
+        .bind(project.id)
+        .bind(&input.slug)
+        .bind(&input.kind)
+        .bind(baseline.as_ref().map(|env| env.id))
+        .bind(input.git_ref.as_deref())
+        .bind(input.pr_number)
+        .bind(input.protected)
+        .bind(&input.status)
+        .bind(input.schema_prefix.as_deref())
+        .fetch_one(&self.pool)
+        .await?;
+        let environment_id: i64 = row.get("id");
+        self.get_environment_by_id(environment_id).await
+    }
+
+    pub async fn list_environments(&self, project_slug: &str) -> AppResult<Vec<EnvironmentRecord>> {
+        let project = self.get_project(project_slug).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                e.id,
+                e.project_id,
+                p.slug AS project_slug,
+                e.slug,
+                e.kind,
+                e.baseline_environment_id,
+                be.slug AS baseline_environment_slug,
+                e.git_ref,
+                e.pr_number,
+                e.protected,
+                e.status,
+                e.schema_prefix,
+                e.metadata
+            FROM environments e
+            JOIN projects p ON p.id = e.project_id
+            LEFT JOIN environments be ON be.id = e.baseline_environment_id
+            WHERE e.project_id = $1
+            ORDER BY e.slug
+            "#,
+        )
+        .bind(project.id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(environment_record_from_row).collect())
+    }
+
+    pub async fn get_environment(
+        &self,
+        project_slug: &str,
+        environment_slug: &str,
+    ) -> AppResult<EnvironmentRecord> {
+        let project = self.get_project(project_slug).await?;
+        self.get_environment_by_project_id(project.id, &project.slug, environment_slug)
+            .await
+    }
+
+    pub async fn seed_environment_from(
+        &self,
+        project_slug: &str,
+        target_environment_slug: &str,
+        source_environment_slug: &str,
+        seed_type: &str,
+    ) -> AppResult<()> {
+        let project = self.get_project(project_slug).await?;
+        let target = self
+            .get_environment_by_project_id(project.id, &project.slug, target_environment_slug)
+            .await?;
+        let source = self
+            .get_environment_by_project_id(project.id, &project.slug, source_environment_slug)
+            .await?;
+
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            "DELETE FROM promoted_manifest_nodes WHERE project_id = $1 AND environment_id = $2",
+        )
+        .bind(project.id)
+        .bind(target.id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM promoted_manifest_meta WHERE project_id = $1 AND environment_id = $2",
+        )
+        .bind(project.id)
+        .bind(target.id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM current_node_state WHERE project_id = $1 AND environment_id = $2",
+        )
+        .bind(project.id)
+        .bind(target.id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO promoted_manifest_meta (project_id, environment_id, source_run_id, base_manifest, promoted_at)
+            SELECT $1, $2, source_run_id, base_manifest, NOW()
+            FROM promoted_manifest_meta
+            WHERE project_id = $1 AND environment_id = $3
+            "#,
+        )
+        .bind(project.id)
+        .bind(target.id)
+        .bind(source.id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO promoted_manifest_nodes (
+                project_id, environment_id, unique_id, source_run_id, checksum, raw_node, promoted_at
+            )
+            SELECT $1, $2, unique_id, source_run_id, checksum, raw_node, NOW()
+            FROM promoted_manifest_nodes
+            WHERE project_id = $1 AND environment_id = $3
+            "#,
+        )
+        .bind(project.id)
+        .bind(target.id)
+        .bind(source.id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO current_node_state (
+                project_id, environment_id, unique_id, last_run_id, status, resource_type,
+                node_name, node_path, materialized, relation_database, relation_schema,
+                relation_alias, relation_name, checksum, started_at, finished_at,
+                execution_time_seconds, last_success_at, updated_at
+            )
+            SELECT
+                $1, $2, unique_id, last_run_id, status, resource_type,
+                node_name, node_path, materialized, relation_database, relation_schema,
+                relation_alias, relation_name, checksum, started_at, finished_at,
+                execution_time_seconds, last_success_at, NOW()
+            FROM current_node_state
+            WHERE project_id = $1 AND environment_id = $3
+            "#,
+        )
+        .bind(project.id)
+        .bind(target.id)
+        .bind(source.id)
+        .execute(&mut *tx)
+        .await?;
+
+        let source_run_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT source_run_id FROM promoted_manifest_meta WHERE project_id = $1 AND environment_id = $2",
+        )
+        .bind(project.id)
+        .bind(source.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
+
+        sqlx::query(
+            r#"
+            INSERT INTO environment_seeds (
+                project_id, target_environment_id, source_environment_id, seed_type, source_run_id, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, '{}'::jsonb)
+            "#,
+        )
+        .bind(project.id)
+        .bind(target.id)
+        .bind(source.id)
+        .bind(seed_type)
+        .bind(source_run_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -356,6 +653,74 @@ impl Db {
         .await?;
 
         Ok((project_id, environment_id))
+    }
+
+    async fn get_environment_by_project_id(
+        &self,
+        project_id: i64,
+        project_slug: &str,
+        environment_slug: &str,
+    ) -> AppResult<EnvironmentRecord> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                e.id,
+                e.project_id,
+                p.slug AS project_slug,
+                e.slug,
+                e.kind,
+                e.baseline_environment_id,
+                be.slug AS baseline_environment_slug,
+                e.git_ref,
+                e.pr_number,
+                e.protected,
+                e.status,
+                e.schema_prefix,
+                e.metadata
+            FROM environments e
+            JOIN projects p ON p.id = e.project_id
+            LEFT JOIN environments be ON be.id = e.baseline_environment_id
+            WHERE e.project_id = $1
+              AND e.slug = $2
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_slug)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::EnvironmentNotFound(project_slug.to_string(), environment_slug.to_string())
+        })?;
+        Ok(environment_record_from_row(&row))
+    }
+
+    async fn get_environment_by_id(&self, environment_id: i64) -> AppResult<EnvironmentRecord> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                e.id,
+                e.project_id,
+                p.slug AS project_slug,
+                e.slug,
+                e.kind,
+                e.baseline_environment_id,
+                be.slug AS baseline_environment_slug,
+                e.git_ref,
+                e.pr_number,
+                e.protected,
+                e.status,
+                e.schema_prefix,
+                e.metadata
+            FROM environments e
+            JOIN projects p ON p.id = e.project_id
+            LEFT JOIN environments be ON be.id = e.baseline_environment_id
+            WHERE e.id = $1
+            "#,
+        )
+        .bind(environment_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(environment_record_from_row(&row))
     }
 
     async fn persist_log_event(
@@ -1117,6 +1482,37 @@ fn null_if_empty(value: &str) -> Option<&str> {
 
 fn should_promote_manifest(subcommand: &str) -> bool {
     matches!(subcommand, "run" | "build")
+}
+
+fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
+    let metadata: sqlx::types::Json<Value> = row.get("metadata");
+    ProjectRecord {
+        id: row.get("id"),
+        slug: row.get("slug"),
+        git_repo_url: row.get("git_repo_url"),
+        default_branch: row.get("default_branch"),
+        project_root: row.get("project_root"),
+        metadata: metadata.0,
+    }
+}
+
+fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord {
+    let metadata: sqlx::types::Json<Value> = row.get("metadata");
+    EnvironmentRecord {
+        id: row.get("id"),
+        project_id: row.get("project_id"),
+        project_slug: row.get("project_slug"),
+        slug: row.get("slug"),
+        kind: row.get("kind"),
+        baseline_environment_id: row.get("baseline_environment_id"),
+        baseline_environment_slug: row.get("baseline_environment_slug"),
+        git_ref: row.get("git_ref"),
+        pr_number: row.get("pr_number"),
+        protected: row.get("protected"),
+        status: row.get("status"),
+        schema_prefix: row.get("schema_prefix"),
+        metadata: metadata.0,
+    }
 }
 
 fn read_dbt_project_name(project_dir: &Path) -> String {

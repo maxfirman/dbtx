@@ -212,6 +212,232 @@ async fn replay_rebuilds_promoted_and_current_state_for_partial_progress() {
     assert_eq!(current[1].get::<Option<String>, _>("checksum").as_deref(), Some("old-b"));
 }
 
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn project_and_environment_cli_round_trip() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let output = run_dbtx(
+        db.url(),
+        &[
+            "project",
+            "create",
+            "--slug",
+            "proj",
+            "--git-repo-url",
+            "https://example.com/repo.git",
+            "--project-root",
+            "analytics",
+            "--default-branch",
+            "main",
+        ],
+    );
+    assert_success(&output);
+
+    let output = run_dbtx(
+        db.url(),
+        &[
+            "environment",
+            "create",
+            "--project",
+            "proj",
+            "--slug",
+            "staging",
+            "--kind",
+            "persistent",
+            "--protected",
+        ],
+    );
+    assert_success(&output);
+
+    let list_output = run_dbtx(db.url(), &["environment", "list", "--project", "proj"]);
+    assert_success(&list_output);
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(stdout.contains("slug=staging"), "unexpected stdout: {stdout}");
+
+    let project_row = sqlx::query(
+        "SELECT slug, git_repo_url, default_branch, project_root FROM projects WHERE slug = 'proj'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("project row");
+    assert_eq!(project_row.get::<String, _>("slug"), "proj");
+    assert_eq!(
+        project_row.get::<Option<String>, _>("git_repo_url").as_deref(),
+        Some("https://example.com/repo.git")
+    );
+
+    let environment_row = sqlx::query(
+        "SELECT slug, kind, protected, status FROM environments WHERE slug = 'staging'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("environment row");
+    assert_eq!(environment_row.get::<String, _>("slug"), "staging");
+    assert_eq!(environment_row.get::<String, _>("kind"), "persistent");
+    assert!(environment_row.get::<bool, _>("protected"));
+    assert_eq!(environment_row.get::<String, _>("status"), "active");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn environment_seed_from_copies_active_state_without_runs() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    assert_success(&run_dbtx(
+        db.url(),
+        &[
+            "project",
+            "create",
+            "--slug",
+            "proj",
+            "--git-repo-url",
+            "https://example.com/repo.git",
+            "--project-root",
+            "analytics",
+        ],
+    ));
+    assert_success(&run_dbtx(
+        db.url(),
+        &[
+            "environment",
+            "create",
+            "--project",
+            "proj",
+            "--slug",
+            "source",
+        ],
+    ));
+    assert_success(&run_dbtx(
+        db.url(),
+        &[
+            "environment",
+            "create",
+            "--project",
+            "proj",
+            "--slug",
+            "target",
+            "--kind",
+            "ephemeral",
+            "--baseline",
+            "source",
+            "--git-ref",
+            "refs/pull/123/head",
+            "--pr-number",
+            "123",
+        ],
+    ));
+
+    let ids = project_environment_ids(db.pool(), "proj", "source").await;
+    let run_id = Uuid::new_v4();
+    insert_run(
+        db.pool(),
+        RunInsert {
+            id: 1,
+            run_id,
+            project_id: ids.project_id,
+            environment_id: ids.environment_id,
+            command: "run",
+            is_full_graph_run: true,
+            terminal_status: "success",
+        },
+    )
+    .await;
+    insert_manifest(db.pool(), run_id, &manifest_with_nodes([node("model.pkg.a", "seeded")])).await;
+    insert_node_execution(db.pool(), run_id, "model.pkg.a", "model", "success", Some("seeded"))
+        .await;
+
+    sqlx::query(
+        "INSERT INTO promoted_manifest_meta (project_id, environment_id, source_run_id, base_manifest) SELECT $1, $2, $3, manifest FROM manifest_snapshots WHERE run_id = $3",
+    )
+    .bind(ids.project_id)
+    .bind(ids.environment_id)
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("insert promoted meta");
+    sqlx::query(
+        "INSERT INTO promoted_manifest_nodes (project_id, environment_id, unique_id, source_run_id, checksum, raw_node) SELECT $1, $2, 'model.pkg.a', $3, 'seeded', manifest -> 'nodes' -> 'model.pkg.a' FROM manifest_snapshots WHERE run_id = $3",
+    )
+    .bind(ids.project_id)
+    .bind(ids.environment_id)
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("insert promoted node");
+    sqlx::query(
+        r#"
+        INSERT INTO current_node_state (
+            project_id, environment_id, unique_id, last_run_id, status, resource_type, node_name,
+            node_path, materialized, relation_database, relation_schema, relation_alias,
+            relation_name, checksum, started_at, finished_at, execution_time_seconds,
+            last_success_at, updated_at
+        )
+        VALUES ($1, $2, 'model.pkg.a', $3, 'success', 'model', 'a', 'models/a.sql', 'table',
+                'warehouse', 'main', 'a', 'warehouse.main.a', 'seeded', NOW(), NOW(), 0.1, NOW(), NOW())
+        "#,
+    )
+    .bind(ids.project_id)
+    .bind(ids.environment_id)
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("insert current state");
+
+    let seed_output = run_dbtx(
+        db.url(),
+        &[
+            "environment",
+            "seed-from",
+            "--project",
+            "proj",
+            "--target",
+            "target",
+            "--source",
+            "source",
+            "--seed-type",
+            "clone",
+        ],
+    );
+    assert_success(&seed_output);
+
+    let target_ids = project_environment_ids(db.pool(), "proj", "target").await;
+    let promoted_node_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM promoted_manifest_nodes WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(target_ids.project_id)
+    .bind(target_ids.environment_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("promoted node count");
+    let current_state_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM current_node_state WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(target_ids.project_id)
+    .bind(target_ids.environment_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("current state count");
+    let seed_record_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM environment_seeds WHERE target_environment_id = $1",
+    )
+    .bind(target_ids.environment_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("seed records");
+    let runs_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+        .fetch_one(db.pool())
+        .await
+        .expect("runs count");
+
+    assert_eq!(promoted_node_count, 1);
+    assert_eq!(current_state_count, 1);
+    assert_eq!(seed_record_count, 1);
+    assert_eq!(runs_count, 1);
+}
+
 struct ScopeIds {
     project_id: i64,
     environment_id: i64,
@@ -295,6 +521,26 @@ async fn scope_ids(pool: &PgPool) -> ScopeIds {
     ScopeIds {
         project_id,
         environment_id,
+    }
+}
+
+async fn project_environment_ids(pool: &PgPool, project_slug: &str, environment_slug: &str) -> ScopeIds {
+    let row = sqlx::query(
+        r#"
+        SELECT p.id AS project_id, e.id AS environment_id
+        FROM projects p
+        JOIN environments e ON e.project_id = p.id
+        WHERE p.slug = $1 AND e.slug = $2
+        "#,
+    )
+    .bind(project_slug)
+    .bind(environment_slug)
+    .fetch_one(pool)
+    .await
+    .expect("project/environment row");
+    ScopeIds {
+        project_id: row.get("project_id"),
+        environment_id: row.get("environment_id"),
     }
 }
 
@@ -449,9 +695,27 @@ fn run_replay(database_url: &str, run_id: Uuid) {
     );
 }
 
+fn run_dbtx(database_url: &str, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_dbtx"))
+        .args(args)
+        .env("DBTX_DATABASE_URL", database_url)
+        .output()
+        .expect("run dbtx")
+}
+
+fn assert_success(output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "command failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 async fn reset_db(pool: &PgPool) {
     sqlx::query(
-        "TRUNCATE promoted_manifest_nodes, promoted_manifest_meta, current_node_state, manifest_edges, manifest_nodes, manifest_snapshots, node_executions, run_events, runs, environments, projects CASCADE",
+        "TRUNCATE environment_seeds, promoted_manifest_nodes, promoted_manifest_meta, current_node_state, manifest_edges, manifest_nodes, manifest_snapshots, node_executions, run_events, runs, environments, projects CASCADE",
     )
     .execute(pool)
     .await
