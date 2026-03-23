@@ -114,23 +114,27 @@ async fn handle_project_command(command: ProjectCommand) -> AppResult<()> {
                 project_root.as_deref(),
                 default_branch.as_deref(),
             )?;
-            if let Some(existing_project_id) = read_dbtx_project_id(&current_dir)?
+            let existing_project_id = read_dbtx_project_id(&current_dir)?;
+            if let Some(existing_project_id) = existing_project_id.as_deref()
                 && !force
             {
-                return Err(AppError::ProjectIdAlreadyConfigured(existing_project_id));
+                return Err(AppError::ProjectIdAlreadyConfigured(existing_project_id.to_string()));
             }
             let project_id = format!("prj_{}", Uuid::new_v4().simple());
             write_dbtx_project_id(&current_dir, &project_id, force)?;
-            let project = db
-                .create_project(CreateProjectInput {
-                    project_id,
-                    project_name: inferred.project_name,
-                    slug: inferred.slug,
-                    git_repo_url: inferred.git_repo_url,
-                    default_branch: inferred.default_branch,
-                    project_root: inferred.project_root,
-                })
-                .await?;
+            let input = CreateProjectInput {
+                project_id,
+                project_name: inferred.project_name,
+                slug: inferred.slug,
+                git_repo_url: inferred.git_repo_url,
+                default_branch: inferred.default_branch,
+                project_root: inferred.project_root,
+            };
+            let project = if let Some(existing_project_id) = existing_project_id.as_deref() {
+                db.reinitialize_project_id(existing_project_id, input).await?
+            } else {
+                db.create_project(input).await?
+            };
             print_project(&project);
         }
         ProjectCommand::Update {
