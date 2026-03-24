@@ -28,7 +28,8 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::time::{Duration, sleep};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, info_span, warn};
 use uuid::Uuid;
@@ -55,10 +56,22 @@ struct InvocationManager {
     inner: Arc<Mutex<HashMap<Uuid, Arc<InvocationRuntime>>>>,
 }
 
+#[derive(Debug, Clone)]
+struct SequencedInvocationEvent {
+    sequence: u64,
+    event: InvocationEvent,
+}
+
+#[derive(Default)]
+struct InvocationHistory {
+    next_sequence: u64,
+    items: Vec<SequencedInvocationEvent>,
+}
+
 struct InvocationRuntime {
     status: Mutex<InvocationStatusResponse>,
-    history: Mutex<Vec<InvocationEvent>>,
-    tx: broadcast::Sender<InvocationEvent>,
+    history: Mutex<InvocationHistory>,
+    tx: broadcast::Sender<SequencedInvocationEvent>,
 }
 
 impl InvocationManager {
@@ -75,7 +88,7 @@ impl InvocationManager {
         let (tx, _) = broadcast::channel(1024);
         let runtime = Arc::new(InvocationRuntime {
             status: Mutex::new(status),
-            history: Mutex::new(Vec::new()),
+            history: Mutex::new(InvocationHistory::default()),
             tx,
         });
         self.inner
@@ -88,12 +101,29 @@ impl InvocationManager {
     async fn get(&self, invocation_id: Uuid) -> Option<Arc<InvocationRuntime>> {
         self.inner.lock().await.get(&invocation_id).cloned()
     }
+
+    fn schedule_cleanup(&self, invocation_id: Uuid) {
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(300)).await;
+            inner.lock().await.remove(&invocation_id);
+        });
+    }
 }
 
 impl InvocationRuntime {
     async fn push_event(&self, event: InvocationEvent) {
-        self.history.lock().await.push(event.clone());
-        let _ = self.tx.send(event);
+        let sequenced = {
+            let mut history = self.history.lock().await;
+            history.next_sequence += 1;
+            let sequenced = SequencedInvocationEvent {
+                sequence: history.next_sequence,
+                event,
+            };
+            history.items.push(sequenced.clone());
+            sequenced
+        };
+        let _ = self.tx.send(sequenced);
     }
 
     async fn status(&self) -> InvocationStatusResponse {
@@ -128,53 +158,40 @@ impl InvocationRuntime {
 }
 
 struct StreamingInvocationObserver {
-    runtime: Arc<InvocationRuntime>,
+    tx: mpsc::UnboundedSender<InvocationEvent>,
 }
 
 impl InvocationObserver for StreamingInvocationObserver {
     fn stdout_line(&mut self, line: &str) {
-        let runtime = self.runtime.clone();
-        let text = line.to_string();
-        tokio::spawn(async move {
-            runtime
-                .push_event(InvocationEvent {
-                    event_type: "stdout.line".to_string(),
-                    timestamp: Utc::now(),
-                    text: Some(text),
-                    stream: Some("stdout".to_string()),
-                    dbt_event_name: None,
-                    node_unique_id: None,
-                    level: None,
-                    exit_code: None,
-                    error: None,
-                })
-                .await;
+        let _ = self.tx.send(InvocationEvent {
+            event_type: "stdout.line".to_string(),
+            timestamp: Utc::now(),
+            text: Some(line.to_string()),
+            stream: Some("stdout".to_string()),
+            dbt_event_name: None,
+            node_unique_id: None,
+            level: None,
+            exit_code: None,
+            error: None,
         });
     }
 
     fn stderr_line(&mut self, line: &str) {
-        let runtime = self.runtime.clone();
-        let text = line.to_string();
-        tokio::spawn(async move {
-            runtime
-                .push_event(InvocationEvent {
-                    event_type: "stderr.line".to_string(),
-                    timestamp: Utc::now(),
-                    text: Some(text),
-                    stream: Some("stderr".to_string()),
-                    dbt_event_name: None,
-                    node_unique_id: None,
-                    level: None,
-                    exit_code: None,
-                    error: None,
-                })
-                .await;
+        let _ = self.tx.send(InvocationEvent {
+            event_type: "stderr.line".to_string(),
+            timestamp: Utc::now(),
+            text: Some(line.to_string()),
+            stream: Some("stderr".to_string()),
+            dbt_event_name: None,
+            node_unique_id: None,
+            level: None,
+            exit_code: None,
+            error: None,
         });
     }
 
     fn dbt_log(&mut self, event: &LogEvent, rendered: Option<&str>) {
-        let runtime = self.runtime.clone();
-        let payload = InvocationEvent {
+        let _ = self.tx.send(InvocationEvent {
             event_type: "dbt.log".to_string(),
             timestamp: Utc::now(),
             text: rendered.map(ToString::to_string),
@@ -189,9 +206,6 @@ impl InvocationObserver for StreamingInvocationObserver {
             level: Some(event.info.level.clone()),
             exit_code: None,
             error: None,
-        };
-        tokio::spawn(async move {
-            runtime.push_event(payload).await;
         });
     }
 }
@@ -432,11 +446,17 @@ async fn invocation_create(
 
     let db = state.db.clone();
     let runtime_config = state.runtime_config.clone();
+    let invocations = state.invocations.clone();
     tokio::spawn(async move {
         let service = InvocationService::new(&db);
-        let mut observer = StreamingInvocationObserver {
-            runtime: runtime.clone(),
-        };
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut observer = StreamingInvocationObserver { tx: event_tx };
+        let event_runtime = runtime.clone();
+        let event_forwarder = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                event_runtime.push_event(event).await;
+            }
+        });
         let result = service
             .invoke(
                 InvocationRequest {
@@ -449,6 +469,10 @@ async fn invocation_create(
                 &mut observer,
             )
             .await;
+        drop(observer);
+        if let Err(err) = event_forwarder.await {
+            warn!(invocation_id = %invocation_id, error = %err, "event forwarder task failed");
+        }
         match result {
             Ok(result) => {
                 info!(
@@ -476,6 +500,7 @@ async fn invocation_create(
                     .await
             }
         }
+        invocations.schedule_cleanup(invocation_id);
     });
     Ok(Json(InvocationCreateResponse { invocation_id }))
 }
@@ -504,24 +529,28 @@ async fn invocation_events(
             "invocation not found",
         ))
     })?;
-    let history = runtime.history.lock().await.clone();
     let rx = runtime.tx.subscribe();
-    info!(invocation_id = %id, buffered_events = history.len(), "subscribed to invocation event stream");
-    let stream = event_stream(history, rx);
+    let history = runtime.history.lock().await;
+    let buffered_events = history.items.len();
+    let last_sequence = history.items.last().map(|item| item.sequence).unwrap_or(0);
+    let stream = event_stream(history.items.clone(), last_sequence, rx);
+    info!(invocation_id = %id, buffered_events, "subscribed to invocation event stream");
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 fn event_stream(
-    history: Vec<InvocationEvent>,
-    mut rx: broadcast::Receiver<InvocationEvent>,
+    history: Vec<SequencedInvocationEvent>,
+    last_history_sequence: u64,
+    mut rx: broadcast::Receiver<SequencedInvocationEvent>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     stream! {
         for item in history {
-            yield Ok(to_sse_event(&item));
+            yield Ok(to_sse_event(&item.event));
         }
         loop {
             match rx.recv().await {
-                Ok(item) => yield Ok(to_sse_event(&item)),
+                Ok(item) if item.sequence > last_history_sequence => yield Ok(to_sse_event(&item.event)),
+                Ok(_) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -585,7 +614,7 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{InvocationEvent, event_stream};
+    use super::{InvocationEvent, SequencedInvocationEvent, event_stream};
     use chrono::Utc;
     use futures_util::StreamExt;
     use tokio::sync::broadcast;
@@ -607,14 +636,52 @@ mod tests {
     #[tokio::test]
     async fn event_stream_replays_history_then_live_events() {
         let (tx, rx) = broadcast::channel(16);
-        let history = vec![sample_event("one")];
-        let mut stream = Box::pin(event_stream(history, rx));
+        let history = vec![SequencedInvocationEvent {
+            sequence: 1,
+            event: sample_event("one"),
+        }];
+        let mut stream = Box::pin(event_stream(history, 1, rx));
 
         let first = stream.next().await.expect("history item").expect("event");
         let _first = first;
 
-        tx.send(sample_event("two")).expect("send live event");
+        tx.send(SequencedInvocationEvent {
+            sequence: 2,
+            event: sample_event("two"),
+        })
+        .expect("send live event");
         let second = stream.next().await.expect("live item").expect("event");
         let _second = second;
+    }
+
+    #[tokio::test]
+    async fn event_stream_skips_duplicate_live_events_already_in_history() {
+        let (tx, rx) = broadcast::channel(16);
+        let history = vec![SequencedInvocationEvent {
+            sequence: 1,
+            event: sample_event("one"),
+        }];
+        let mut stream = Box::pin(event_stream(history, 1, rx));
+
+        let _first = stream.next().await.expect("history item").expect("event");
+
+        tx.send(SequencedInvocationEvent {
+            sequence: 1,
+            event: sample_event("one"),
+        })
+        .expect("send duplicate live event");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+                .await
+                .is_err(),
+            "duplicate live event should not be emitted"
+        );
+        tx.send(SequencedInvocationEvent {
+            sequence: 2,
+            event: sample_event("two"),
+        })
+        .expect("send next live event");
+
+        let _second = stream.next().await.expect("live item").expect("event");
     }
 }
