@@ -265,6 +265,7 @@ async fn handle_environment_command(
             pr_number,
             immutable,
             status,
+            worker_queue,
             schema_name,
         } => {
             let environment = client
@@ -280,6 +281,7 @@ async fn handle_environment_command(
                     pr_number,
                     immutable,
                     status,
+                    worker_queue,
                     schema_name,
                 })
                 .await?
@@ -297,6 +299,7 @@ async fn handle_environment_command(
             immutable,
             status,
             adapter_type,
+            worker_queue,
             schema_name,
             threads,
         } => {
@@ -316,6 +319,7 @@ async fn handle_environment_command(
                         immutable,
                         status,
                         adapter_type,
+                        worker_queue,
                         schema_name,
                         threads,
                     },
@@ -404,6 +408,7 @@ async fn invoke_via_daemon(
         args,
         ctx,
         InvocationExecutionModeApi::Server,
+        None,
     )
     .await?;
     let client = client::DaemonClient::new(service_url.clone());
@@ -462,12 +467,14 @@ async fn invoke_via_local_worker(
     args: Vec<OsString>,
     ctx: &config::InvocationContext,
 ) -> AppResult<()> {
-    let response = create_invocation(
+    let queue = format!("local-{}", uuid::Uuid::new_v4().simple());
+    create_invocation(
         service_url.clone(),
         command,
         args,
         ctx,
         InvocationExecutionModeApi::Local,
+        Some(queue.clone()),
     )
     .await?;
     let _ = command;
@@ -480,8 +487,8 @@ async fn invoke_via_local_worker(
         .arg("--execution-mode")
         .arg("local")
         .arg("--once")
-        .arg("--invocation-id")
-        .arg(response.invocation_id.to_string())
+        .arg("--queue")
+        .arg(queue)
         .status()?;
     match status.code().unwrap_or(1) {
         0 => Ok(()),
@@ -513,6 +520,7 @@ async fn create_invocation(
     args: Vec<OsString>,
     ctx: &config::InvocationContext,
     execution_mode: InvocationExecutionModeApi,
+    worker_queue: Option<String>,
 ) -> AppResult<api::InvocationCreateResponse> {
     let client = client::DaemonClient::new(service_url);
     client
@@ -531,6 +539,7 @@ async fn create_invocation(
             current_dir: ctx.project_dir.display().to_string(),
             environment_slug: ctx.environment_slug.clone(),
             execution_mode,
+            worker_queue,
         })
         .await
 }
@@ -550,7 +559,7 @@ fn print_project(project: &ProjectRecord) {
 
 fn print_environment(environment: &EnvironmentRecord) {
     println!(
-        "environment id={} project_pk={} project_id={} project={} slug={} target_name={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} immutable={} status={} adapter_type={} schema_name={} threads={} profile_config={} metadata={}",
+        "environment id={} project_pk={} project_id={} project={} slug={} target_name={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} immutable={} status={} adapter_type={} worker_queue={} schema_name={} threads={} profile_config={} metadata={}",
         environment.id,
         environment.project_id,
         environment.project_ref,
@@ -575,6 +584,7 @@ fn print_environment(environment: &EnvironmentRecord) {
         environment.immutable,
         environment.status,
         environment.adapter_type,
+        environment.worker_queue,
         environment.schema_name,
         environment
             .threads
@@ -587,9 +597,10 @@ fn print_environment(environment: &EnvironmentRecord) {
 
 fn print_invocation(invocation: &api::InvocationStatusResponse) {
     println!(
-        "invocation id={} mode={:?} worker_health={:?} status={:?} exit_code={} claimed_by={} claimed_at={} last_heartbeat_at={} started_at={} completed_at={} cancel_requested={} error={}",
+        "invocation id={} mode={:?} worker_queue={} worker_health={:?} status={:?} exit_code={} claimed_by={} claimed_at={} last_heartbeat_at={} started_at={} completed_at={} cancel_requested={} error={}",
         invocation.invocation_id,
         invocation.execution_mode,
+        invocation.worker_queue,
         invocation.worker_health,
         invocation.status,
         invocation

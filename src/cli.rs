@@ -129,6 +129,8 @@ pub enum EnvironmentCommand {
         #[arg(long, default_value = "active")]
         status: String,
         #[arg(long)]
+        worker_queue: Option<String>,
+        #[arg(long)]
         schema_name: Option<String>,
     },
     #[command(about = "Update a registered dbtx environment")]
@@ -153,6 +155,8 @@ pub enum EnvironmentCommand {
         status: Option<String>,
         #[arg(long)]
         adapter_type: Option<String>,
+        #[arg(long)]
+        worker_queue: Option<String>,
         #[arg(long)]
         schema_name: Option<String>,
         #[arg(long)]

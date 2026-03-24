@@ -80,6 +80,7 @@ struct InvocationRuntime {
     tx: broadcast::Sender<SequencedInvocationEvent>,
     persistence: Option<InvocationPersistence>,
     execution_mode: crate::api::InvocationExecutionModeApi,
+    worker_queue: String,
     execution_spec: Mutex<Option<InvocationExecutionSpecApi>>,
     lease: Mutex<Option<InvocationLease>>,
 }
@@ -113,11 +114,13 @@ impl InvocationManager {
         invocation_id: Uuid,
         persistence: Option<InvocationPersistence>,
         execution_mode: crate::api::InvocationExecutionModeApi,
+        worker_queue: String,
         execution_spec: Option<InvocationExecutionSpecApi>,
     ) -> (Uuid, Arc<InvocationRuntime>) {
         let status = InvocationStatusResponse {
             invocation_id,
             execution_mode,
+            worker_queue: worker_queue.clone(),
             worker_health: InvocationWorkerHealthApi::Unclaimed,
             status: InvocationLifecycleStatus::Running,
             exit_code: None,
@@ -136,6 +139,7 @@ impl InvocationManager {
             tx,
             persistence,
             execution_mode,
+            worker_queue,
             execution_spec: Mutex::new(execution_spec),
             lease: Mutex::new(None),
         });
@@ -178,6 +182,7 @@ impl InvocationManager {
         &self,
         worker_id: &str,
         execution_mode: Option<crate::api::InvocationExecutionModeApi>,
+        worker_queue: Option<&str>,
     ) -> AppResult<Option<InvocationClaimResponse>> {
         let runtimes = self
             .inner
@@ -195,6 +200,11 @@ impl InvocationManager {
             }
             if let Some(mode) = execution_mode
                 && runtime.execution_mode != mode
+            {
+                continue;
+            }
+            if let Some(queue) = worker_queue
+                && runtime.worker_queue != queue
             {
                 continue;
             }
@@ -617,6 +627,7 @@ async fn environment_create(
             pr_number: request.pr_number,
             immutable: request.immutable,
             status: request.status,
+            worker_queue: request.worker_queue,
             schema_name: request.schema_name,
         })
         .await?;
@@ -648,6 +659,7 @@ async fn environment_update(
             immutable: request.immutable,
             status: request.status,
             adapter_type: request.adapter_type,
+            worker_queue: request.worker_queue,
             schema_name: request.schema_name,
             threads: request.threads,
         })
@@ -733,19 +745,23 @@ async fn invocation_create(
     };
     let (invocation_id, runtime) = state
         .invocations
-        .create(
-            invocation_id,
-            prepared.persistence.map(|p| InvocationPersistence {
+            .create(
+                invocation_id,
+                prepared.persistence.map(|p| InvocationPersistence {
                 db: db.clone(),
                 run_id: p.run_id,
                 project_id: p.project_id,
                 environment_id: p.environment_id,
                 subcommand: p.subcommand,
                 promote_base_manifest: p.promote_base_manifest,
-            }),
-            request.execution_mode,
-            Some(execution_spec),
-        )
+                }),
+                request.execution_mode,
+                request
+                    .worker_queue
+                    .clone()
+                    .unwrap_or_else(|| prepared.worker_queue.clone()),
+                Some(execution_spec),
+            )
         .await;
     let _ = runtime
         .push_event(InvocationEvent {
@@ -768,6 +784,7 @@ async fn invocation_create(
     Ok(Json(InvocationCreateResponse {
         invocation_id,
         execution_mode: request.execution_mode,
+        worker_queue: runtime.worker_queue.clone(),
     }))
 }
 
@@ -793,7 +810,11 @@ async fn invocation_claim_next(
 ) -> Result<Response, ApiError> {
     let Some(claimed) = state
         .invocations
-        .claim_next(&request.worker_id, request.execution_mode)
+        .claim_next(
+            &request.worker_id,
+            request.execution_mode,
+            request.worker_queue.as_deref(),
+        )
         .await?
     else {
         return Ok(StatusCode::NO_CONTENT.into_response());
@@ -1081,6 +1102,7 @@ mod tests {
                 Uuid::new_v4(),
                 None,
                 crate::api::InvocationExecutionModeApi::Server,
+                "generic".to_string(),
                 None,
             )
             .await;
@@ -1116,6 +1138,7 @@ mod tests {
                 Uuid::new_v4(),
                 None,
                 crate::api::InvocationExecutionModeApi::Server,
+                "generic".to_string(),
                 None,
             )
             .await;
@@ -1149,6 +1172,7 @@ mod tests {
                 Uuid::new_v4(),
                 None,
                 crate::api::InvocationExecutionModeApi::Server,
+                "generic".to_string(),
                 None,
             )
             .await;
@@ -1180,6 +1204,7 @@ mod tests {
                 Uuid::new_v4(),
                 None,
                 crate::api::InvocationExecutionModeApi::Server,
+                "generic".to_string(),
                 None,
             )
             .await;
@@ -1228,6 +1253,7 @@ mod tests {
                 Uuid::new_v4(),
                 None,
                 InvocationExecutionModeApi::Server,
+                "generic".to_string(),
                 Some(InvocationExecutionSpecApi {
                     command: InvocationCommandApi::Run,
                     args: vec![],

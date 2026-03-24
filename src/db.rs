@@ -60,6 +60,7 @@ pub struct EnvironmentRecord {
     pub immutable: bool,
     pub status: String,
     pub adapter_type: String,
+    pub worker_queue: String,
     pub schema_name: String,
     pub threads: Option<i32>,
     pub profile_config: Value,
@@ -89,6 +90,7 @@ pub struct CreateEnvironmentInput {
     pub immutable: bool,
     pub status: String,
     pub adapter_type: String,
+    pub worker_queue: Option<String>,
     pub schema_name: Option<String>,
     pub threads: Option<i32>,
     pub profile_config: Value,
@@ -107,6 +109,7 @@ pub struct UpdateEnvironmentInput {
     pub immutable: bool,
     pub status: Option<String>,
     pub adapter_type: Option<String>,
+    pub worker_queue: Option<String>,
     pub target_name: Option<String>,
     pub schema_name: Option<String>,
     pub threads: Option<i32>,
@@ -301,6 +304,10 @@ impl Db {
             &input.profile_secrets,
             false,
         )?;
+        let worker_queue = input
+            .worker_queue
+            .clone()
+            .unwrap_or_else(|| "generic".to_string());
         let baseline = match input.baseline_slug.as_deref() {
             Some(baseline_slug) => Some(
                 self.get_environment_by_project_id(project.id, &project.project_id, baseline_slug)
@@ -313,10 +320,10 @@ impl Db {
             r#"
             INSERT INTO environments (
                 project_id, slug, target_name, kind, baseline_environment_id, git_branch, git_commit_sha,
-                pr_number, immutable, status, adapter_type, schema_name, threads, profile_config,
-                profile_secrets
+                pr_number, immutable, status, adapter_type, worker_queue, schema_name, threads,
+                profile_config, profile_secrets
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             RETURNING id
             "#,
         )
@@ -331,6 +338,7 @@ impl Db {
         .bind(input.immutable)
         .bind(&input.status)
         .bind(&input.adapter_type)
+        .bind(&worker_queue)
         .bind(input.schema_name.as_deref())
         .bind(input.threads)
         .bind(sqlx::types::Json(&input.profile_config))
@@ -397,6 +405,11 @@ impl Db {
             .as_deref()
             .unwrap_or(&existing.adapter_type)
             .to_string();
+        let worker_queue = input
+            .worker_queue
+            .as_deref()
+            .unwrap_or(&existing.worker_queue)
+            .to_string();
         let target_name = input
             .target_name
             .as_deref()
@@ -437,11 +450,12 @@ impl Db {
                 immutable = $8,
                 status = $9,
                 adapter_type = $10,
-                target_name = $11,
-                schema_name = $12,
-                threads = $13,
-                profile_config = $14,
-                profile_secrets = $15
+                worker_queue = $11,
+                target_name = $12,
+                schema_name = $13,
+                threads = $14,
+                profile_config = $15,
+                profile_secrets = $16
             WHERE id = $1 AND project_id = $2
             "#,
         )
@@ -455,6 +469,7 @@ impl Db {
         .bind(immutable)
         .bind(&status)
         .bind(&adapter_type)
+        .bind(&worker_queue)
         .bind(&target_name)
         .bind(&schema_name)
         .bind(threads)
@@ -499,6 +514,7 @@ impl Db {
                 e.immutable,
                 e.status,
                 e.adapter_type,
+                e.worker_queue,
                 e.schema_name,
                 e.threads,
                 e.profile_config,
@@ -828,6 +844,7 @@ impl Db {
                 e.immutable,
                 e.status,
                 e.adapter_type,
+                e.worker_queue,
                 e.schema_name,
                 e.threads,
                 e.profile_config,
@@ -869,6 +886,7 @@ impl Db {
                 e.immutable,
                 e.status,
                 e.adapter_type,
+                e.worker_queue,
                 e.schema_name,
                 e.threads,
                 e.profile_config,
@@ -909,6 +927,7 @@ impl Db {
                 e.immutable,
                 e.status,
                 e.adapter_type,
+                e.worker_queue,
                 e.schema_name,
                 e.threads,
                 e.profile_config,
@@ -1575,6 +1594,7 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         immutable: row.get("immutable"),
         status: row.get("status"),
         adapter_type: row.get("adapter_type"),
+        worker_queue: row.get("worker_queue"),
         schema_name: row.get("schema_name"),
         threads: row.get("threads"),
         profile_config: profile_config.0,

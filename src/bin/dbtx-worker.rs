@@ -19,6 +19,8 @@ struct WorkerCli {
     #[arg(long, default_value = "server")]
     execution_mode: WorkerExecutionMode,
     #[arg(long)]
+    queue: Option<String>,
+    #[arg(long)]
     invocation_id: Option<Uuid>,
     #[arg(long)]
     once: bool,
@@ -78,6 +80,7 @@ async fn run() -> AppResult<()> {
             .invocation_claim_next(InvocationClaimNextApiRequest {
                 execution_mode: Some(execution_mode),
                 worker_id: worker_id.clone(),
+                worker_queue: cli.queue.clone(),
             })
             .await?
         {

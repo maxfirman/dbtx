@@ -65,6 +65,7 @@ pub struct EnvironmentCreateApiRequest {
     pub pr_number: Option<i32>,
     pub immutable: bool,
     pub status: String,
+    pub worker_queue: Option<String>,
     pub schema_name: Option<String>,
 }
 
@@ -81,6 +82,7 @@ pub struct EnvironmentUpdateApiRequest {
     pub immutable: bool,
     pub status: Option<String>,
     pub adapter_type: Option<String>,
+    pub worker_queue: Option<String>,
     pub schema_name: Option<String>,
     pub threads: Option<i32>,
 }
@@ -92,6 +94,7 @@ pub struct InvocationCreateApiRequest {
     pub current_dir: String,
     pub environment_slug: String,
     pub execution_mode: InvocationExecutionModeApi,
+    pub worker_queue: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -115,6 +118,7 @@ pub enum InvocationExecutionModeApi {
 pub struct InvocationCreateResponse {
     pub invocation_id: Uuid,
     pub execution_mode: InvocationExecutionModeApi,
+    pub worker_queue: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +152,7 @@ pub struct InvocationClaimApiRequest {
 pub struct InvocationClaimNextApiRequest {
     pub execution_mode: Option<InvocationExecutionModeApi>,
     pub worker_id: String,
+    pub worker_queue: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +171,7 @@ pub struct InvocationCompleteApiRequest {
 pub struct InvocationStatusResponse {
     pub invocation_id: Uuid,
     pub execution_mode: InvocationExecutionModeApi,
+    pub worker_queue: String,
     pub worker_health: InvocationWorkerHealthApi,
     pub status: InvocationLifecycleStatus,
     pub exit_code: Option<i32>,

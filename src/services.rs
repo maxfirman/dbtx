@@ -74,6 +74,7 @@ pub struct LocalExecutionSpec {
 pub struct LocalExecutionPrepared {
     pub spec: LocalExecutionSpec,
     pub persistence: Option<LocalExecutionPersistence>,
+    pub worker_queue: String,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +116,7 @@ pub struct EnvironmentCreateRequest {
     pub pr_number: Option<i32>,
     pub immutable: bool,
     pub status: String,
+    pub worker_queue: Option<String>,
     pub schema_name: Option<String>,
 }
 
@@ -131,6 +133,7 @@ pub struct EnvironmentUpdateRequest {
     pub immutable: bool,
     pub status: Option<String>,
     pub adapter_type: Option<String>,
+    pub worker_queue: Option<String>,
     pub schema_name: Option<String>,
     pub threads: Option<i32>,
 }
@@ -260,6 +263,7 @@ impl<'a> EnvironmentService<'a> {
                 immutable: request.immutable,
                 status: request.status,
                 adapter_type: local_profile.adapter_type,
+                worker_queue: request.worker_queue,
                 schema_name: request.schema_name.or(Some(local_profile.schema_name)),
                 threads: local_profile.threads,
                 profile_config: local_profile.profile_config,
@@ -283,6 +287,7 @@ impl<'a> EnvironmentService<'a> {
                 immutable: request.immutable,
                 status: request.status,
                 adapter_type: request.adapter_type,
+                worker_queue: request.worker_queue,
                 target_name: None,
                 schema_name: request.schema_name,
                 threads: request.threads,
@@ -481,6 +486,7 @@ impl<'a> InvocationService<'a> {
                 state_manifest,
             },
             persistence,
+            worker_queue: environment.worker_queue.clone(),
         })
     }
 
