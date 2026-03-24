@@ -115,7 +115,6 @@ pub enum InvocationExecutionModeApi {
 pub struct InvocationCreateResponse {
     pub invocation_id: Uuid,
     pub execution_mode: InvocationExecutionModeApi,
-    pub execution_spec: Option<InvocationExecutionSpecApi>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +123,13 @@ pub struct InvocationExecutionSpecApi {
     pub args: Vec<String>,
     pub profiles_yml: String,
     pub state_manifest: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationClaimResponse {
+    pub invocation_id: Uuid,
+    pub execution_mode: InvocationExecutionModeApi,
+    pub execution_spec: InvocationExecutionSpecApi,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

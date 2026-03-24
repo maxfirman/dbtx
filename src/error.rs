@@ -40,6 +40,10 @@ pub enum AppError {
     InvalidEncryptedSecret(String),
     #[error("local execution is not supported for command '{0}' yet")]
     UnsupportedLocalExecution(String),
+    #[error("invocation '{0}' is not claimable")]
+    InvocationNotClaimable(String),
+    #[error("invocation '{0}' has already been claimed")]
+    InvocationAlreadyClaimed(String),
     #[error("dbt invocation failed with exit code {0}")]
     DbtFailed(i32),
     #[error("missing manifest at {0}")]

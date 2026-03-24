@@ -1,10 +1,10 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationCommandApi, InvocationCompleteApiRequest,
-    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
-    InvocationEventBatchApiRequest, InvocationExecutionSpecApi, InvocationLifecycleStatus,
-    InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
-    ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
+    EnvironmentsResponse, InvocationClaimResponse, InvocationCommandApi,
+    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
+    InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionSpecApi,
+    InvocationLifecycleStatus, InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest,
+    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::Db;
@@ -77,6 +77,9 @@ struct InvocationRuntime {
     history: Mutex<InvocationHistory>,
     tx: broadcast::Sender<SequencedInvocationEvent>,
     persistence: Option<InvocationPersistence>,
+    execution_mode: crate::api::InvocationExecutionModeApi,
+    execution_spec: Mutex<Option<InvocationExecutionSpecApi>>,
+    claimed: Mutex<bool>,
 }
 
 #[derive(Clone)]
@@ -99,6 +102,8 @@ impl InvocationManager {
         &self,
         invocation_id: Uuid,
         persistence: Option<InvocationPersistence>,
+        execution_mode: crate::api::InvocationExecutionModeApi,
+        execution_spec: Option<InvocationExecutionSpecApi>,
     ) -> (Uuid, Arc<InvocationRuntime>) {
         let status = InvocationStatusResponse {
             invocation_id,
@@ -114,6 +119,9 @@ impl InvocationManager {
             history: Mutex::new(InvocationHistory::default()),
             tx,
             persistence,
+            execution_mode,
+            execution_spec: Mutex::new(execution_spec),
+            claimed: Mutex::new(false),
         });
         self.inner
             .lock()
@@ -180,6 +188,27 @@ impl InvocationRuntime {
         };
         drop(current);
         let _ = self.push_event(completed).await;
+    }
+
+    async fn claim_execution(&self, invocation_id: Uuid) -> AppResult<InvocationClaimResponse> {
+        let mut claimed = self.claimed.lock().await;
+        if *claimed {
+            return Err(AppError::InvocationAlreadyClaimed(
+                invocation_id.to_string(),
+            ));
+        }
+        let spec = self
+            .execution_spec
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| AppError::InvocationNotClaimable(invocation_id.to_string()))?;
+        *claimed = true;
+        Ok(InvocationClaimResponse {
+            invocation_id,
+            execution_mode: self.execution_mode,
+            execution_spec: spec,
+        })
     }
 }
 
@@ -348,6 +377,7 @@ pub fn router(state: AppState) -> Router {
             get(environment_get).patch(environment_update),
         )
         .route("/v1/invocations", post(invocation_create))
+        .route("/v1/invocations/{id}/claim", post(invocation_claim))
         .route("/v1/invocations/{id}", get(invocation_status))
         .route("/v1/invocations/{id}/complete", post(invocation_complete))
         .route(
@@ -575,6 +605,17 @@ async fn invocation_create(
                 },
             )
             .await?;
+        let execution_spec = InvocationExecutionSpecApi {
+            command: request.command,
+            args: prepared
+                .spec
+                .args
+                .into_iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect(),
+            profiles_yml: prepared.spec.profiles_yml,
+            state_manifest: prepared.spec.state_manifest,
+        };
         let (invocation_id, runtime) = state
             .invocations
             .create(
@@ -587,6 +628,8 @@ async fn invocation_create(
                     subcommand: p.subcommand,
                     promote_base_manifest: p.promote_base_manifest,
                 }),
+                request.execution_mode,
+                Some(execution_spec),
             )
             .await;
         let _ = runtime
@@ -609,20 +652,12 @@ async fn invocation_create(
         return Ok(Json(InvocationCreateResponse {
             invocation_id,
             execution_mode: request.execution_mode,
-            execution_spec: Some(InvocationExecutionSpecApi {
-                command: request.command,
-                args: prepared
-                    .spec
-                    .args
-                    .into_iter()
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .collect(),
-                profiles_yml: prepared.spec.profiles_yml,
-                state_manifest: prepared.spec.state_manifest,
-            }),
         }));
     }
-    let (invocation_id, runtime) = state.invocations.create(invocation_id, None).await;
+    let (invocation_id, runtime) = state
+        .invocations
+        .create(invocation_id, None, request.execution_mode, None)
+        .await;
     let _ = runtime
         .push_event(InvocationEvent {
             event_type: "invocation.started".to_string(),
@@ -718,8 +753,22 @@ async fn invocation_create(
     Ok(Json(InvocationCreateResponse {
         invocation_id,
         execution_mode: request.execution_mode,
-        execution_spec: None,
     }))
+}
+
+async fn invocation_claim(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<InvocationClaimResponse>, ApiError> {
+    let runtime = state.invocations.get(id).await.ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "invocation not found",
+        ))
+    })?;
+    let claimed = runtime.claim_execution(id).await?;
+    info!(invocation_id = %id, "claimed invocation execution");
+    Ok(Json(claimed))
 }
 
 async fn invocation_status(
@@ -862,6 +911,8 @@ impl IntoResponse for ApiError {
             AppError::EnvironmentAlreadyExists(_, _) | AppError::ProjectIdAlreadyConfigured(_) => {
                 StatusCode::CONFLICT
             }
+            AppError::InvocationAlreadyClaimed(_) => StatusCode::CONFLICT,
+            AppError::InvocationNotClaimable(_) => StatusCode::BAD_REQUEST,
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,
             AppError::ImmutableEnvironment(_, _)
             | AppError::ImmutableEnvironmentGitMismatch(_, _) => StatusCode::CONFLICT,
@@ -953,7 +1004,14 @@ mod tests {
     #[tokio::test]
     async fn recorder_appends_execution_events_into_runtime_history() {
         let manager = InvocationManager::default();
-        let (_id, runtime) = manager.create(Uuid::new_v4(), None).await;
+        let (_id, runtime) = manager
+            .create(
+                Uuid::new_v4(),
+                None,
+                crate::api::InvocationExecutionModeApi::Server,
+                None,
+            )
+            .await;
         let recorder = InvocationRecorder {
             runtime: runtime.clone(),
         };
@@ -981,7 +1039,14 @@ mod tests {
     #[tokio::test]
     async fn recorder_marks_invocation_complete() {
         let manager = InvocationManager::default();
-        let (_id, runtime) = manager.create(Uuid::new_v4(), None).await;
+        let (_id, runtime) = manager
+            .create(
+                Uuid::new_v4(),
+                None,
+                crate::api::InvocationExecutionModeApi::Server,
+                None,
+            )
+            .await;
         let recorder = InvocationRecorder { runtime };
 
         recorder
@@ -1007,7 +1072,14 @@ mod tests {
     #[tokio::test]
     async fn recorder_rejects_appends_after_completion() {
         let manager = InvocationManager::default();
-        let (_id, runtime) = manager.create(Uuid::new_v4(), None).await;
+        let (_id, runtime) = manager
+            .create(
+                Uuid::new_v4(),
+                None,
+                crate::api::InvocationExecutionModeApi::Server,
+                None,
+            )
+            .await;
         let recorder = InvocationRecorder {
             runtime: runtime.clone(),
         };
@@ -1031,7 +1103,14 @@ mod tests {
     #[tokio::test]
     async fn uploaded_events_are_visible_via_sse_history() {
         let manager = InvocationManager::default();
-        let (_id, runtime) = manager.create(Uuid::new_v4(), None).await;
+        let (_id, runtime) = manager
+            .create(
+                Uuid::new_v4(),
+                None,
+                crate::api::InvocationExecutionModeApi::Server,
+                None,
+            )
+            .await;
         let recorder = InvocationRecorder {
             runtime: runtime.clone(),
         };
