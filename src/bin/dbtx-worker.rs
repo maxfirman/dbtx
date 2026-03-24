@@ -1,9 +1,10 @@
 use clap::Parser;
-use dbtx::api::{InvocationClaimNextApiRequest, InvocationExecutionModeApi};
+use dbtx::api::{InvocationClaimApiRequest, InvocationClaimNextApiRequest, InvocationExecutionModeApi};
 use dbtx::client::DaemonClient;
 use dbtx::config::resolve_service_url;
 use dbtx::error::{AppError, AppResult};
 use dbtx::worker;
+use uuid::Uuid;
 use std::sync::Once;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -17,6 +18,10 @@ struct WorkerCli {
     service_url: Option<String>,
     #[arg(long, default_value = "server")]
     execution_mode: WorkerExecutionMode,
+    #[arg(long)]
+    invocation_id: Option<Uuid>,
+    #[arg(long)]
+    once: bool,
     #[arg(long, default_value_t = 1000)]
     poll_interval_ms: u64,
 }
@@ -55,6 +60,19 @@ async fn run() -> AppResult<()> {
     };
     let poll_interval = Duration::from_millis(cli.poll_interval_ms);
 
+    if let Some(invocation_id) = cli.invocation_id {
+        let claim = client
+            .invocation_claim(
+                invocation_id,
+                InvocationClaimApiRequest {
+                    worker_id: worker_id.clone(),
+                },
+            )
+            .await?;
+        info!(invocation_id = %claim.invocation_id, ?execution_mode, "claimed invocation directly");
+        return worker::execute_claimed_invocation(&client, claim, Some(invocation_id)).await;
+    }
+
     loop {
         match client
             .invocation_claim_next(InvocationClaimNextApiRequest {
@@ -67,9 +85,19 @@ async fn run() -> AppResult<()> {
                 info!(invocation_id = %claim.invocation_id, ?execution_mode, "claimed invocation");
                 if let Err(err) = worker::execute_claimed_invocation(&client, claim, None).await {
                     warn!(error = %err, "worker invocation failed");
+                    if cli.once {
+                        return Err(err);
+                    }
+                } else if cli.once {
+                    return Ok(());
                 }
             }
             None => {
+                if cli.once {
+                    return Err(AppError::Io(std::io::Error::other(
+                        "no invocation available for worker",
+                    )));
+                }
                 tokio::time::sleep(poll_interval).await;
             }
         }

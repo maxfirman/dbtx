@@ -7,10 +7,9 @@ use dbtx::config::{self, resolve_service_url};
 use dbtx::db::{self, EnvironmentRecord, ProjectRecord};
 use dbtx::error::{AppError, AppResult};
 use dbtx::services::InvocationCommand;
-use dbtx::worker;
 use std::ffi::OsString;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 
 #[tokio::main]
@@ -471,25 +470,41 @@ async fn invoke_via_local_worker(
         InvocationExecutionModeApi::Local,
     )
     .await?;
-    let client = client::DaemonClient::new(service_url.clone());
-    let worker_id = format!("cli-local-{}", std::process::id());
-    let claimed = client
-        .invocation_claim_next(api::InvocationClaimNextApiRequest {
-            execution_mode: Some(InvocationExecutionModeApi::Local),
-            worker_id,
-        })
-        .await?;
-    let claimed = claimed
-        .ok_or_else(|| AppError::Io(std::io::Error::other("no local invocation available")))?;
-    if claimed.invocation_id != response.invocation_id {
-        return Err(AppError::Io(std::io::Error::other(format!(
-            "claimed unexpected invocation {}, expected {}",
-            claimed.invocation_id, response.invocation_id
-        ))));
-    }
     let _ = command;
     let _ = ctx;
-    worker::execute_claimed_invocation(&client, claimed, Some(response.invocation_id)).await
+
+    let worker_path = resolve_worker_binary_path()?;
+    let status = StdCommand::new(worker_path)
+        .arg("--service-url")
+        .arg(service_url)
+        .arg("--execution-mode")
+        .arg("local")
+        .arg("--once")
+        .arg("--invocation-id")
+        .arg(response.invocation_id.to_string())
+        .status()?;
+    match status.code().unwrap_or(1) {
+        0 => Ok(()),
+        code => Err(AppError::DbtFailed(code)),
+    }
+}
+
+fn resolve_worker_binary_path() -> AppResult<PathBuf> {
+    if let Ok(path) = std::env::var("DBTX_WORKER_PATH") {
+        return Ok(PathBuf::from(path));
+    }
+    let current_exe = std::env::current_exe()?;
+    let current_dir = current_exe.parent().ok_or_else(|| {
+        AppError::Io(std::io::Error::other(
+            "failed to resolve current binary directory",
+        ))
+    })?;
+    let worker_name = if cfg!(windows) {
+        "dbtx-worker.exe"
+    } else {
+        "dbtx-worker"
+    };
+    Ok(current_dir.join(worker_name))
 }
 
 async fn create_invocation(
