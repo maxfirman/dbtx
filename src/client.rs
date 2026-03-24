@@ -1,8 +1,8 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationClaimResponse, InvocationCompleteApiRequest,
-    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
-    InvocationEventBatchApiRequest, InvocationStatusResponse, MigrateResponse,
+    EnvironmentsResponse, InvocationClaimNextApiRequest, InvocationClaimResponse,
+    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
+    InvocationEvent, InvocationEventBatchApiRequest, InvocationStatusResponse, MigrateResponse,
     ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest,
     ProjectsResponse,
 };
@@ -145,6 +145,18 @@ impl DaemonClient {
         self.send(
             self.http
                 .post(self.url(&format!("/v1/invocations/{invocation_id}/claim"))),
+        )
+        .await
+    }
+
+    pub async fn invocation_claim_next(
+        &self,
+        request: InvocationClaimNextApiRequest,
+    ) -> AppResult<InvocationClaimResponse> {
+        self.send(
+            self.http
+                .post(self.url("/v1/invocations/claim-next"))
+                .json(&request),
         )
         .await
     }

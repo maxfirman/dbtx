@@ -431,7 +431,17 @@ async fn invoke_via_local_worker(
     )
     .await?;
     let client = client::DaemonClient::new(service_url);
-    let claimed = client.invocation_claim(response.invocation_id).await?;
+    let claimed = client
+        .invocation_claim_next(api::InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Local),
+        })
+        .await?;
+    if claimed.invocation_id != response.invocation_id {
+        return Err(AppError::Io(std::io::Error::other(format!(
+            "claimed unexpected invocation {}, expected {}",
+            claimed.invocation_id, response.invocation_id
+        ))));
+    }
     let spec = claimed.execution_spec;
     let profiles_dir = write_profiles_dir(&spec.profiles_yml)?;
     let state_dir = write_state_dir(spec.state_manifest.as_ref())?;

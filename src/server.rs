@@ -1,10 +1,11 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationClaimResponse, InvocationCommandApi,
-    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
-    InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionSpecApi,
-    InvocationLifecycleStatus, InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest,
-    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
+    EnvironmentsResponse, InvocationClaimNextApiRequest, InvocationClaimResponse,
+    InvocationCommandApi, InvocationCompleteApiRequest, InvocationCreateApiRequest,
+    InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
+    InvocationExecutionSpecApi, InvocationLifecycleStatus, InvocationStatusResponse,
+    MigrateResponse, ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest,
+    ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::Db;
@@ -132,6 +133,41 @@ impl InvocationManager {
 
     async fn get(&self, invocation_id: Uuid) -> Option<Arc<InvocationRuntime>> {
         self.inner.lock().await.get(&invocation_id).cloned()
+    }
+
+    async fn claim_next(
+        &self,
+        execution_mode: Option<crate::api::InvocationExecutionModeApi>,
+    ) -> AppResult<Option<InvocationClaimResponse>> {
+        let runtimes = self
+            .inner
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for runtime in runtimes {
+            if !matches!(
+                runtime.status().await.status,
+                InvocationLifecycleStatus::Running
+            ) {
+                continue;
+            }
+            if let Some(mode) = execution_mode
+                && runtime.execution_mode != mode
+            {
+                continue;
+            }
+            if runtime.execution_spec.lock().await.is_none() {
+                continue;
+            }
+            if *runtime.claimed.lock().await {
+                continue;
+            }
+            let invocation_id = runtime.status().await.invocation_id;
+            return runtime.claim_execution(invocation_id).await.map(Some);
+        }
+        Ok(None)
     }
 
     fn schedule_cleanup(&self, invocation_id: Uuid) {
@@ -377,6 +413,7 @@ pub fn router(state: AppState) -> Router {
             get(environment_get).patch(environment_update),
         )
         .route("/v1/invocations", post(invocation_create))
+        .route("/v1/invocations/claim-next", post(invocation_claim_next))
         .route("/v1/invocations/{id}/claim", post(invocation_claim))
         .route("/v1/invocations/{id}", get(invocation_status))
         .route("/v1/invocations/{id}/complete", post(invocation_complete))
@@ -768,6 +805,19 @@ async fn invocation_claim(
     })?;
     let claimed = runtime.claim_execution(id).await?;
     info!(invocation_id = %id, "claimed invocation execution");
+    Ok(Json(claimed))
+}
+
+async fn invocation_claim_next(
+    State(state): State<AppState>,
+    Json(request): Json<InvocationClaimNextApiRequest>,
+) -> Result<Json<InvocationClaimResponse>, ApiError> {
+    let claimed = state
+        .invocations
+        .claim_next(request.execution_mode)
+        .await?
+        .ok_or_else(|| AppError::InvocationNotClaimable("next".to_string()))?;
+    info!(invocation_id = %claimed.invocation_id, "claimed next invocation execution");
     Ok(Json(claimed))
 }
 

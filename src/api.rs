@@ -104,7 +104,7 @@ pub enum InvocationCommandApi {
     Seed,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationExecutionModeApi {
     Server,
@@ -130,6 +130,11 @@ pub struct InvocationClaimResponse {
     pub invocation_id: Uuid,
     pub execution_mode: InvocationExecutionModeApi,
     pub execution_spec: InvocationExecutionSpecApi,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InvocationClaimNextApiRequest {
+    pub execution_mode: Option<InvocationExecutionModeApi>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
