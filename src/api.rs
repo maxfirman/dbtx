@@ -1,4 +1,5 @@
 use crate::db::{AppliedMigration, EnvironmentRecord, ProjectRecord};
+use crate::execution::{ExecutionCompletion, ExecutionEvent};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -105,6 +106,16 @@ pub enum InvocationCommandApi {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationCreateResponse {
     pub invocation_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationEventBatchApiRequest {
+    pub events: Vec<ExecutionEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationCompleteApiRequest {
+    pub completion: ExecutionCompletion,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

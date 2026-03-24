@@ -1,6 +1,7 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
+    EnvironmentsResponse, InvocationCompleteApiRequest, InvocationCreateApiRequest,
+    InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
     InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
     ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
 };
@@ -136,6 +137,32 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn invocation_append_events(
+        &self,
+        invocation_id: Uuid,
+        request: InvocationEventBatchApiRequest,
+    ) -> AppResult<()> {
+        self.send_empty(
+            self.http
+                .post(self.url(&format!("/v1/invocations/{invocation_id}/events")))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn invocation_complete(
+        &self,
+        invocation_id: Uuid,
+        request: InvocationCompleteApiRequest,
+    ) -> AppResult<()> {
+        self.send_empty(
+            self.http
+                .post(self.url(&format!("/v1/invocations/{invocation_id}/complete")))
+                .json(&request),
+        )
+        .await
+    }
+
     pub async fn stream_invocation_events<F>(
         &self,
         invocation_id: Uuid,
@@ -175,6 +202,12 @@ impl DaemonClient {
         let response = request.send().await.map_err(map_reqwest_error)?;
         let response = ensure_success(response).await?;
         response.json().await.map_err(map_reqwest_error)
+    }
+
+    async fn send_empty(&self, request: reqwest::RequestBuilder) -> AppResult<()> {
+        let response = request.send().await.map_err(map_reqwest_error)?;
+        let _ = ensure_success(response).await?;
+        Ok(())
     }
 
     fn url(&self, path: &str) -> String {

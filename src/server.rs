@@ -1,7 +1,8 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationCommandApi, InvocationCreateApiRequest,
-    InvocationCreateResponse, InvocationEvent, InvocationLifecycleStatus, InvocationStatusResponse,
+    EnvironmentsResponse, InvocationCommandApi, InvocationCompleteApiRequest,
+    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
+    InvocationEventBatchApiRequest, InvocationLifecycleStatus, InvocationStatusResponse,
     MigrateResponse, ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest,
     ProjectUpdateApiRequest, ProjectsResponse,
 };
@@ -193,6 +194,13 @@ impl InvocationRecorder {
             .finish(completion.status, completion.exit_code, completion.error)
             .await;
     }
+
+    async fn is_running(&self) -> bool {
+        matches!(
+            self.runtime.status().await.status,
+            InvocationLifecycleStatus::Running
+        )
+    }
 }
 
 struct StreamingInvocationObserver {
@@ -263,6 +271,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/invocations", post(invocation_create))
         .route("/v1/invocations/{id}", get(invocation_status))
+        .route("/v1/invocations/{id}/complete", post(invocation_complete))
+        .route("/v1/invocations/{id}/events", post(invocation_append_events))
         .route("/v1/invocations/{id}/events", get(invocation_events))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
@@ -558,6 +568,48 @@ async fn invocation_status(
     Ok(Json(runtime.status().await))
 }
 
+async fn invocation_append_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<InvocationEventBatchApiRequest>,
+) -> Result<StatusCode, ApiError> {
+    let runtime = state.invocations.get(id).await.ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "invocation not found",
+        ))
+    })?;
+    let recorder = InvocationRecorder { runtime };
+    if !recorder.is_running().await {
+        return Err(ApiError(AppError::Io(std::io::Error::other(
+            "invocation is already completed",
+        ))));
+    }
+    for event in request.events {
+        recorder.record(event).await;
+    }
+    info!(invocation_id = %id, "appended invocation events");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn invocation_complete(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<InvocationCompleteApiRequest>,
+) -> Result<StatusCode, ApiError> {
+    let runtime = state.invocations.get(id).await.ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "invocation not found",
+        ))
+    })?;
+    let recorder = InvocationRecorder { runtime };
+    recorder.complete(request.completion).await;
+    state.invocations.schedule_cleanup(id);
+    info!(invocation_id = %id, "completed invocation via api");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn invocation_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -653,7 +705,8 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{InvocationEvent, SequencedInvocationEvent, event_stream};
+    use super::{InvocationEvent, InvocationManager, InvocationRecorder, SequencedInvocationEvent, event_stream};
+    use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
     use chrono::Utc;
     use futures_util::StreamExt;
     use tokio::sync::broadcast;
@@ -722,5 +775,45 @@ mod tests {
         .expect("send next live event");
 
         let _second = stream.next().await.expect("live item").expect("event");
+    }
+
+    #[tokio::test]
+    async fn recorder_appends_execution_events_into_runtime_history() {
+        let manager = InvocationManager::default();
+        let (_id, runtime) = manager.create().await;
+        let recorder = InvocationRecorder { runtime: runtime.clone() };
+
+        recorder.record(ExecutionEvent {
+            kind: ExecutionEventKind::StdoutLine,
+            occurred_at: Utc::now(),
+            text: Some("hello".to_string()),
+            dbt_event_name: None,
+            node_unique_id: None,
+            level: None,
+            error: None,
+        }).await;
+
+        let history = runtime.history.lock().await;
+        assert_eq!(history.items.len(), 1);
+        assert_eq!(history.items[0].event.event_type, "stdout.line");
+        assert_eq!(history.items[0].event.text.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn recorder_marks_invocation_complete() {
+        let manager = InvocationManager::default();
+        let (_id, runtime) = manager.create().await;
+        let recorder = InvocationRecorder { runtime };
+
+        recorder.complete(ExecutionCompletion {
+            status: crate::api::InvocationLifecycleStatus::Succeeded,
+            exit_code: 0,
+            error: None,
+        }).await;
+
+        let status = recorder.runtime.status().await;
+        assert!(matches!(status.status, crate::api::InvocationLifecycleStatus::Succeeded));
+        assert_eq!(status.exit_code, Some(0));
+        assert!(status.completed_at.is_some());
     }
 }
