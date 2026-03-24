@@ -1,7 +1,7 @@
 use clap::Parser;
 use dbtx::api;
 use dbtx::api::InvocationExecutionModeApi;
-use dbtx::cli::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
+use dbtx::cli::{Cli, Command, EnvironmentCommand, InvocationCommand as InvocationCliCommand, ProjectCommand, StateCommand};
 use dbtx::client;
 use dbtx::config::{self, resolve_service_url};
 use dbtx::db::{self, EnvironmentRecord, ProjectRecord};
@@ -38,6 +38,9 @@ async fn run() -> AppResult<()> {
         }
         Command::Environment(environment_command) => {
             handle_environment_command(environment_command, cli.service_url).await?
+        }
+        Command::Invocation(invocation_command) => {
+            handle_invocation_command(invocation_command, cli.service_url).await?
         }
         Command::Build { args } => {
             handle_persisting_command(InvocationCommand::Build, args, cli.service_url).await?
@@ -338,6 +341,45 @@ async fn handle_environment_command(
     Ok(())
 }
 
+async fn handle_invocation_command(
+    command: InvocationCliCommand,
+    service_url_override: Option<String>,
+) -> AppResult<()> {
+    let current_dir = std::env::current_dir()?;
+    let client = daemon_client(&current_dir, service_url_override)?;
+    match command {
+        InvocationCliCommand::List => {
+            for invocation in client.invocation_list().await?.invocations {
+                print_invocation(&invocation);
+            }
+        }
+        InvocationCliCommand::Show { invocation_id } => {
+            let invocation_id = uuid::Uuid::parse_str(&invocation_id).map_err(|err| {
+                AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid invocation id: {err}"),
+                ))
+            })?;
+            let invocation = client.invocation_status(invocation_id).await?;
+            print_invocation(&invocation);
+        }
+        InvocationCliCommand::Cancel { invocation_id } => {
+            let invocation_id = uuid::Uuid::parse_str(&invocation_id).map_err(|err| {
+                AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid invocation id: {err}"),
+                ))
+            })?;
+            client
+                .invocation_cancel(invocation_id, api::InvocationCancelApiRequest::default())
+                .await?;
+            let invocation = client.invocation_status(invocation_id).await?;
+            print_invocation(&invocation);
+        }
+    }
+    Ok(())
+}
+
 fn daemon_client(
     current_dir: &Path,
     service_url_override: Option<String>,
@@ -524,6 +566,36 @@ fn print_environment(environment: &EnvironmentRecord) {
             .unwrap_or_default(),
         environment.profile_config,
         environment.metadata,
+    );
+}
+
+fn print_invocation(invocation: &api::InvocationStatusResponse) {
+    println!(
+        "invocation id={} mode={:?} worker_health={:?} status={:?} exit_code={} claimed_by={} claimed_at={} last_heartbeat_at={} started_at={} completed_at={} cancel_requested={} error={}",
+        invocation.invocation_id,
+        invocation.execution_mode,
+        invocation.worker_health,
+        invocation.status,
+        invocation
+            .exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        invocation.claimed_by.as_deref().unwrap_or(""),
+        invocation
+            .claimed_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_default(),
+        invocation
+            .last_heartbeat_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_default(),
+        invocation.started_at.to_rfc3339(),
+        invocation
+            .completed_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_default(),
+        invocation.cancel_requested,
+        invocation.error.as_deref().unwrap_or(""),
     );
 }
 

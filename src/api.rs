@@ -166,6 +166,7 @@ pub struct InvocationCompleteApiRequest {
 pub struct InvocationStatusResponse {
     pub invocation_id: Uuid,
     pub execution_mode: InvocationExecutionModeApi,
+    pub worker_health: InvocationWorkerHealthApi,
     pub status: InvocationLifecycleStatus,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
@@ -175,6 +176,15 @@ pub struct InvocationStatusResponse {
     pub completed_at: Option<DateTime<Utc>>,
     pub cancel_requested: bool,
     pub claimed_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationWorkerHealthApi {
+    Unclaimed,
+    Claimed,
+    Stale,
+    Completed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

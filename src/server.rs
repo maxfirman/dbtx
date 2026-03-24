@@ -5,8 +5,9 @@ use crate::api::{
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
     InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionSpecApi,
     InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
-    InvocationStatusResponse, InvocationsResponse, MigrateResponse, ProjectInitApiRequest,
-    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
+    InvocationStatusResponse, InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse,
+    ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest,
+    ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::Db;
@@ -117,6 +118,7 @@ impl InvocationManager {
         let status = InvocationStatusResponse {
             invocation_id,
             execution_mode,
+            worker_health: InvocationWorkerHealthApi::Unclaimed,
             status: InvocationLifecycleStatus::Running,
             exit_code: None,
             error: None,
@@ -238,7 +240,9 @@ impl InvocationRuntime {
     }
 
     async fn status(&self) -> InvocationStatusResponse {
-        self.status.lock().await.clone()
+        let mut status = self.status.lock().await.clone();
+        status.worker_health = self.worker_health(&status);
+        status
     }
 
     async fn finish(
@@ -308,6 +312,7 @@ impl InvocationRuntime {
         let mut status = self.status.lock().await;
         status.claimed_by = Some(worker_id.to_string());
         status.claimed_at = lease.as_ref().map(|value| value.claimed_at);
+        status.worker_health = InvocationWorkerHealthApi::Claimed;
         drop(status);
         Ok(InvocationClaimResponse {
             invocation_id,
@@ -327,6 +332,30 @@ impl InvocationRuntime {
             None => Err(AppError::Io(std::io::Error::other(
                 "invocation has not been claimed",
             ))),
+        }
+    }
+
+    fn worker_health(&self, status: &InvocationStatusResponse) -> InvocationWorkerHealthApi {
+        if !matches!(status.status, InvocationLifecycleStatus::Running) {
+            return InvocationWorkerHealthApi::Completed;
+        }
+        match (status.claimed_at, status.last_heartbeat_at.as_ref(), status.claimed_by.as_ref()) {
+            (_, _, None) => InvocationWorkerHealthApi::Unclaimed,
+            (_, Some(last_heartbeat), Some(_))
+                if Utc::now() - *last_heartbeat
+                    > chrono::Duration::from_std(INVOCATION_STALE_AFTER)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(15)) =>
+            {
+                InvocationWorkerHealthApi::Stale
+            }
+            (Some(claimed_at), None, Some(_))
+                if Utc::now() - claimed_at
+                    > chrono::Duration::from_std(INVOCATION_STALE_AFTER)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(15)) =>
+            {
+                InvocationWorkerHealthApi::Stale
+            }
+            (_, _, Some(_)) => InvocationWorkerHealthApi::Claimed,
         }
     }
 }

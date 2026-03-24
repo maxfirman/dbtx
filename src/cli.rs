@@ -18,6 +18,8 @@ pub enum Command {
     Project(ProjectCommand),
     #[command(subcommand)]
     Environment(EnvironmentCommand),
+    #[command(subcommand)]
+    Invocation(InvocationCommand),
     #[command(
         about = "Build dbt resources and persist execution state",
         trailing_var_arg = true,
@@ -170,9 +172,25 @@ pub enum EnvironmentCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum InvocationCommand {
+    #[command(about = "List active and recent invocations")]
+    List,
+    #[command(about = "Show one invocation")]
+    Show {
+        #[arg(long)]
+        invocation_id: String,
+    },
+    #[command(about = "Request cancellation for one invocation")]
+    Cancel {
+        #[arg(long)]
+        invocation_id: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
+    use super::{Cli, Command, EnvironmentCommand, InvocationCommand, ProjectCommand, StateCommand};
     use clap::Parser;
 
     #[test]
@@ -263,6 +281,23 @@ mod tests {
                 assert_eq!(args, vec!["--full-refresh"]);
             }
             _ => panic!("expected seed command"),
+        }
+    }
+
+    #[test]
+    fn invocation_cancel_parses() {
+        let cli = Cli::parse_from([
+            "dbtx",
+            "invocation",
+            "cancel",
+            "--invocation-id",
+            "123e4567-e89b-12d3-a456-426614174000",
+        ]);
+        match cli.command {
+            Command::Invocation(InvocationCommand::Cancel { invocation_id }) => {
+                assert_eq!(invocation_id, "123e4567-e89b-12d3-a456-426614174000");
+            }
+            _ => panic!("expected invocation cancel command"),
         }
     }
 
