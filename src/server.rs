@@ -1,7 +1,7 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimApiRequest,
-    InvocationClaimNextApiRequest, InvocationClaimResponse, InvocationCommandApi,
+    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
+    InvocationClaimResponse, InvocationCommandApi,
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
     InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionSpecApi,
     InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
@@ -107,6 +107,10 @@ struct InvocationLease {
 }
 
 const INVOCATION_STALE_AFTER: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const LOCAL_ONE_SHOT_CLAIM_TIMEOUT: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const LOCAL_ONE_SHOT_CLAIM_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl InvocationManager {
     async fn create(
@@ -225,6 +229,32 @@ impl InvocationManager {
         tokio::spawn(async move {
             sleep(Duration::from_secs(300)).await;
             inner.lock().await.remove(&invocation_id);
+        });
+    }
+
+    fn schedule_local_claim_timeout(&self, runtime: Arc<InvocationRuntime>) {
+        tokio::spawn(async move {
+            sleep(LOCAL_ONE_SHOT_CLAIM_TIMEOUT).await;
+            if runtime.worker_queue.starts_with("local-")
+                && matches!(
+                    runtime.status().await.status,
+                    InvocationLifecycleStatus::Running
+                )
+                && runtime.lease.lock().await.is_none()
+            {
+                let recorder = InvocationRecorder {
+                    runtime: runtime.clone(),
+                };
+                let _ = recorder
+                    .complete(ExecutionCompletion {
+                        status: InvocationLifecycleStatus::Failed,
+                        exit_code: 1,
+                        error: Some("local worker did not claim invocation".to_string()),
+                        dbt_version: None,
+                        manifest: None,
+                    })
+                    .await;
+            }
         });
     }
 }
@@ -494,7 +524,6 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/invocations", get(invocation_list).post(invocation_create))
         .route("/v1/invocations/claim-next", post(invocation_claim_next))
-        .route("/v1/invocations/{id}/claim", post(invocation_claim))
         .route("/v1/invocations/{id}", get(invocation_status))
         .route("/v1/invocations/{id}/heartbeat", post(invocation_heartbeat))
         .route("/v1/invocations/{id}/cancel", post(invocation_cancel))
@@ -776,6 +805,7 @@ async fn invocation_create(
             error: None,
         })
         .await;
+    state.invocations.schedule_local_claim_timeout(runtime.clone());
     info!(
         invocation_id = %invocation_id,
         execution_mode = ?request.execution_mode,
@@ -786,22 +816,6 @@ async fn invocation_create(
         execution_mode: request.execution_mode,
         worker_queue: runtime.worker_queue.clone(),
     }))
-}
-
-async fn invocation_claim(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Json(request): Json<InvocationClaimApiRequest>,
-) -> Result<Json<InvocationClaimResponse>, ApiError> {
-    let runtime = state.invocations.get(id).await.ok_or_else(|| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "invocation not found",
-        ))
-    })?;
-    let claimed = runtime.claim_execution(id, &request.worker_id).await?;
-    info!(invocation_id = %id, "claimed invocation execution");
-    Ok(Json(claimed))
 }
 
 async fn invocation_claim_next(
@@ -1017,15 +1031,19 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        INVOCATION_STALE_AFTER, InvocationEvent, InvocationExecutionSpecApi, InvocationManager,
-        InvocationRecorder, SequencedInvocationEvent,
+        INVOCATION_STALE_AFTER, LOCAL_ONE_SHOT_CLAIM_TIMEOUT, InvocationEvent,
+        InvocationExecutionSpecApi, InvocationManager, InvocationRecorder,
+        SequencedInvocationEvent,
         event_stream,
     };
-    use crate::api::{InvocationCommandApi, InvocationExecutionModeApi};
+    use crate::api::{
+        InvocationCommandApi, InvocationExecutionModeApi, InvocationLifecycleStatus,
+    };
     use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
     use chrono::Utc;
     use futures_util::StreamExt;
     use tokio::sync::broadcast;
+    use tokio::time::Duration;
     use uuid::Uuid;
 
     fn sample_event(text: &str) -> InvocationEvent {
@@ -1284,5 +1302,82 @@ mod tests {
             .expect("reclaimed");
         assert_eq!(reclaimed.worker_id, "worker-b");
         assert_eq!(runtime.status().await.claimed_by.as_deref(), Some("worker-b"));
+    }
+
+    #[tokio::test]
+    async fn claim_next_respects_worker_queue() {
+        let manager = InvocationManager::default();
+        let (_id_a, _runtime_a) = manager
+            .create(
+                Uuid::new_v4(),
+                None,
+                InvocationExecutionModeApi::Server,
+                "queue-a".to_string(),
+                Some(InvocationExecutionSpecApi {
+                    command: InvocationCommandApi::Run,
+                    args: vec![],
+                    project_dir: ".".to_string(),
+                    profiles_yml: "profiles".to_string(),
+                    state_manifest: None,
+                }),
+            )
+            .await;
+        let (_id_b, _runtime_b) = manager
+            .create(
+                Uuid::new_v4(),
+                None,
+                InvocationExecutionModeApi::Server,
+                "queue-b".to_string(),
+                Some(InvocationExecutionSpecApi {
+                    command: InvocationCommandApi::Run,
+                    args: vec![],
+                    project_dir: ".".to_string(),
+                    profiles_yml: "profiles".to_string(),
+                    state_manifest: None,
+                }),
+            )
+            .await;
+
+        let claim = manager
+            .claim_next(
+                "worker-a",
+                Some(InvocationExecutionModeApi::Server),
+                Some("queue-a"),
+            )
+            .await
+            .expect("claim ok")
+            .expect("claim present");
+        assert_eq!(claim.execution_spec.project_dir, ".");
+        assert_eq!(claim.worker_id, "worker-a");
+    }
+
+    #[tokio::test]
+    async fn unclaimed_local_invocation_times_out() {
+        let manager = InvocationManager::default();
+        let (_id, runtime) = manager
+            .create(
+                Uuid::new_v4(),
+                None,
+                InvocationExecutionModeApi::Local,
+                "local-test".to_string(),
+                Some(InvocationExecutionSpecApi {
+                    command: InvocationCommandApi::Run,
+                    args: vec![],
+                    project_dir: ".".to_string(),
+                    profiles_yml: "profiles".to_string(),
+                    state_manifest: None,
+                }),
+            )
+            .await;
+        manager.schedule_local_claim_timeout(runtime.clone());
+
+        tokio::time::sleep(LOCAL_ONE_SHOT_CLAIM_TIMEOUT + Duration::from_millis(25)).await;
+
+        let status = runtime.status().await;
+        assert!(matches!(status.status, InvocationLifecycleStatus::Failed));
+        assert_eq!(
+            status.error.as_deref(),
+            Some("local worker did not claim invocation")
+        );
     }
 }

@@ -1,11 +1,11 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimApiRequest,
-    InvocationClaimNextApiRequest, InvocationClaimResponse, InvocationCompleteApiRequest,
-    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
-    InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
-    InvocationStatusResponse, InvocationsResponse, MigrateResponse, ProjectInitApiRequest,
-    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
+    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
+    InvocationClaimResponse, InvocationCompleteApiRequest, InvocationCreateApiRequest,
+    InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
+    InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationStatusResponse,
+    InvocationsResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
+    ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::error::{AppError, AppResult};
 use futures_util::StreamExt;
@@ -141,19 +141,6 @@ impl DaemonClient {
 
     pub async fn invocation_list(&self) -> AppResult<InvocationsResponse> {
         self.send(self.http.get(self.url("/v1/invocations"))).await
-    }
-
-    pub async fn invocation_claim(
-        &self,
-        invocation_id: Uuid,
-        request: InvocationClaimApiRequest,
-    ) -> AppResult<InvocationClaimResponse> {
-        self.send(
-            self.http
-                .post(self.url(&format!("/v1/invocations/{invocation_id}/claim")))
-                .json(&request),
-        )
-        .await
     }
 
     pub async fn invocation_claim_next(

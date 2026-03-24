@@ -144,11 +144,6 @@ pub struct InvocationClaimResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InvocationClaimApiRequest {
-    pub worker_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationClaimNextApiRequest {
     pub execution_mode: Option<InvocationExecutionModeApi>,
     pub worker_id: String,
