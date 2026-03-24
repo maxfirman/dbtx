@@ -7,13 +7,11 @@ use dbtx::config::{self, resolve_service_url};
 use dbtx::db::{self, EnvironmentRecord, ProjectRecord};
 use dbtx::error::{AppError, AppResult};
 use dbtx::services::InvocationCommand;
+use dbtx::worker;
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command as StdCommand;
-use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command as TokioCommand;
 
 #[tokio::main]
 async fn main() {
@@ -436,184 +434,17 @@ async fn invoke_via_local_worker(
             execution_mode: Some(InvocationExecutionModeApi::Local),
         })
         .await?;
+    let claimed = claimed
+        .ok_or_else(|| AppError::Io(std::io::Error::other("no local invocation available")))?;
     if claimed.invocation_id != response.invocation_id {
         return Err(AppError::Io(std::io::Error::other(format!(
             "claimed unexpected invocation {}, expected {}",
             claimed.invocation_id, response.invocation_id
         ))));
     }
-    let spec = claimed.execution_spec;
-    let heartbeat_client = client::DaemonClient::new(service_url.clone());
-    let heartbeat_id = response.invocation_id;
-    let heartbeat_task = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if heartbeat_client
-                .invocation_heartbeat(heartbeat_id, api::InvocationHeartbeatApiRequest::default())
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    let profiles_dir = write_profiles_dir(&spec.profiles_yml)?;
-    let state_dir = write_state_dir(spec.state_manifest.as_ref())?;
-
-    let mut dbt_args: Vec<OsString> = spec.args.into_iter().map(Into::into).collect();
-    if let Some(state_dir) = state_dir.as_ref() {
-        dbt_args.push("--state".into());
-        dbt_args.push(state_dir.path().as_os_str().to_os_string());
-    }
-    dbt_args.push("--profiles-dir".into());
-    dbt_args.push(profiles_dir.path().as_os_str().to_os_string());
-
-    let mut child =
-        TokioCommand::new(std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string()))
-            .arg(command.as_str())
-            .args(&dbt_args)
-            .current_dir(&ctx.project_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stdout")))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stderr")))?;
-
-    let mut stdout_reader = BufReader::new(stdout).lines();
-    let stderr_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr).lines();
-        let mut lines = Vec::new();
-        while let Some(line) = reader.next_line().await? {
-            lines.push(line);
-        }
-        Result::<Vec<String>, std::io::Error>::Ok(lines)
-    });
-    let mut dbt_version: Option<String> = None;
-
-    while let Some(line) = stdout_reader.next_line().await? {
-        if command.persists_state()
-            && let Some(event) = dbtx::event::LogEvent::parse(&line)
-        {
-            if dbt_version.is_none() && event.info.name == "MainReportVersion" {
-                dbt_version = event
-                    .data
-                    .get("version")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string);
-            }
-            if let Some(rendered) = event.render_text_line() {
-                println!("{rendered}");
-            }
-            client
-                .invocation_append_events(
-                    response.invocation_id,
-                    api::InvocationEventBatchApiRequest {
-                        events: vec![dbtx::execution::ExecutionEvent {
-                            kind: dbtx::execution::ExecutionEventKind::DbtLog,
-                            occurred_at: chrono::Utc::now(),
-                            text: event.render_text_line(),
-                            raw_line: Some(line),
-                            dbt_event_name: Some(event.info.name.clone()),
-                            node_unique_id: event
-                                .data
-                                .get("node_info")
-                                .and_then(|value| value.get("unique_id"))
-                                .and_then(|value| value.as_str())
-                                .map(ToString::to_string),
-                            level: Some(event.info.level.clone()),
-                            error: None,
-                        }],
-                    },
-                )
-                .await?;
-        } else {
-            println!("{line}");
-            client
-                .invocation_append_events(
-                    response.invocation_id,
-                    api::InvocationEventBatchApiRequest {
-                        events: vec![dbtx::execution::ExecutionEvent {
-                            kind: dbtx::execution::ExecutionEventKind::StdoutLine,
-                            occurred_at: chrono::Utc::now(),
-                            text: Some(line.clone()),
-                            raw_line: Some(line),
-                            dbt_event_name: None,
-                            node_unique_id: None,
-                            level: None,
-                            error: None,
-                        }],
-                    },
-                )
-                .await?;
-        }
-    }
-
-    let status = child.wait().await?;
-    for line in stderr_handle.await.map_err(|err| {
-        AppError::Io(std::io::Error::other(format!("stderr task failed: {err}")))
-    })?? {
-        eprintln!("{line}");
-        client
-            .invocation_append_events(
-                response.invocation_id,
-                api::InvocationEventBatchApiRequest {
-                    events: vec![dbtx::execution::ExecutionEvent {
-                        kind: dbtx::execution::ExecutionEventKind::StderrLine,
-                        occurred_at: chrono::Utc::now(),
-                        text: Some(line.clone()),
-                        raw_line: Some(line),
-                        dbt_event_name: None,
-                        node_unique_id: None,
-                        level: None,
-                        error: None,
-                    }],
-                },
-            )
-            .await?;
-    }
-
-    let exit_code = status.code().unwrap_or(1);
-    let manifest = if command.persists_state() {
-        let manifest_path = ctx.target_path.join("manifest.json");
-        std::fs::read_to_string(&manifest_path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-    } else {
-        None
-    };
-    client
-        .invocation_complete(
-            response.invocation_id,
-            api::InvocationCompleteApiRequest {
-                completion: dbtx::execution::ExecutionCompletion {
-                    status: if status.success() {
-                        api::InvocationLifecycleStatus::Succeeded
-                    } else {
-                        api::InvocationLifecycleStatus::Failed
-                    },
-                    exit_code,
-                    error: (!status.success())
-                        .then(|| format!("dbt invocation failed with exit code {exit_code}")),
-                    dbt_version,
-                    manifest,
-                },
-            },
-        )
-        .await?;
-    heartbeat_task.abort();
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(AppError::DbtFailed(exit_code))
-    }
+    let _ = command;
+    let _ = ctx;
+    worker::execute_claimed_invocation(&client, claimed, Some(response.invocation_id)).await
 }
 
 async fn create_invocation(
@@ -642,24 +473,6 @@ async fn create_invocation(
             execution_mode,
         })
         .await
-}
-
-fn write_profiles_dir(profiles_yml: &str) -> AppResult<TempDir> {
-    let temp_dir = TempDir::new()?;
-    std::fs::write(temp_dir.path().join("profiles.yml"), profiles_yml)?;
-    Ok(temp_dir)
-}
-
-fn write_state_dir(state_manifest: Option<&serde_json::Value>) -> AppResult<Option<TempDir>> {
-    let Some(state_manifest) = state_manifest else {
-        return Ok(None);
-    };
-    let temp_dir = TempDir::new()?;
-    std::fs::write(
-        temp_dir.path().join("manifest.json"),
-        serde_json::to_vec(state_manifest)?,
-    )?;
-    Ok(Some(temp_dir))
 }
 
 fn print_project(project: &ProjectRecord) {

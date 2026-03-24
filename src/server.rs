@@ -4,8 +4,9 @@ use crate::api::{
     InvocationClaimResponse, InvocationCommandApi, InvocationCompleteApiRequest,
     InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
     InvocationEventBatchApiRequest, InvocationExecutionSpecApi, InvocationHeartbeatApiRequest,
-    InvocationLifecycleStatus, InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest,
-    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
+    InvocationHeartbeatResponse, InvocationLifecycleStatus, InvocationStatusResponse,
+    MigrateResponse, ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest,
+    ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::Db;
@@ -647,7 +648,7 @@ async fn invocation_create(
             .prepare_local_execution(
                 invocation_id,
                 InvocationRequest {
-                    command: map_invocation_command(request.command.clone()),
+                    command: map_invocation_command(request.command),
                     args: request.args.iter().cloned().map(Into::into).collect(),
                     config: runtime_config.clone(),
                     current_dir: Some(PathBuf::from(&request.current_dir)),
@@ -664,6 +665,7 @@ async fn invocation_create(
                 .into_iter()
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect(),
+            project_dir: request.current_dir.clone(),
             profiles_yml: prepared.spec.profiles_yml,
             state_manifest: prepared.spec.state_manifest,
         };
@@ -825,21 +827,19 @@ async fn invocation_claim(
 async fn invocation_claim_next(
     State(state): State<AppState>,
     Json(request): Json<InvocationClaimNextApiRequest>,
-) -> Result<Json<InvocationClaimResponse>, ApiError> {
-    let claimed = state
-        .invocations
-        .claim_next(request.execution_mode)
-        .await?
-        .ok_or_else(|| AppError::InvocationNotClaimable("next".to_string()))?;
+) -> Result<Response, ApiError> {
+    let Some(claimed) = state.invocations.claim_next(request.execution_mode).await? else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
     info!(invocation_id = %claimed.invocation_id, "claimed next invocation execution");
-    Ok(Json(claimed))
+    Ok(Json(claimed).into_response())
 }
 
 async fn invocation_heartbeat(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(_request): Json<InvocationHeartbeatApiRequest>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<InvocationHeartbeatResponse>, ApiError> {
     let runtime = state.invocations.get(id).await.ok_or_else(|| {
         AppError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -847,7 +847,8 @@ async fn invocation_heartbeat(
         ))
     })?;
     runtime.heartbeat().await;
-    Ok(StatusCode::NO_CONTENT)
+    let cancel_requested = runtime.status().await.cancel_requested;
+    Ok(Json(InvocationHeartbeatResponse { cancel_requested }))
 }
 
 async fn invocation_cancel(

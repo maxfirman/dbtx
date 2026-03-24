@@ -3,9 +3,9 @@ use crate::api::{
     EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
     InvocationClaimResponse, InvocationCompleteApiRequest, InvocationCreateApiRequest,
     InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
-    InvocationHeartbeatApiRequest, InvocationStatusResponse, MigrateResponse,
-    ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest,
-    ProjectsResponse,
+    InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationStatusResponse,
+    MigrateResponse, ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest,
+    ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::error::{AppError, AppResult};
 use futures_util::StreamExt;
@@ -153,8 +153,8 @@ impl DaemonClient {
     pub async fn invocation_claim_next(
         &self,
         request: InvocationClaimNextApiRequest,
-    ) -> AppResult<InvocationClaimResponse> {
-        self.send(
+    ) -> AppResult<Option<InvocationClaimResponse>> {
+        self.send_optional(
             self.http
                 .post(self.url("/v1/invocations/claim-next"))
                 .json(&request),
@@ -192,8 +192,8 @@ impl DaemonClient {
         &self,
         invocation_id: Uuid,
         request: InvocationHeartbeatApiRequest,
-    ) -> AppResult<()> {
-        self.send_empty(
+    ) -> AppResult<InvocationHeartbeatResponse> {
+        self.send(
             self.http
                 .post(self.url(&format!("/v1/invocations/{invocation_id}/heartbeat")))
                 .json(&request),
@@ -253,6 +253,18 @@ impl DaemonClient {
         let response = request.send().await.map_err(map_reqwest_error)?;
         let response = ensure_success(response).await?;
         response.json().await.map_err(map_reqwest_error)
+    }
+
+    async fn send_optional<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> AppResult<Option<T>> {
+        let response = request.send().await.map_err(map_reqwest_error)?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let response = ensure_success(response).await?;
+        response.json().await.map(Some).map_err(map_reqwest_error)
     }
 
     async fn send_empty(&self, request: reqwest::RequestBuilder) -> AppResult<()> {

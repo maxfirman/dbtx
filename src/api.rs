@@ -94,7 +94,7 @@ pub struct InvocationCreateApiRequest {
     pub execution_mode: InvocationExecutionModeApi,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationCommandApi {
     Build,
@@ -121,6 +121,7 @@ pub struct InvocationCreateResponse {
 pub struct InvocationExecutionSpecApi {
     pub command: InvocationCommandApi,
     pub args: Vec<String>,
+    pub project_dir: String,
     pub profiles_yml: String,
     pub state_manifest: Option<serde_json::Value>,
 }
@@ -169,6 +170,11 @@ pub enum InvocationLifecycleStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InvocationHeartbeatApiRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationHeartbeatResponse {
+    pub cancel_requested: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InvocationCancelApiRequest {}
