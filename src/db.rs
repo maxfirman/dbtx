@@ -1,7 +1,7 @@
 use crate::config::read_dbtx_project_id;
 use crate::error::{AppError, AppResult};
-use crate::execution::ExecutionMode;
 use crate::event::LogEvent;
+use crate::execution::ExecutionMode;
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
 use crate::profile::{
     EnvironmentProfileRecord, GeneratedProfiles, resolve_runtime_profile,
