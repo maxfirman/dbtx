@@ -705,7 +705,10 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{InvocationEvent, InvocationManager, InvocationRecorder, SequencedInvocationEvent, event_stream};
+    use super::{
+        InvocationEvent, InvocationManager, InvocationRecorder, SequencedInvocationEvent,
+        event_stream,
+    };
     use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
     use chrono::Utc;
     use futures_util::StreamExt;
@@ -815,5 +818,61 @@ mod tests {
         assert!(matches!(status.status, crate::api::InvocationLifecycleStatus::Succeeded));
         assert_eq!(status.exit_code, Some(0));
         assert!(status.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn recorder_rejects_appends_after_completion() {
+        let manager = InvocationManager::default();
+        let (_id, runtime) = manager.create().await;
+        let recorder = InvocationRecorder { runtime: runtime.clone() };
+
+        assert!(recorder.is_running().await);
+
+        recorder
+            .complete(ExecutionCompletion {
+                status: crate::api::InvocationLifecycleStatus::Succeeded,
+                exit_code: 0,
+                error: None,
+            })
+            .await;
+
+        assert!(!recorder.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn uploaded_events_are_visible_via_sse_history() {
+        let manager = InvocationManager::default();
+        let (_id, runtime) = manager.create().await;
+        let recorder = InvocationRecorder {
+            runtime: runtime.clone(),
+        };
+
+        recorder
+            .record(ExecutionEvent {
+                kind: ExecutionEventKind::StdoutLine,
+                occurred_at: Utc::now(),
+                text: Some("one".to_string()),
+                dbt_event_name: None,
+                node_unique_id: None,
+                level: None,
+                error: None,
+            })
+            .await;
+        recorder
+            .record(ExecutionEvent {
+                kind: ExecutionEventKind::StdoutLine,
+                occurred_at: Utc::now(),
+                text: Some("two".to_string()),
+                dbt_event_name: None,
+                node_unique_id: None,
+                level: None,
+                error: None,
+            })
+            .await;
+
+        let history = runtime.history.lock().await;
+        assert_eq!(history.items.len(), 2);
+        assert_eq!(history.items[0].event.text.as_deref(), Some("one"));
+        assert_eq!(history.items[1].event.text.as_deref(), Some("two"));
     }
 }
