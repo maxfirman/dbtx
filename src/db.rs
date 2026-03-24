@@ -163,6 +163,7 @@ pub(crate) struct CreateInvocationInput {
     pub(crate) worker_queue: String,
     pub(crate) execution_spec: Option<InvocationExecutionSpecApi>,
     pub(crate) promote_base_manifest: bool,
+    pub(crate) claim_deadline_at: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -578,9 +579,9 @@ impl Db {
             r#"
             INSERT INTO invocations (
                 invocation_id, run_id, project_id, environment_id, command, execution_mode,
-                worker_queue, status, execution_spec, promote_base_manifest
+                worker_queue, status, execution_spec, promote_base_manifest, claim_deadline_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', $8, $9, $10)
             RETURNING invocation_id, execution_mode, worker_queue, status, exit_code, error,
                 started_at, claimed_at, last_heartbeat_at, completed_at, cancel_requested, claimed_by
             "#,
@@ -597,12 +598,14 @@ impl Db {
         .bind(&input.worker_queue)
         .bind(input.execution_spec.as_ref().map(sqlx::types::Json))
         .bind(input.promote_base_manifest)
+        .bind(input.claim_deadline_at)
         .fetch_one(&self.pool)
         .await?;
         Ok(invocation_status_from_row(&row))
     }
 
     pub(crate) async fn list_invocations(&self) -> AppResult<Vec<InvocationStatusResponse>> {
+        self.reconcile_expired_unclaimed_invocations().await?;
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
@@ -620,6 +623,7 @@ impl Db {
         &self,
         invocation_id: Uuid,
     ) -> AppResult<InvocationStatusResponse> {
+        self.reconcile_expired_unclaimed_invocations().await?;
         let row = sqlx::query(
             r#"
             SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
@@ -641,6 +645,7 @@ impl Db {
     }
 
     pub(crate) async fn stale_invocation_count(&self) -> AppResult<usize> {
+        self.reconcile_expired_unclaimed_invocations().await?;
         Ok(self
             .list_invocations()
             .await?
@@ -656,6 +661,7 @@ impl Db {
         worker_queue: Option<&str>,
         stale_after: std::time::Duration,
     ) -> AppResult<Option<InvocationClaimResponse>> {
+        self.reconcile_expired_unclaimed_invocations().await?;
         let mut tx = self.pool.begin().await?;
         let stale_at = Utc::now()
             - chrono::Duration::from_std(stale_after)
@@ -669,6 +675,7 @@ impl Db {
                   AND execution_spec IS NOT NULL
                   AND ($1::TEXT IS NULL OR execution_mode = $1)
                   AND ($2::TEXT IS NULL OR worker_queue = $2)
+                  AND (claim_deadline_at IS NULL OR claim_deadline_at >= NOW())
                   AND (
                     claimed_by IS NULL OR COALESCE(last_heartbeat_at, claimed_at, started_at) < $3
                   )
@@ -749,6 +756,25 @@ impl Db {
             )));
         }
         Ok(())
+    }
+
+    pub(crate) async fn reconcile_expired_unclaimed_invocations(&self) -> AppResult<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE invocations
+            SET status = 'failed',
+                exit_code = 1,
+                error = 'local worker did not claim invocation',
+                completed_at = NOW()
+            WHERE status = 'running'
+              AND claimed_by IS NULL
+              AND claim_deadline_at IS NOT NULL
+              AND claim_deadline_at < NOW()
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     pub(crate) async fn get_invocation_persistence(
@@ -842,34 +868,6 @@ impl Db {
         .await?;
 
         tx.commit().await?;
-        Ok(())
-    }
-
-    pub(crate) async fn complete_invocation_unclaimed(
-        &self,
-        invocation_id: Uuid,
-        status: InvocationLifecycleStatus,
-        exit_code: i32,
-        error: Option<String>,
-    ) -> AppResult<()> {
-        sqlx::query(
-            r#"
-            UPDATE invocations
-            SET status = $2,
-                exit_code = $3,
-                error = $4,
-                completed_at = NOW()
-            WHERE invocation_id = $1
-              AND status = 'running'
-              AND claimed_by IS NULL
-            "#,
-        )
-        .bind(invocation_id)
-        .bind(invocation_status_to_db(status))
-        .bind(exit_code)
-        .bind(error.as_deref())
-        .execute(&self.pool)
-        .await?;
         Ok(())
     }
 

@@ -94,9 +94,6 @@ struct InvocationPersistence {
 }
 
 const INVOCATION_STALE_AFTER: Duration = Duration::from_secs(15);
-#[cfg(test)]
-const LOCAL_ONE_SHOT_CLAIM_TIMEOUT: Duration = Duration::from_millis(50);
-#[cfg(not(test))]
 const LOCAL_ONE_SHOT_CLAIM_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl InvocationPersistence {
@@ -164,27 +161,6 @@ impl InvocationManager {
         });
     }
 
-    fn schedule_local_claim_timeout(&self, db: Db, invocation_id: Uuid, worker_queue: String) {
-        tokio::spawn(async move {
-            sleep(LOCAL_ONE_SHOT_CLAIM_TIMEOUT).await;
-            if !worker_queue.starts_with("local-") {
-                return;
-            }
-            if let Ok(status) = db.get_invocation_status(invocation_id).await
-                && matches!(status.status, InvocationLifecycleStatus::Running)
-                && status.claimed_by.is_none()
-            {
-                let _ = db
-                    .complete_invocation_unclaimed(
-                        invocation_id,
-                        InvocationLifecycleStatus::Failed,
-                        1,
-                        Some("local worker did not claim invocation".to_string()),
-                    )
-                    .await;
-            }
-        });
-    }
 }
 
 impl InvocationRuntime {
@@ -597,6 +573,9 @@ async fn invocation_create(
                 .as_ref()
                 .map(|p| p.promote_base_manifest)
                 .unwrap_or(false),
+            claim_deadline_at: worker_queue
+                .starts_with("local-")
+                .then(|| Utc::now() + chrono::Duration::from_std(LOCAL_ONE_SHOT_CLAIM_TIMEOUT).expect("duration")),
         })
         .await?;
     let runtime = state
@@ -616,9 +595,6 @@ async fn invocation_create(
             error: None,
         })
         .await;
-    state
-        .invocations
-        .schedule_local_claim_timeout(state.db.clone(), invocation_id, worker_queue.clone());
     info!(
         invocation_id = %invocation_id,
         execution_mode = ?request.execution_mode,
