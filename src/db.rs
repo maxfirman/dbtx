@@ -2,11 +2,16 @@ use crate::config::read_dbtx_project_id;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
+use crate::api::{
+    InvocationClaimResponse, InvocationExecutionModeApi, InvocationExecutionSpecApi,
+    InvocationLifecycleStatus, InvocationStatusResponse, InvocationWorkerHealthApi,
+};
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
 use crate::profile::{
     EnvironmentProfileRecord, GeneratedProfiles, resolve_runtime_profile,
     validate_environment_profile,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::migrate::Migrator;
@@ -145,6 +150,28 @@ pub(crate) struct RunStart<'a> {
     pub(crate) is_full_graph_run: bool,
     pub(crate) execution_mode: ExecutionMode,
     pub(crate) git_state: &'a GitState,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CreateInvocationInput {
+    pub(crate) invocation_id: Uuid,
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) project_id: i64,
+    pub(crate) environment_id: i64,
+    pub(crate) command: String,
+    pub(crate) execution_mode: InvocationExecutionModeApi,
+    pub(crate) worker_queue: String,
+    pub(crate) execution_spec: Option<InvocationExecutionSpecApi>,
+    pub(crate) promote_base_manifest: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InvocationPersistenceRecord {
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) project_id: i64,
+    pub(crate) environment_id: i64,
+    pub(crate) command: String,
+    pub(crate) promote_base_manifest: bool,
 }
 
 impl Db {
@@ -543,6 +570,309 @@ impl Db {
             .await
     }
 
+    pub(crate) async fn create_invocation(
+        &self,
+        input: CreateInvocationInput,
+    ) -> AppResult<InvocationStatusResponse> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO invocations (
+                invocation_id, run_id, project_id, environment_id, command, execution_mode,
+                worker_queue, status, execution_spec, promote_base_manifest
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', $8, $9)
+            RETURNING invocation_id, execution_mode, worker_queue, status, exit_code, error,
+                started_at, claimed_at, last_heartbeat_at, completed_at, cancel_requested, claimed_by
+            "#,
+        )
+        .bind(input.invocation_id)
+        .bind(input.run_id)
+        .bind(input.project_id)
+        .bind(input.environment_id)
+        .bind(&input.command)
+        .bind(match input.execution_mode {
+            InvocationExecutionModeApi::Server => "server",
+            InvocationExecutionModeApi::Local => "local",
+        })
+        .bind(&input.worker_queue)
+        .bind(input.execution_spec.as_ref().map(sqlx::types::Json))
+        .bind(input.promote_base_manifest)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(invocation_status_from_row(&row))
+    }
+
+    pub(crate) async fn list_invocations(&self) -> AppResult<Vec<InvocationStatusResponse>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
+                started_at, claimed_at, last_heartbeat_at, completed_at, cancel_requested, claimed_by
+            FROM invocations
+            ORDER BY started_at DESC, invocation_id DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(invocation_status_from_row).collect())
+    }
+
+    pub(crate) async fn get_invocation_status(
+        &self,
+        invocation_id: Uuid,
+    ) -> AppResult<InvocationStatusResponse> {
+        let row = sqlx::query(
+            r#"
+            SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
+                started_at, claimed_at, last_heartbeat_at, completed_at, cancel_requested, claimed_by
+            FROM invocations
+            WHERE invocation_id = $1
+            "#,
+        )
+        .bind(invocation_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "invocation not found",
+            ))
+        })?;
+        Ok(invocation_status_from_row(&row))
+    }
+
+    pub(crate) async fn stale_invocation_count(&self) -> AppResult<usize> {
+        Ok(self
+            .list_invocations()
+            .await?
+            .into_iter()
+            .filter(|status| status.worker_health == InvocationWorkerHealthApi::Stale)
+            .count())
+    }
+
+    pub(crate) async fn claim_next_invocation(
+        &self,
+        worker_id: &str,
+        execution_mode: Option<InvocationExecutionModeApi>,
+        worker_queue: Option<&str>,
+        stale_after: std::time::Duration,
+    ) -> AppResult<Option<InvocationClaimResponse>> {
+        let mut tx = self.pool.begin().await?;
+        let stale_at = Utc::now()
+            - chrono::Duration::from_std(stale_after)
+                .unwrap_or_else(|_| chrono::Duration::seconds(15));
+        let row = sqlx::query(
+            r#"
+            WITH next_invocation AS (
+                SELECT invocation_id
+                FROM invocations
+                WHERE status = 'running'
+                  AND execution_spec IS NOT NULL
+                  AND ($1::TEXT IS NULL OR execution_mode = $1)
+                  AND ($2::TEXT IS NULL OR worker_queue = $2)
+                  AND (
+                    claimed_by IS NULL OR COALESCE(last_heartbeat_at, claimed_at, started_at) < $3
+                  )
+                ORDER BY started_at ASC, invocation_id ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE invocations inv
+            SET claimed_by = $4,
+                claimed_at = NOW(),
+                last_heartbeat_at = NOW()
+            FROM next_invocation
+            WHERE inv.invocation_id = next_invocation.invocation_id
+            RETURNING inv.invocation_id, inv.execution_mode, inv.execution_spec
+            "#,
+        )
+        .bind(execution_mode.map(|mode| match mode {
+            InvocationExecutionModeApi::Server => "server",
+            InvocationExecutionModeApi::Local => "local",
+        }))
+        .bind(worker_queue)
+        .bind(stale_at)
+        .bind(worker_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let execution_spec: sqlx::types::Json<InvocationExecutionSpecApi> =
+            row.get("execution_spec");
+        Ok(Some(InvocationClaimResponse {
+            invocation_id: row.get("invocation_id"),
+            worker_id: worker_id.to_string(),
+            execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
+            execution_spec: execution_spec.0,
+        }))
+    }
+
+    pub(crate) async fn heartbeat_invocation(
+        &self,
+        invocation_id: Uuid,
+        worker_id: &str,
+    ) -> AppResult<bool> {
+        let row = sqlx::query(
+            r#"
+            UPDATE invocations
+            SET last_heartbeat_at = NOW()
+            WHERE invocation_id = $1
+              AND claimed_by = $2
+              AND status = 'running'
+            RETURNING cancel_requested
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Err(AppError::Io(std::io::Error::other(
+                "invocation is owned by a different worker or is not running",
+            )));
+        };
+        Ok(row.get("cancel_requested"))
+    }
+
+    pub(crate) async fn request_cancel_invocation(&self, invocation_id: Uuid) -> AppResult<()> {
+        let updated = sqlx::query(
+            "UPDATE invocations SET cancel_requested = TRUE WHERE invocation_id = $1",
+        )
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "invocation not found",
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn get_invocation_persistence(
+        &self,
+        invocation_id: Uuid,
+        worker_id: Option<&str>,
+    ) -> AppResult<InvocationPersistenceRecord> {
+        let row = sqlx::query(
+            r#"
+            SELECT run_id, project_id, environment_id, command, promote_base_manifest
+            FROM invocations
+            WHERE invocation_id = $1
+              AND ($2::TEXT IS NULL OR claimed_by = $2)
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "invocation not found",
+            ))
+        })?;
+        Ok(InvocationPersistenceRecord {
+            run_id: row.get("run_id"),
+            project_id: row.get("project_id"),
+            environment_id: row.get("environment_id"),
+            command: row.get("command"),
+            promote_base_manifest: row.get("promote_base_manifest"),
+        })
+    }
+
+    pub(crate) async fn complete_invocation(
+        &self,
+        invocation_id: Uuid,
+        worker_id: &str,
+        completion: &crate::execution::ExecutionCompletion,
+    ) -> AppResult<()> {
+        let persistence = self
+            .get_invocation_persistence(invocation_id, Some(worker_id))
+            .await?;
+        let mut tx = self.pool.begin().await?;
+
+        if let Some(run_id) = persistence.run_id {
+            let manifest = completion.manifest.clone().map(ManifestSnapshot::from_raw);
+            self.finalize_run_in_tx(
+                &mut tx,
+                RunFinalization {
+                    run_id,
+                    project_id: persistence.project_id,
+                    environment_id: persistence.environment_id,
+                    subcommand: &persistence.command,
+                    dbt_version: completion.dbt_version.as_deref(),
+                    exit_code: completion.exit_code,
+                    terminal_status: match completion.status {
+                        InvocationLifecycleStatus::Succeeded => "success",
+                        InvocationLifecycleStatus::Canceled => "canceled",
+                        InvocationLifecycleStatus::Failed => "failed",
+                        InvocationLifecycleStatus::Running => "running",
+                    },
+                    manifest: manifest.as_ref(),
+                    promote_base_manifest: persistence.promote_base_manifest
+                        && matches!(completion.status, InvocationLifecycleStatus::Succeeded),
+                },
+            )
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE invocations
+            SET status = $3,
+                exit_code = $4,
+                error = $5,
+                completed_at = NOW(),
+                claimed_by = NULL,
+                claimed_at = NULL,
+                last_heartbeat_at = NULL
+            WHERE invocation_id = $1
+              AND claimed_by = $2
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(worker_id)
+        .bind(invocation_status_to_db(completion.status.clone()))
+        .bind(completion.exit_code)
+        .bind(completion.error.as_deref())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn complete_invocation_unclaimed(
+        &self,
+        invocation_id: Uuid,
+        status: InvocationLifecycleStatus,
+        exit_code: i32,
+        error: Option<String>,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE invocations
+            SET status = $2,
+                exit_code = $3,
+                error = $4,
+                completed_at = NOW()
+            WHERE invocation_id = $1
+              AND status = 'running'
+              AND claimed_by IS NULL
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(invocation_status_to_db(status))
+        .bind(exit_code)
+        .bind(error.as_deref())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn insert_run_started(&self, run: RunStart<'_>) -> AppResult<()> {
         sqlx::query(
             r#"
@@ -700,8 +1030,18 @@ impl Db {
 
     pub(crate) async fn finalize_run(&self, finalization: RunFinalization<'_>) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
+        self.finalize_run_in_tx(&mut tx, finalization).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn finalize_run_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        finalization: RunFinalization<'_>,
+    ) -> AppResult<()> {
         self.mark_run_finished_in_tx(
-            &mut tx,
+            tx,
             finalization.run_id,
             finalization.dbt_version,
             finalization.exit_code,
@@ -710,11 +1050,11 @@ impl Db {
         .await?;
 
         if let Some(manifest) = finalization.manifest {
-            self.persist_manifest_in_tx(&mut tx, finalization.run_id, manifest)
+            self.persist_manifest_in_tx(tx, finalization.run_id, manifest)
                 .await?;
             if should_promote_manifest(finalization.subcommand) {
                 self.promote_manifest_state_in_tx(
-                    &mut tx,
+                    tx,
                     finalization.run_id,
                     finalization.project_id,
                     finalization.environment_id,
@@ -725,13 +1065,12 @@ impl Db {
         }
 
         self.rebuild_current_state_up_to_in_tx(
-            &mut tx,
+            tx,
             finalization.project_id,
             finalization.environment_id,
             None,
         )
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 
@@ -1600,6 +1939,76 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         profile_config: profile_config.0,
         profile_secrets: profile_secrets.0,
         metadata: metadata.0,
+    }
+}
+
+fn invocation_status_from_row(row: &sqlx::postgres::PgRow) -> InvocationStatusResponse {
+    let mut status = InvocationStatusResponse {
+        invocation_id: row.get("invocation_id"),
+        execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
+        worker_queue: row.get("worker_queue"),
+        worker_health: InvocationWorkerHealthApi::Unclaimed,
+        status: invocation_status_from_db(&row.get::<String, _>("status")),
+        exit_code: row.get("exit_code"),
+        error: row.get("error"),
+        started_at: row.get("started_at"),
+        claimed_at: row.get("claimed_at"),
+        last_heartbeat_at: row.get("last_heartbeat_at"),
+        completed_at: row.get("completed_at"),
+        cancel_requested: row.get("cancel_requested"),
+        claimed_by: row.get("claimed_by"),
+    };
+    status.worker_health = compute_worker_health(&status);
+    status
+}
+
+fn execution_mode_from_db(value: &str) -> InvocationExecutionModeApi {
+    match value {
+        "local" => InvocationExecutionModeApi::Local,
+        _ => InvocationExecutionModeApi::Server,
+    }
+}
+
+fn invocation_status_from_db(value: &str) -> InvocationLifecycleStatus {
+    match value {
+        "succeeded" => InvocationLifecycleStatus::Succeeded,
+        "failed" => InvocationLifecycleStatus::Failed,
+        "canceled" => InvocationLifecycleStatus::Canceled,
+        _ => InvocationLifecycleStatus::Running,
+    }
+}
+
+fn invocation_status_to_db(status: InvocationLifecycleStatus) -> &'static str {
+    match status {
+        InvocationLifecycleStatus::Running => "running",
+        InvocationLifecycleStatus::Succeeded => "succeeded",
+        InvocationLifecycleStatus::Failed => "failed",
+        InvocationLifecycleStatus::Canceled => "canceled",
+    }
+}
+
+fn compute_worker_health(status: &InvocationStatusResponse) -> InvocationWorkerHealthApi {
+    if !matches!(status.status, InvocationLifecycleStatus::Running) {
+        return InvocationWorkerHealthApi::Completed;
+    }
+    match (
+        status.claimed_at,
+        status.last_heartbeat_at.as_ref(),
+        status.claimed_by.as_ref(),
+    ) {
+        (_, _, None) => InvocationWorkerHealthApi::Unclaimed,
+        (_, Some(last_heartbeat), Some(_))
+            if Utc::now() - *last_heartbeat
+                > chrono::Duration::seconds(15) =>
+        {
+            InvocationWorkerHealthApi::Stale
+        }
+        (Some(claimed_at), None, Some(_))
+            if Utc::now() - claimed_at > chrono::Duration::seconds(15) =>
+        {
+            InvocationWorkerHealthApi::Stale
+        }
+        (_, _, Some(_)) => InvocationWorkerHealthApi::Claimed,
     }
 }
 

@@ -194,6 +194,7 @@ pub enum InvocationLifecycleStatus {
     Running,
     Succeeded,
     Failed,
+    Canceled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

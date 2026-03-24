@@ -1,21 +1,19 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
     EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
-    InvocationClaimResponse, InvocationCommandApi,
-    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
-    InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionSpecApi,
-    InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
-    InvocationStatusResponse, InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse,
+    InvocationCommandApi, InvocationCompleteApiRequest, InvocationCreateApiRequest,
+    InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
+    InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
+    InvocationLifecycleStatus, InvocationStatusResponse, InvocationsResponse, MigrateResponse,
     ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest,
     ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
-use crate::db::Db;
+use crate::db::{CreateInvocationInput, Db, InvocationPersistenceRecord};
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
 use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
-use crate::manifest::ManifestSnapshot;
 use crate::services::{
     EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
     InvocationRequest, InvocationService, ProjectInitRequest, ProjectService, ProjectUpdateRequest,
@@ -75,35 +73,24 @@ struct InvocationHistory {
 }
 
 struct InvocationRuntime {
-    status: Mutex<InvocationStatusResponse>,
     history: Mutex<InvocationHistory>,
     tx: broadcast::Sender<SequencedInvocationEvent>,
-    persistence: Option<InvocationPersistence>,
-    execution_mode: crate::api::InvocationExecutionModeApi,
-    worker_queue: String,
-    execution_spec: Mutex<Option<InvocationExecutionSpecApi>>,
-    lease: Mutex<Option<InvocationLease>>,
+    persistence: Mutex<Option<InvocationPersistence>>,
 }
 
 #[derive(Clone)]
 struct InvocationRecorder {
+    db: Db,
+    invocation_id: Uuid,
     runtime: Arc<InvocationRuntime>,
 }
 
 #[derive(Clone)]
 struct InvocationPersistence {
-    db: Db,
     run_id: Uuid,
     project_id: i64,
     environment_id: i64,
-    subcommand: String,
     promote_base_manifest: bool,
-}
-
-#[derive(Debug, Clone)]
-struct InvocationLease {
-    worker_id: String,
-    claimed_at: chrono::DateTime<Utc>,
 }
 
 const INVOCATION_STALE_AFTER: Duration = Duration::from_secs(15);
@@ -112,116 +99,61 @@ const LOCAL_ONE_SHOT_CLAIM_TIMEOUT: Duration = Duration::from_millis(50);
 #[cfg(not(test))]
 const LOCAL_ONE_SHOT_CLAIM_TIMEOUT: Duration = Duration::from_secs(10);
 
+impl InvocationPersistence {
+    fn from_record(record: InvocationPersistenceRecord) -> Option<Self> {
+        Some(Self {
+            run_id: record.run_id?,
+            project_id: record.project_id,
+            environment_id: record.environment_id,
+            promote_base_manifest: record.promote_base_manifest,
+        })
+    }
+
+    async fn persist_log_event(
+        &self,
+        db: &Db,
+        run_id: Uuid,
+        project_id: i64,
+        environment_id: i64,
+        sequence: i64,
+        log_event: &LogEvent,
+    ) -> AppResult<()> {
+        db.persist_log_event(run_id, project_id, environment_id, sequence, log_event)
+            .await
+    }
+
+    async fn persist_raw_line(
+        &self,
+        db: &Db,
+        run_id: Uuid,
+        sequence: i64,
+        raw_line: &str,
+    ) -> AppResult<()> {
+        db.persist_raw_line(run_id, sequence, raw_line).await
+    }
+}
+
 impl InvocationManager {
-    async fn create(
+    async fn get_or_create(
         &self,
         invocation_id: Uuid,
         persistence: Option<InvocationPersistence>,
-        execution_mode: crate::api::InvocationExecutionModeApi,
-        worker_queue: String,
-        execution_spec: Option<InvocationExecutionSpecApi>,
-    ) -> (Uuid, Arc<InvocationRuntime>) {
-        let status = InvocationStatusResponse {
-            invocation_id,
-            execution_mode,
-            worker_queue: worker_queue.clone(),
-            worker_health: InvocationWorkerHealthApi::Unclaimed,
-            status: InvocationLifecycleStatus::Running,
-            exit_code: None,
-            error: None,
-            started_at: Utc::now(),
-            claimed_at: None,
-            last_heartbeat_at: None,
-            completed_at: None,
-            cancel_requested: false,
-            claimed_by: None,
-        };
+    ) -> Arc<InvocationRuntime> {
+        let mut guard = self.inner.lock().await;
+        if let Some(runtime) = guard.get(&invocation_id) {
+            if persistence.is_some() {
+                *runtime.persistence.lock().await = persistence;
+            }
+            return runtime.clone();
+        }
         let (tx, _) = broadcast::channel(1024);
         let runtime = Arc::new(InvocationRuntime {
-            status: Mutex::new(status),
             history: Mutex::new(InvocationHistory::default()),
             tx,
-            persistence,
-            execution_mode,
-            worker_queue,
-            execution_spec: Mutex::new(execution_spec),
-            lease: Mutex::new(None),
+            persistence: Mutex::new(persistence),
         });
-        self.inner
-            .lock()
-            .await
-            .insert(invocation_id, runtime.clone());
-        (invocation_id, runtime)
-    }
-
-    async fn get(&self, invocation_id: Uuid) -> Option<Arc<InvocationRuntime>> {
-        self.inner.lock().await.get(&invocation_id).cloned()
-    }
-
-    async fn list(&self) -> Vec<InvocationStatusResponse> {
-        let runtimes = self
-            .inner
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut statuses = Vec::with_capacity(runtimes.len());
-        for runtime in runtimes {
-            statuses.push(runtime.status().await);
-        }
-        statuses.sort_by_key(|status| std::cmp::Reverse(status.started_at));
-        statuses
-    }
-
-    async fn stale_count(&self) -> usize {
-        self.list()
-            .await
-            .into_iter()
-            .filter(|status| status.worker_health == InvocationWorkerHealthApi::Stale)
-            .count()
-    }
-
-    async fn claim_next(
-        &self,
-        worker_id: &str,
-        execution_mode: Option<crate::api::InvocationExecutionModeApi>,
-        worker_queue: Option<&str>,
-    ) -> AppResult<Option<InvocationClaimResponse>> {
-        let runtimes = self
-            .inner
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for runtime in runtimes {
-            if !matches!(
-                runtime.status().await.status,
-                InvocationLifecycleStatus::Running
-            ) {
-                continue;
-            }
-            if let Some(mode) = execution_mode
-                && runtime.execution_mode != mode
-            {
-                continue;
-            }
-            if let Some(queue) = worker_queue
-                && runtime.worker_queue != queue
-            {
-                continue;
-            }
-            if runtime.execution_spec.lock().await.is_none() {
-                continue;
-            }
-            let invocation_id = runtime.status().await.invocation_id;
-            if !runtime.can_be_claimed().await {
-                continue;
-            }
-            return runtime.claim_execution(invocation_id, worker_id).await.map(Some);
-        }
-        Ok(None)
+        guard.insert(invocation_id, runtime.clone());
+        runtime
     }
 
     fn schedule_cleanup(&self, invocation_id: Uuid) {
@@ -232,27 +164,23 @@ impl InvocationManager {
         });
     }
 
-    fn schedule_local_claim_timeout(&self, runtime: Arc<InvocationRuntime>) {
+    fn schedule_local_claim_timeout(&self, db: Db, invocation_id: Uuid, worker_queue: String) {
         tokio::spawn(async move {
             sleep(LOCAL_ONE_SHOT_CLAIM_TIMEOUT).await;
-            if runtime.worker_queue.starts_with("local-")
-                && matches!(
-                    runtime.status().await.status,
-                    InvocationLifecycleStatus::Running
-                )
-                && runtime.lease.lock().await.is_none()
+            if !worker_queue.starts_with("local-") {
+                return;
+            }
+            if let Ok(status) = db.get_invocation_status(invocation_id).await
+                && matches!(status.status, InvocationLifecycleStatus::Running)
+                && status.claimed_by.is_none()
             {
-                let recorder = InvocationRecorder {
-                    runtime: runtime.clone(),
-                };
-                let _ = recorder
-                    .complete(ExecutionCompletion {
-                        status: InvocationLifecycleStatus::Failed,
-                        exit_code: 1,
-                        error: Some("local worker did not claim invocation".to_string()),
-                        dbt_version: None,
-                        manifest: None,
-                    })
+                let _ = db
+                    .complete_invocation_unclaimed(
+                        invocation_id,
+                        InvocationLifecycleStatus::Failed,
+                        1,
+                        Some("local worker did not claim invocation".to_string()),
+                    )
                     .await;
             }
         });
@@ -260,17 +188,6 @@ impl InvocationManager {
 }
 
 impl InvocationRuntime {
-    async fn can_be_claimed(&self) -> bool {
-        if self.execution_spec.lock().await.is_none() {
-            return false;
-        }
-        let lease = self.lease.lock().await;
-        match lease.as_ref() {
-            None => true,
-            Some(lease) => Utc::now() - lease.claimed_at > chrono::Duration::from_std(INVOCATION_STALE_AFTER).unwrap_or_else(|_| chrono::Duration::seconds(15)),
-        }
-    }
-
     async fn push_event(&self, event: InvocationEvent) -> u64 {
         let sequenced = {
             let mut history = self.history.lock().await;
@@ -285,126 +202,6 @@ impl InvocationRuntime {
         let sequence = sequenced.sequence;
         let _ = self.tx.send(sequenced);
         sequence
-    }
-
-    async fn status(&self) -> InvocationStatusResponse {
-        let mut status = self.status.lock().await.clone();
-        status.worker_health = self.worker_health(&status);
-        status
-    }
-
-    async fn finish(
-        &self,
-        status: InvocationLifecycleStatus,
-        exit_code: i32,
-        error: Option<String>,
-    ) {
-        let mut current = self.status.lock().await;
-        current.status = status;
-        current.exit_code = Some(exit_code);
-        current.error = error.clone();
-        current.completed_at = Some(Utc::now());
-        let completed = InvocationEvent {
-            event_type: "invocation.completed".to_string(),
-            timestamp: Utc::now(),
-            text: None,
-            stream: None,
-            dbt_event_name: None,
-            node_unique_id: None,
-            level: None,
-            exit_code: Some(exit_code),
-            error,
-        };
-        drop(current);
-        *self.lease.lock().await = None;
-        let _ = self.push_event(completed).await;
-    }
-
-    async fn heartbeat(&self, worker_id: &str) -> AppResult<bool> {
-        self.ensure_owned_by(worker_id).await?;
-        let mut current = self.status.lock().await;
-        current.last_heartbeat_at = Some(Utc::now());
-        Ok(current.cancel_requested)
-    }
-
-    async fn request_cancel(&self) {
-        let mut current = self.status.lock().await;
-        current.cancel_requested = true;
-    }
-
-    async fn claim_execution(
-        &self,
-        invocation_id: Uuid,
-        worker_id: &str,
-    ) -> AppResult<InvocationClaimResponse> {
-        let mut lease = self.lease.lock().await;
-        if let Some(existing) = lease.as_ref()
-            && Utc::now() - existing.claimed_at
-                <= chrono::Duration::from_std(INVOCATION_STALE_AFTER)
-                    .unwrap_or_else(|_| chrono::Duration::seconds(15))
-        {
-            return Err(AppError::InvocationAlreadyClaimed(
-                invocation_id.to_string(),
-            ));
-        }
-        let spec = self
-            .execution_spec
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| AppError::InvocationNotClaimable(invocation_id.to_string()))?;
-        *lease = Some(InvocationLease {
-            worker_id: worker_id.to_string(),
-            claimed_at: Utc::now(),
-        });
-        let mut status = self.status.lock().await;
-        status.claimed_by = Some(worker_id.to_string());
-        status.claimed_at = lease.as_ref().map(|value| value.claimed_at);
-        status.worker_health = InvocationWorkerHealthApi::Claimed;
-        drop(status);
-        Ok(InvocationClaimResponse {
-            invocation_id,
-            worker_id: worker_id.to_string(),
-            execution_mode: self.execution_mode,
-            execution_spec: spec,
-        })
-    }
-
-    async fn ensure_owned_by(&self, worker_id: &str) -> AppResult<()> {
-        let lease = self.lease.lock().await;
-        match lease.as_ref() {
-            Some(lease) if lease.worker_id == worker_id => Ok(()),
-            Some(_) => Err(AppError::Io(std::io::Error::other(
-                "invocation is owned by a different worker",
-            ))),
-            None => Err(AppError::Io(std::io::Error::other(
-                "invocation has not been claimed",
-            ))),
-        }
-    }
-
-    fn worker_health(&self, status: &InvocationStatusResponse) -> InvocationWorkerHealthApi {
-        if !matches!(status.status, InvocationLifecycleStatus::Running) {
-            return InvocationWorkerHealthApi::Completed;
-        }
-        match (status.claimed_at, status.last_heartbeat_at.as_ref(), status.claimed_by.as_ref()) {
-            (_, _, None) => InvocationWorkerHealthApi::Unclaimed,
-            (_, Some(last_heartbeat), Some(_))
-                if Utc::now() - *last_heartbeat
-                    > chrono::Duration::from_std(INVOCATION_STALE_AFTER)
-                        .unwrap_or_else(|_| chrono::Duration::seconds(15)) =>
-            {
-                InvocationWorkerHealthApi::Stale
-            }
-            (Some(claimed_at), None, Some(_))
-                if Utc::now() - claimed_at
-                    > chrono::Duration::from_std(INVOCATION_STALE_AFTER)
-                        .unwrap_or_else(|_| chrono::Duration::seconds(15)) =>
-            {
-                InvocationWorkerHealthApi::Stale
-            }
-            (_, _, Some(_)) => InvocationWorkerHealthApi::Claimed,
-        }
     }
 }
 
@@ -431,15 +228,15 @@ impl InvocationRecorder {
             error: event.error.clone(),
         };
         let sequence = self.runtime.push_event(sse_event).await as i64;
-        if let Some(persistence) = self.runtime.persistence.as_ref() {
+        if let Some(persistence) = self.persistence().await? {
             match event.kind {
                 ExecutionEventKind::DbtLog => {
                     if let Some(raw_line) = event.raw_line.as_deref()
                         && let Some(log_event) = LogEvent::parse(raw_line)
                     {
                         persistence
-                            .db
                             .persist_log_event(
+                                &self.db,
                                 persistence.run_id,
                                 persistence.project_id,
                                 persistence.environment_id,
@@ -452,8 +249,7 @@ impl InvocationRecorder {
                 ExecutionEventKind::StdoutLine => {
                     if let Some(raw_line) = event.raw_line.as_deref().or(event.text.as_deref()) {
                         persistence
-                            .db
-                            .persist_raw_line(persistence.run_id, sequence, raw_line)
+                            .persist_raw_line(&self.db, persistence.run_id, sequence, raw_line)
                             .await?;
                     }
                 }
@@ -463,43 +259,47 @@ impl InvocationRecorder {
         Ok(())
     }
 
-    async fn complete(&self, completion: ExecutionCompletion) -> AppResult<()> {
-        if let Some(persistence) = self.runtime.persistence.as_ref() {
-            let manifest = completion.manifest.clone().map(ManifestSnapshot::from_raw);
-            persistence
-                .db
-                .finalize_run(crate::db::RunFinalization {
-                    run_id: persistence.run_id,
-                    project_id: persistence.project_id,
-                    environment_id: persistence.environment_id,
-                    subcommand: &persistence.subcommand,
-                    dbt_version: completion.dbt_version.as_deref(),
-                    exit_code: completion.exit_code,
-                    terminal_status: if matches!(
-                        completion.status,
-                        InvocationLifecycleStatus::Succeeded
-                    ) {
-                        "success"
-                    } else {
-                        "failed"
-                    },
-                    manifest: manifest.as_ref(),
-                    promote_base_manifest: persistence.promote_base_manifest
-                        && matches!(completion.status, InvocationLifecycleStatus::Succeeded),
-                })
-                .await?;
-        }
-        self.runtime
-            .finish(completion.status, completion.exit_code, completion.error)
+    async fn complete(&self, worker_id: &str, completion: ExecutionCompletion) -> AppResult<()> {
+        self.db
+            .complete_invocation(self.invocation_id, worker_id, &completion)
+            .await?;
+        let _ = self
+            .runtime
+            .push_event(InvocationEvent {
+                event_type: "invocation.completed".to_string(),
+                timestamp: Utc::now(),
+                text: None,
+                stream: None,
+                dbt_event_name: None,
+                node_unique_id: None,
+                level: None,
+                exit_code: Some(completion.exit_code),
+                error: completion.error.clone(),
+            })
             .await;
         Ok(())
     }
 
     async fn is_running(&self) -> bool {
         matches!(
-            self.runtime.status().await.status,
-            InvocationLifecycleStatus::Running
+            self.db.get_invocation_status(self.invocation_id).await,
+            Ok(InvocationStatusResponse {
+                status: InvocationLifecycleStatus::Running,
+                ..
+            })
         )
+    }
+
+    async fn persistence(&self) -> AppResult<Option<InvocationPersistence>> {
+        let mut guard = self.runtime.persistence.lock().await;
+        if guard.is_none() {
+            let loaded = self
+                .db
+                .get_invocation_persistence(self.invocation_id, None)
+                .await?;
+            *guard = InvocationPersistence::from_record(loaded);
+        }
+        Ok(guard.clone())
     }
 }
 
@@ -553,7 +353,7 @@ pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
         ))
     })?;
     info!(listen = %addr, "starting dbtx daemon");
-    let reclaimable_stale_invocations = state.invocations.stale_count().await;
+    let reclaimable_stale_invocations = state.db.stale_invocation_count().await.unwrap_or(0);
     info!(
         listen = %addr,
         reclaimable_stale_invocations,
@@ -772,25 +572,36 @@ async fn invocation_create(
         profiles_yml: prepared.spec.profiles_yml,
         state_manifest: prepared.spec.state_manifest,
     };
-    let (invocation_id, runtime) = state
+    let worker_queue = request
+        .worker_queue
+        .clone()
+        .unwrap_or_else(|| prepared.worker_queue.clone());
+    let persistence = prepared.persistence.map(|p| InvocationPersistence {
+        run_id: p.run_id,
+        project_id: p.project_id,
+        environment_id: p.environment_id,
+        promote_base_manifest: p.promote_base_manifest,
+    });
+    state
+        .db
+        .create_invocation(CreateInvocationInput {
+            invocation_id,
+            run_id: persistence.as_ref().map(|p| p.run_id),
+            project_id: prepared.project_id,
+            environment_id: prepared.environment_id,
+            command: map_invocation_command(request.command).as_str().to_string(),
+            execution_mode: request.execution_mode,
+            worker_queue: worker_queue.clone(),
+            execution_spec: Some(execution_spec),
+            promote_base_manifest: persistence
+                .as_ref()
+                .map(|p| p.promote_base_manifest)
+                .unwrap_or(false),
+        })
+        .await?;
+    let runtime = state
         .invocations
-            .create(
-                invocation_id,
-                prepared.persistence.map(|p| InvocationPersistence {
-                db: db.clone(),
-                run_id: p.run_id,
-                project_id: p.project_id,
-                environment_id: p.environment_id,
-                subcommand: p.subcommand,
-                promote_base_manifest: p.promote_base_manifest,
-                }),
-                request.execution_mode,
-                request
-                    .worker_queue
-                    .clone()
-                    .unwrap_or_else(|| prepared.worker_queue.clone()),
-                Some(execution_spec),
-            )
+        .get_or_create(invocation_id, persistence)
         .await;
     let _ = runtime
         .push_event(InvocationEvent {
@@ -805,7 +616,9 @@ async fn invocation_create(
             error: None,
         })
         .await;
-    state.invocations.schedule_local_claim_timeout(runtime.clone());
+    state
+        .invocations
+        .schedule_local_claim_timeout(state.db.clone(), invocation_id, worker_queue.clone());
     info!(
         invocation_id = %invocation_id,
         execution_mode = ?request.execution_mode,
@@ -814,7 +627,7 @@ async fn invocation_create(
     Ok(Json(InvocationCreateResponse {
         invocation_id,
         execution_mode: request.execution_mode,
-        worker_queue: runtime.worker_queue.clone(),
+        worker_queue,
     }))
 }
 
@@ -823,16 +636,18 @@ async fn invocation_claim_next(
     Json(request): Json<InvocationClaimNextApiRequest>,
 ) -> Result<Response, ApiError> {
     let Some(claimed) = state
-        .invocations
-        .claim_next(
+        .db
+        .claim_next_invocation(
             &request.worker_id,
             request.execution_mode,
             request.worker_queue.as_deref(),
+            INVOCATION_STALE_AFTER,
         )
         .await?
     else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
+    state.invocations.get_or_create(claimed.invocation_id, None).await;
     info!(invocation_id = %claimed.invocation_id, "claimed next invocation execution");
     Ok(Json(claimed).into_response())
 }
@@ -842,13 +657,7 @@ async fn invocation_heartbeat(
     Path(id): Path<Uuid>,
     Json(request): Json<InvocationHeartbeatApiRequest>,
 ) -> Result<Json<InvocationHeartbeatResponse>, ApiError> {
-    let runtime = state.invocations.get(id).await.ok_or_else(|| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "invocation not found",
-        ))
-    })?;
-    let cancel_requested = runtime.heartbeat(&request.worker_id).await?;
+    let cancel_requested = state.db.heartbeat_invocation(id, &request.worker_id).await?;
     Ok(Json(InvocationHeartbeatResponse { cancel_requested }))
 }
 
@@ -857,13 +666,7 @@ async fn invocation_cancel(
     Path(id): Path<Uuid>,
     Json(_request): Json<InvocationCancelApiRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let runtime = state.invocations.get(id).await.ok_or_else(|| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "invocation not found",
-        ))
-    })?;
-    runtime.request_cancel().await;
+    state.db.request_cancel_invocation(id).await?;
     info!(invocation_id = %id, "requested invocation cancel");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -872,18 +675,12 @@ async fn invocation_status(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<InvocationStatusResponse>, ApiError> {
-    let runtime = state.invocations.get(id).await.ok_or_else(|| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "invocation not found",
-        ))
-    })?;
     info!(invocation_id = %id, "loaded invocation status");
-    Ok(Json(runtime.status().await))
+    Ok(Json(state.db.get_invocation_status(id).await?))
 }
 
 async fn invocation_list(State(state): State<AppState>) -> Result<Json<InvocationsResponse>, ApiError> {
-    let invocations = state.invocations.list().await;
+    let invocations = state.db.list_invocations().await?;
     info!(count = invocations.len(), "listed invocations");
     Ok(Json(InvocationsResponse { invocations }))
 }
@@ -893,19 +690,21 @@ async fn invocation_append_events(
     Path(id): Path<Uuid>,
     Json(request): Json<InvocationEventBatchApiRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let runtime = state.invocations.get(id).await.ok_or_else(|| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "invocation not found",
-        ))
-    })?;
-    let recorder = InvocationRecorder { runtime };
+    let runtime = state.invocations.get_or_create(id, None).await;
+    let recorder = InvocationRecorder {
+        db: state.db.clone(),
+        invocation_id: id,
+        runtime,
+    };
     if !recorder.is_running().await {
         return Err(ApiError(AppError::Io(std::io::Error::other(
             "invocation is already completed",
         ))));
     }
-    recorder.runtime.ensure_owned_by(&request.worker_id).await?;
+    state
+        .db
+        .get_invocation_persistence(id, Some(&request.worker_id))
+        .await?;
     for event in request.events {
         recorder.record(event).await?;
     }
@@ -918,15 +717,17 @@ async fn invocation_complete(
     Path(id): Path<Uuid>,
     Json(request): Json<InvocationCompleteApiRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let runtime = state.invocations.get(id).await.ok_or_else(|| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "invocation not found",
-        ))
-    })?;
-    let recorder = InvocationRecorder { runtime };
-    recorder.runtime.ensure_owned_by(&request.worker_id).await?;
-    recorder.complete(request.completion).await?;
+    let runtime = state.invocations.get_or_create(id, None).await;
+    let recorder = InvocationRecorder {
+        db: state.db.clone(),
+        invocation_id: id,
+        runtime,
+    };
+    state
+        .db
+        .get_invocation_persistence(id, Some(&request.worker_id))
+        .await?;
+    recorder.complete(&request.worker_id, request.completion).await?;
     state.invocations.schedule_cleanup(id);
     info!(invocation_id = %id, "completed invocation via api");
     Ok(StatusCode::NO_CONTENT)
@@ -936,12 +737,7 @@ async fn invocation_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let runtime = state.invocations.get(id).await.ok_or_else(|| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "invocation not found",
-        ))
-    })?;
+    let runtime = state.invocations.get_or_create(id, None).await;
     let rx = runtime.tx.subscribe();
     let history = runtime.history.lock().await;
     let buffered_events = history.items.len();
@@ -1030,21 +826,10 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        INVOCATION_STALE_AFTER, LOCAL_ONE_SHOT_CLAIM_TIMEOUT, InvocationEvent,
-        InvocationExecutionSpecApi, InvocationManager, InvocationRecorder,
-        SequencedInvocationEvent,
-        event_stream,
-    };
-    use crate::api::{
-        InvocationCommandApi, InvocationExecutionModeApi, InvocationLifecycleStatus,
-    };
-    use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
+    use super::{InvocationEvent, SequencedInvocationEvent, event_stream};
     use chrono::Utc;
     use futures_util::StreamExt;
     use tokio::sync::broadcast;
-    use tokio::time::Duration;
-    use uuid::Uuid;
 
     fn sample_event(text: &str) -> InvocationEvent {
         InvocationEvent {
@@ -1110,274 +895,5 @@ mod tests {
         .expect("send next live event");
 
         let _second = stream.next().await.expect("live item").expect("event");
-    }
-
-    #[tokio::test]
-    async fn recorder_appends_execution_events_into_runtime_history() {
-        let manager = InvocationManager::default();
-        let (_id, runtime) = manager
-            .create(
-                Uuid::new_v4(),
-                None,
-                crate::api::InvocationExecutionModeApi::Server,
-                "generic".to_string(),
-                None,
-            )
-            .await;
-        let recorder = InvocationRecorder {
-            runtime: runtime.clone(),
-        };
-
-        recorder
-            .record(ExecutionEvent {
-                kind: ExecutionEventKind::StdoutLine,
-                occurred_at: Utc::now(),
-                text: Some("hello".to_string()),
-                raw_line: None,
-                dbt_event_name: None,
-                node_unique_id: None,
-                level: None,
-                error: None,
-            })
-            .await
-            .expect("record event");
-
-        let history = runtime.history.lock().await;
-        assert_eq!(history.items.len(), 1);
-        assert_eq!(history.items[0].event.event_type, "stdout.line");
-        assert_eq!(history.items[0].event.text.as_deref(), Some("hello"));
-    }
-
-    #[tokio::test]
-    async fn recorder_marks_invocation_complete() {
-        let manager = InvocationManager::default();
-        let (_id, runtime) = manager
-            .create(
-                Uuid::new_v4(),
-                None,
-                crate::api::InvocationExecutionModeApi::Server,
-                "generic".to_string(),
-                None,
-            )
-            .await;
-        let recorder = InvocationRecorder { runtime };
-
-        recorder
-            .complete(ExecutionCompletion {
-                status: crate::api::InvocationLifecycleStatus::Succeeded,
-                exit_code: 0,
-                error: None,
-                dbt_version: None,
-                manifest: None,
-            })
-            .await
-            .expect("complete invocation");
-
-        let status = recorder.runtime.status().await;
-        assert!(matches!(
-            status.status,
-            crate::api::InvocationLifecycleStatus::Succeeded
-        ));
-        assert_eq!(status.exit_code, Some(0));
-        assert!(status.completed_at.is_some());
-    }
-
-    #[tokio::test]
-    async fn recorder_rejects_appends_after_completion() {
-        let manager = InvocationManager::default();
-        let (_id, runtime) = manager
-            .create(
-                Uuid::new_v4(),
-                None,
-                crate::api::InvocationExecutionModeApi::Server,
-                "generic".to_string(),
-                None,
-            )
-            .await;
-        let recorder = InvocationRecorder {
-            runtime: runtime.clone(),
-        };
-
-        assert!(recorder.is_running().await);
-
-        recorder
-            .complete(ExecutionCompletion {
-                status: crate::api::InvocationLifecycleStatus::Succeeded,
-                exit_code: 0,
-                error: None,
-                dbt_version: None,
-                manifest: None,
-            })
-            .await
-            .expect("complete invocation");
-
-        assert!(!recorder.is_running().await);
-    }
-
-    #[tokio::test]
-    async fn uploaded_events_are_visible_via_sse_history() {
-        let manager = InvocationManager::default();
-        let (_id, runtime) = manager
-            .create(
-                Uuid::new_v4(),
-                None,
-                crate::api::InvocationExecutionModeApi::Server,
-                "generic".to_string(),
-                None,
-            )
-            .await;
-        let recorder = InvocationRecorder {
-            runtime: runtime.clone(),
-        };
-
-        recorder
-            .record(ExecutionEvent {
-                kind: ExecutionEventKind::StdoutLine,
-                occurred_at: Utc::now(),
-                text: Some("one".to_string()),
-                raw_line: None,
-                dbt_event_name: None,
-                node_unique_id: None,
-                level: None,
-                error: None,
-            })
-            .await
-            .expect("record event");
-        recorder
-            .record(ExecutionEvent {
-                kind: ExecutionEventKind::StdoutLine,
-                occurred_at: Utc::now(),
-                text: Some("two".to_string()),
-                raw_line: None,
-                dbt_event_name: None,
-                node_unique_id: None,
-                level: None,
-                error: None,
-            })
-            .await
-            .expect("record event");
-
-        let history = runtime.history.lock().await;
-        assert_eq!(history.items.len(), 2);
-        assert_eq!(history.items[0].event.text.as_deref(), Some("one"));
-        assert_eq!(history.items[1].event.text.as_deref(), Some("two"));
-    }
-
-    #[tokio::test]
-    async fn stale_claim_can_be_reclaimed_by_another_worker() {
-        let manager = InvocationManager::default();
-        let (invocation_id, runtime) = manager
-            .create(
-                Uuid::new_v4(),
-                None,
-                InvocationExecutionModeApi::Server,
-                "generic".to_string(),
-                Some(InvocationExecutionSpecApi {
-                    command: InvocationCommandApi::Run,
-                    args: vec![],
-                    project_dir: ".".to_string(),
-                    profiles_yml: "profiles".to_string(),
-                    state_manifest: None,
-                }),
-            )
-            .await;
-
-        let claim = runtime
-            .claim_execution(invocation_id, "worker-a")
-            .await
-            .expect("initial claim");
-        assert_eq!(claim.worker_id, "worker-a");
-
-        {
-            let mut lease = runtime.lease.lock().await;
-            let lease = lease.as_mut().expect("lease");
-            lease.claimed_at = Utc::now()
-                - chrono::Duration::from_std(INVOCATION_STALE_AFTER).expect("duration")
-                - chrono::Duration::seconds(1);
-        }
-
-        let reclaimed = runtime
-            .claim_execution(invocation_id, "worker-b")
-            .await
-            .expect("reclaimed");
-        assert_eq!(reclaimed.worker_id, "worker-b");
-        assert_eq!(runtime.status().await.claimed_by.as_deref(), Some("worker-b"));
-    }
-
-    #[tokio::test]
-    async fn claim_next_respects_worker_queue() {
-        let manager = InvocationManager::default();
-        let (_id_a, _runtime_a) = manager
-            .create(
-                Uuid::new_v4(),
-                None,
-                InvocationExecutionModeApi::Server,
-                "queue-a".to_string(),
-                Some(InvocationExecutionSpecApi {
-                    command: InvocationCommandApi::Run,
-                    args: vec![],
-                    project_dir: ".".to_string(),
-                    profiles_yml: "profiles".to_string(),
-                    state_manifest: None,
-                }),
-            )
-            .await;
-        let (_id_b, _runtime_b) = manager
-            .create(
-                Uuid::new_v4(),
-                None,
-                InvocationExecutionModeApi::Server,
-                "queue-b".to_string(),
-                Some(InvocationExecutionSpecApi {
-                    command: InvocationCommandApi::Run,
-                    args: vec![],
-                    project_dir: ".".to_string(),
-                    profiles_yml: "profiles".to_string(),
-                    state_manifest: None,
-                }),
-            )
-            .await;
-
-        let claim = manager
-            .claim_next(
-                "worker-a",
-                Some(InvocationExecutionModeApi::Server),
-                Some("queue-a"),
-            )
-            .await
-            .expect("claim ok")
-            .expect("claim present");
-        assert_eq!(claim.execution_spec.project_dir, ".");
-        assert_eq!(claim.worker_id, "worker-a");
-    }
-
-    #[tokio::test]
-    async fn unclaimed_local_invocation_times_out() {
-        let manager = InvocationManager::default();
-        let (_id, runtime) = manager
-            .create(
-                Uuid::new_v4(),
-                None,
-                InvocationExecutionModeApi::Local,
-                "local-test".to_string(),
-                Some(InvocationExecutionSpecApi {
-                    command: InvocationCommandApi::Run,
-                    args: vec![],
-                    project_dir: ".".to_string(),
-                    profiles_yml: "profiles".to_string(),
-                    state_manifest: None,
-                }),
-            )
-            .await;
-        manager.schedule_local_claim_timeout(runtime.clone());
-
-        tokio::time::sleep(LOCAL_ONE_SHOT_CLAIM_TIMEOUT + Duration::from_millis(25)).await;
-
-        let status = runtime.status().await;
-        assert!(matches!(status.status, InvocationLifecycleStatus::Failed));
-        assert_eq!(
-            status.error.as_deref(),
-            Some("local worker did not claim invocation")
-        );
     }
 }

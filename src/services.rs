@@ -75,6 +75,8 @@ pub struct LocalExecutionPrepared {
     pub spec: LocalExecutionSpec,
     pub persistence: Option<LocalExecutionPersistence>,
     pub worker_queue: String,
+    pub project_id: i64,
+    pub environment_id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -487,6 +489,8 @@ impl<'a> InvocationService<'a> {
             },
             persistence,
             worker_queue: environment.worker_queue.clone(),
+            project_id: project.id,
+            environment_id: environment.id,
         })
     }
 

@@ -208,7 +208,9 @@ pub async fn execute_claimed_invocation(
             InvocationCompleteApiRequest {
                 worker_id: claim.worker_id.clone(),
                 completion: crate::execution::ExecutionCompletion {
-                    status: if cancel_requested || !status.success() {
+                    status: if cancel_requested {
+                        InvocationLifecycleStatus::Canceled
+                    } else if !status.success() {
                         InvocationLifecycleStatus::Failed
                     } else {
                         InvocationLifecycleStatus::Succeeded
