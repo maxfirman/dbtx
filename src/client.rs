@@ -1,8 +1,9 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationClaimNextApiRequest, InvocationClaimResponse,
-    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
-    InvocationEvent, InvocationEventBatchApiRequest, InvocationStatusResponse, MigrateResponse,
+    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
+    InvocationClaimResponse, InvocationCompleteApiRequest, InvocationCreateApiRequest,
+    InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
+    InvocationHeartbeatApiRequest, InvocationStatusResponse, MigrateResponse,
     ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest,
     ProjectsResponse,
 };
@@ -182,6 +183,32 @@ impl DaemonClient {
         self.send_empty(
             self.http
                 .post(self.url(&format!("/v1/invocations/{invocation_id}/complete")))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn invocation_heartbeat(
+        &self,
+        invocation_id: Uuid,
+        request: InvocationHeartbeatApiRequest,
+    ) -> AppResult<()> {
+        self.send_empty(
+            self.http
+                .post(self.url(&format!("/v1/invocations/{invocation_id}/heartbeat")))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn invocation_cancel(
+        &self,
+        invocation_id: Uuid,
+        request: InvocationCancelApiRequest,
+    ) -> AppResult<()> {
+        self.send_empty(
+            self.http
+                .post(self.url(&format!("/v1/invocations/{invocation_id}/cancel")))
                 .json(&request),
         )
         .await

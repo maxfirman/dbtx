@@ -366,7 +366,7 @@ async fn invoke_via_daemon(
         InvocationExecutionModeApi::Server,
     )
     .await?;
-    let client = client::DaemonClient::new(service_url);
+    let client = client::DaemonClient::new(service_url.clone());
     client
         .stream_invocation_events(response.invocation_id, render_invocation_event)
         .await?;
@@ -430,7 +430,7 @@ async fn invoke_via_local_worker(
         InvocationExecutionModeApi::Local,
     )
     .await?;
-    let client = client::DaemonClient::new(service_url);
+    let client = client::DaemonClient::new(service_url.clone());
     let claimed = client
         .invocation_claim_next(api::InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Local),
@@ -443,6 +443,20 @@ async fn invoke_via_local_worker(
         ))));
     }
     let spec = claimed.execution_spec;
+    let heartbeat_client = client::DaemonClient::new(service_url.clone());
+    let heartbeat_id = response.invocation_id;
+    let heartbeat_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if heartbeat_client
+                .invocation_heartbeat(heartbeat_id, api::InvocationHeartbeatApiRequest::default())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
     let profiles_dir = write_profiles_dir(&spec.profiles_yml)?;
     let state_dir = write_state_dir(spec.state_manifest.as_ref())?;
 
@@ -593,6 +607,7 @@ async fn invoke_via_local_worker(
             },
         )
         .await?;
+    heartbeat_task.abort();
 
     if status.success() {
         Ok(())

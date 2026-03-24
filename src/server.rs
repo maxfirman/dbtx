@@ -1,11 +1,11 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationClaimNextApiRequest, InvocationClaimResponse,
-    InvocationCommandApi, InvocationCompleteApiRequest, InvocationCreateApiRequest,
-    InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
-    InvocationExecutionSpecApi, InvocationLifecycleStatus, InvocationStatusResponse,
-    MigrateResponse, ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest,
-    ProjectUpdateApiRequest, ProjectsResponse,
+    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
+    InvocationClaimResponse, InvocationCommandApi, InvocationCompleteApiRequest,
+    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
+    InvocationEventBatchApiRequest, InvocationExecutionSpecApi, InvocationHeartbeatApiRequest,
+    InvocationLifecycleStatus, InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest,
+    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::Db;
@@ -112,7 +112,9 @@ impl InvocationManager {
             exit_code: None,
             error: None,
             started_at: Utc::now(),
+            last_heartbeat_at: None,
             completed_at: None,
+            cancel_requested: false,
         };
         let (tx, _) = broadcast::channel(1024);
         let runtime = Arc::new(InvocationRuntime {
@@ -224,6 +226,16 @@ impl InvocationRuntime {
         };
         drop(current);
         let _ = self.push_event(completed).await;
+    }
+
+    async fn heartbeat(&self) {
+        let mut current = self.status.lock().await;
+        current.last_heartbeat_at = Some(Utc::now());
+    }
+
+    async fn request_cancel(&self) {
+        let mut current = self.status.lock().await;
+        current.cancel_requested = true;
     }
 
     async fn claim_execution(&self, invocation_id: Uuid) -> AppResult<InvocationClaimResponse> {
@@ -416,6 +428,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/invocations/claim-next", post(invocation_claim_next))
         .route("/v1/invocations/{id}/claim", post(invocation_claim))
         .route("/v1/invocations/{id}", get(invocation_status))
+        .route("/v1/invocations/{id}/heartbeat", post(invocation_heartbeat))
+        .route("/v1/invocations/{id}/cancel", post(invocation_cancel))
         .route("/v1/invocations/{id}/complete", post(invocation_complete))
         .route(
             "/v1/invocations/{id}/events",
@@ -819,6 +833,37 @@ async fn invocation_claim_next(
         .ok_or_else(|| AppError::InvocationNotClaimable("next".to_string()))?;
     info!(invocation_id = %claimed.invocation_id, "claimed next invocation execution");
     Ok(Json(claimed))
+}
+
+async fn invocation_heartbeat(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(_request): Json<InvocationHeartbeatApiRequest>,
+) -> Result<StatusCode, ApiError> {
+    let runtime = state.invocations.get(id).await.ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "invocation not found",
+        ))
+    })?;
+    runtime.heartbeat().await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn invocation_cancel(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(_request): Json<InvocationCancelApiRequest>,
+) -> Result<StatusCode, ApiError> {
+    let runtime = state.invocations.get(id).await.ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "invocation not found",
+        ))
+    })?;
+    runtime.request_cancel().await;
+    info!(invocation_id = %id, "requested invocation cancel");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn invocation_status(

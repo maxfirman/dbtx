@@ -154,7 +154,9 @@ pub struct InvocationStatusResponse {
     pub exit_code: Option<i32>,
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub cancel_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +166,12 @@ pub enum InvocationLifecycleStatus {
     Succeeded,
     Failed,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InvocationHeartbeatApiRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InvocationCancelApiRequest {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationEvent {
