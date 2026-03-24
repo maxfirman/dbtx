@@ -21,6 +21,7 @@ pub struct ExecutionEvent {
     pub kind: ExecutionEventKind,
     pub occurred_at: DateTime<Utc>,
     pub text: Option<String>,
+    pub raw_line: Option<String>,
     pub dbt_event_name: Option<String>,
     pub node_unique_id: Option<String>,
     pub level: Option<String>,
@@ -32,4 +33,6 @@ pub struct ExecutionCompletion {
     pub status: InvocationLifecycleStatus,
     pub exit_code: i32,
     pub error: Option<String>,
+    pub dbt_version: Option<String>,
+    pub manifest: Option<serde_json::Value>,
 }

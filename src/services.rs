@@ -71,6 +71,21 @@ pub struct LocalExecutionSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct LocalExecutionPrepared {
+    pub spec: LocalExecutionSpec,
+    pub persistence: Option<LocalExecutionPersistence>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalExecutionPersistence {
+    pub run_id: Uuid,
+    pub project_id: i64,
+    pub environment_id: i64,
+    pub subcommand: String,
+    pub promote_base_manifest: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ProjectInitRequest {
     pub current_dir: PathBuf,
     pub git_repo_url: Option<String>,
@@ -374,8 +389,9 @@ impl<'a> InvocationService<'a> {
 
     pub async fn prepare_local_execution(
         &self,
+        run_id: Uuid,
         request: InvocationRequest,
-    ) -> AppResult<LocalExecutionSpec> {
+    ) -> AppResult<LocalExecutionPrepared> {
         self.db.require_current_schema().await?;
         let inject_json_logging = request.command.persists_state();
         let current_dir = request
@@ -395,12 +411,6 @@ impl<'a> InvocationService<'a> {
             .get_environment(&project.project_id, &ctx.environment_slug)
             .await?;
         validate_environment_git_state(&project, &environment, &git_state)?;
-
-        if !matches!(request.command, InvocationCommand::Ls) {
-            return Err(AppError::UnsupportedLocalExecution(
-                request.command.as_str().to_string(),
-            ));
-        }
 
         let reconstructed_manifest = self
             .db
@@ -428,12 +438,49 @@ impl<'a> InvocationService<'a> {
         let profiles_yml =
             tokio::fs::read_to_string(generated_profiles.temp_dir.path().join("profiles.yml"))
                 .await?;
+        let dbt_args = if request.command.persists_state() {
+            append_invocation_id(ctx.dbt_args, run_id)
+        } else {
+            ctx.dbt_args
+        };
+        let persistence = if request.command.persists_state() {
+            let args_json = Value::Array(
+                dbt_args
+                    .iter()
+                    .map(|value| Value::String(value.to_string_lossy().into_owned()))
+                    .collect(),
+            );
+            self.db
+                .insert_run_started(RunStart {
+                    run_id,
+                    project: &project,
+                    environment: &environment,
+                    subcommand: request.command.as_str(),
+                    args_json,
+                    is_full_graph_run: ctx.is_full_graph_run,
+                    execution_mode: request.execution_mode,
+                    git_state: &git_state,
+                })
+                .await?;
+            Some(LocalExecutionPersistence {
+                run_id,
+                project_id: project.id,
+                environment_id: environment.id,
+                subcommand: request.command.as_str().to_string(),
+                promote_base_manifest: ctx.is_full_graph_run,
+            })
+        } else {
+            None
+        };
 
-        Ok(LocalExecutionSpec {
-            command: request.command,
-            args: ctx.dbt_args,
-            profiles_yml,
-            state_manifest,
+        Ok(LocalExecutionPrepared {
+            spec: LocalExecutionSpec {
+                command: request.command,
+                args: dbt_args,
+                profiles_yml,
+                state_manifest,
+            },
+            persistence,
         })
     }
 

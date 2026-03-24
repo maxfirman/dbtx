@@ -483,6 +483,7 @@ async fn invoke_via_local_worker(
                         kind: dbtx::execution::ExecutionEventKind::StdoutLine,
                         occurred_at: chrono::Utc::now(),
                         text: Some(line),
+                        raw_line: None,
                         dbt_event_name: None,
                         node_unique_id: None,
                         level: None,
@@ -506,6 +507,7 @@ async fn invoke_via_local_worker(
                         kind: dbtx::execution::ExecutionEventKind::StderrLine,
                         occurred_at: chrono::Utc::now(),
                         text: Some(line),
+                        raw_line: None,
                         dbt_event_name: None,
                         node_unique_id: None,
                         level: None,
@@ -530,6 +532,8 @@ async fn invoke_via_local_worker(
                     exit_code,
                     error: (!status.success())
                         .then(|| format!("dbt invocation failed with exit code {exit_code}")),
+                    dbt_version: None,
+                    manifest: None,
                 },
             },
         )

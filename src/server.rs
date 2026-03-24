@@ -12,6 +12,7 @@ use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
 use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
+use crate::manifest::ManifestSnapshot;
 use crate::services::{
     EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
     InvocationObserver, InvocationRequest, InvocationService, ProjectInitRequest, ProjectService,
@@ -75,6 +76,7 @@ struct InvocationRuntime {
     status: Mutex<InvocationStatusResponse>,
     history: Mutex<InvocationHistory>,
     tx: broadcast::Sender<SequencedInvocationEvent>,
+    persistence: Option<InvocationPersistence>,
 }
 
 #[derive(Clone)]
@@ -82,9 +84,22 @@ struct InvocationRecorder {
     runtime: Arc<InvocationRuntime>,
 }
 
+#[derive(Clone)]
+struct InvocationPersistence {
+    db: Db,
+    run_id: Uuid,
+    project_id: i64,
+    environment_id: i64,
+    subcommand: String,
+    promote_base_manifest: bool,
+}
+
 impl InvocationManager {
-    async fn create(&self) -> (Uuid, Arc<InvocationRuntime>) {
-        let invocation_id = Uuid::new_v4();
+    async fn create(
+        &self,
+        invocation_id: Uuid,
+        persistence: Option<InvocationPersistence>,
+    ) -> (Uuid, Arc<InvocationRuntime>) {
         let status = InvocationStatusResponse {
             invocation_id,
             status: InvocationLifecycleStatus::Running,
@@ -98,6 +113,7 @@ impl InvocationManager {
             status: Mutex::new(status),
             history: Mutex::new(InvocationHistory::default()),
             tx,
+            persistence,
         });
         self.inner
             .lock()
@@ -120,7 +136,7 @@ impl InvocationManager {
 }
 
 impl InvocationRuntime {
-    async fn push_event(&self, event: InvocationEvent) {
+    async fn push_event(&self, event: InvocationEvent) -> u64 {
         let sequenced = {
             let mut history = self.history.lock().await;
             history.next_sequence += 1;
@@ -131,7 +147,9 @@ impl InvocationRuntime {
             history.items.push(sequenced.clone());
             sequenced
         };
+        let sequence = sequenced.sequence;
         let _ = self.tx.send(sequenced);
+        sequence
     }
 
     async fn status(&self) -> InvocationStatusResponse {
@@ -161,40 +179,95 @@ impl InvocationRuntime {
             error,
         };
         drop(current);
-        self.push_event(completed).await;
+        let _ = self.push_event(completed).await;
     }
 }
 
 impl InvocationRecorder {
-    async fn record(&self, event: ExecutionEvent) {
-        self.runtime
-            .push_event(InvocationEvent {
-                event_type: match event.kind {
-                    ExecutionEventKind::StdoutLine => "stdout.line".to_string(),
-                    ExecutionEventKind::StderrLine => "stderr.line".to_string(),
-                    ExecutionEventKind::DbtLog => "dbt.log".to_string(),
-                },
-                timestamp: event.occurred_at,
-                text: event.text,
-                stream: match event.kind {
-                    ExecutionEventKind::StdoutLine | ExecutionEventKind::DbtLog => {
-                        Some("stdout".to_string())
+    async fn record(&self, event: ExecutionEvent) -> AppResult<()> {
+        let sse_event = InvocationEvent {
+            event_type: match event.kind {
+                ExecutionEventKind::StdoutLine => "stdout.line".to_string(),
+                ExecutionEventKind::StderrLine => "stderr.line".to_string(),
+                ExecutionEventKind::DbtLog => "dbt.log".to_string(),
+            },
+            timestamp: event.occurred_at,
+            text: event.text.clone(),
+            stream: match event.kind {
+                ExecutionEventKind::StdoutLine | ExecutionEventKind::DbtLog => {
+                    Some("stdout".to_string())
+                }
+                ExecutionEventKind::StderrLine => Some("stderr".to_string()),
+            },
+            dbt_event_name: event.dbt_event_name.clone(),
+            node_unique_id: event.node_unique_id.clone(),
+            level: event.level.clone(),
+            exit_code: None,
+            error: event.error.clone(),
+        };
+        let sequence = self.runtime.push_event(sse_event).await as i64;
+        if let Some(persistence) = self.runtime.persistence.as_ref() {
+            match event.kind {
+                ExecutionEventKind::DbtLog => {
+                    if let Some(raw_line) = event.raw_line.as_deref()
+                        && let Some(log_event) = LogEvent::parse(raw_line)
+                    {
+                        persistence
+                            .db
+                            .persist_log_event(
+                                persistence.run_id,
+                                persistence.project_id,
+                                persistence.environment_id,
+                                sequence,
+                                &log_event,
+                            )
+                            .await?;
                     }
-                    ExecutionEventKind::StderrLine => Some("stderr".to_string()),
-                },
-                dbt_event_name: event.dbt_event_name,
-                node_unique_id: event.node_unique_id,
-                level: event.level,
-                exit_code: None,
-                error: event.error,
-            })
-            .await;
+                }
+                ExecutionEventKind::StdoutLine => {
+                    if let Some(raw_line) = event.raw_line.as_deref().or(event.text.as_deref()) {
+                        persistence
+                            .db
+                            .persist_raw_line(persistence.run_id, sequence, raw_line)
+                            .await?;
+                    }
+                }
+                ExecutionEventKind::StderrLine => {}
+            }
+        }
+        Ok(())
     }
 
-    async fn complete(&self, completion: ExecutionCompletion) {
+    async fn complete(&self, completion: ExecutionCompletion) -> AppResult<()> {
+        if let Some(persistence) = self.runtime.persistence.as_ref() {
+            let manifest = completion.manifest.clone().map(ManifestSnapshot::from_raw);
+            persistence
+                .db
+                .finalize_run(crate::db::RunFinalization {
+                    run_id: persistence.run_id,
+                    project_id: persistence.project_id,
+                    environment_id: persistence.environment_id,
+                    subcommand: &persistence.subcommand,
+                    dbt_version: completion.dbt_version.as_deref(),
+                    exit_code: completion.exit_code,
+                    terminal_status: if matches!(
+                        completion.status,
+                        InvocationLifecycleStatus::Succeeded
+                    ) {
+                        "success"
+                    } else {
+                        "failed"
+                    },
+                    manifest: manifest.as_ref(),
+                    promote_base_manifest: persistence.promote_base_manifest
+                        && matches!(completion.status, InvocationLifecycleStatus::Succeeded),
+                })
+                .await?;
+        }
         self.runtime
             .finish(completion.status, completion.exit_code, completion.error)
             .await;
+        Ok(())
     }
 
     async fn is_running(&self) -> bool {
@@ -215,6 +288,7 @@ impl InvocationObserver for StreamingInvocationObserver {
             kind: ExecutionEventKind::StdoutLine,
             occurred_at: Utc::now(),
             text: Some(line.to_string()),
+            raw_line: None,
             dbt_event_name: None,
             node_unique_id: None,
             level: None,
@@ -227,6 +301,7 @@ impl InvocationObserver for StreamingInvocationObserver {
             kind: ExecutionEventKind::StderrLine,
             occurred_at: Utc::now(),
             text: Some(line.to_string()),
+            raw_line: None,
             dbt_event_name: None,
             node_unique_id: None,
             level: None,
@@ -239,6 +314,7 @@ impl InvocationObserver for StreamingInvocationObserver {
             kind: ExecutionEventKind::DbtLog,
             occurred_at: Utc::now(),
             text: rendered.map(ToString::to_string),
+            raw_line: None,
             dbt_event_name: Some(event.info.name.clone()),
             node_unique_id: event
                 .data
@@ -470,14 +546,84 @@ async fn invocation_create(
     State(state): State<AppState>,
     Json(request): Json<InvocationCreateApiRequest>,
 ) -> Result<Json<InvocationCreateResponse>, ApiError> {
-    let (invocation_id, runtime) = state.invocations.create().await;
+    let invocation_id = Uuid::new_v4();
     info!(
         invocation_id = %invocation_id,
         command = ?request.command,
         current_dir = %request.current_dir,
         "starting invocation"
     );
-    runtime
+
+    let db = state.db.clone();
+    let runtime_config = state.runtime_config.clone();
+    let invocations = state.invocations.clone();
+    if matches!(
+        request.execution_mode,
+        crate::api::InvocationExecutionModeApi::Local
+    ) {
+        let service = InvocationService::new(&db);
+        let prepared = service
+            .prepare_local_execution(
+                invocation_id,
+                InvocationRequest {
+                    command: map_invocation_command(request.command.clone()),
+                    args: request.args.iter().cloned().map(Into::into).collect(),
+                    config: runtime_config.clone(),
+                    current_dir: Some(PathBuf::from(&request.current_dir)),
+                    environment_slug: request.environment_slug.clone(),
+                    execution_mode: ExecutionMode::Local,
+                },
+            )
+            .await?;
+        let (invocation_id, runtime) = state
+            .invocations
+            .create(
+                invocation_id,
+                prepared.persistence.map(|p| InvocationPersistence {
+                    db: db.clone(),
+                    run_id: p.run_id,
+                    project_id: p.project_id,
+                    environment_id: p.environment_id,
+                    subcommand: p.subcommand,
+                    promote_base_manifest: p.promote_base_manifest,
+                }),
+            )
+            .await;
+        let _ = runtime
+            .push_event(InvocationEvent {
+                event_type: "invocation.started".to_string(),
+                timestamp: Utc::now(),
+                text: None,
+                stream: None,
+                dbt_event_name: None,
+                node_unique_id: None,
+                level: None,
+                exit_code: None,
+                error: None,
+            })
+            .await;
+        info!(
+            invocation_id = %invocation_id,
+            "created local-worker invocation"
+        );
+        return Ok(Json(InvocationCreateResponse {
+            invocation_id,
+            execution_mode: request.execution_mode,
+            execution_spec: Some(InvocationExecutionSpecApi {
+                command: request.command,
+                args: prepared
+                    .spec
+                    .args
+                    .into_iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect(),
+                profiles_yml: prepared.spec.profiles_yml,
+                state_manifest: prepared.spec.state_manifest,
+            }),
+        }));
+    }
+    let (invocation_id, runtime) = state.invocations.create(invocation_id, None).await;
+    let _ = runtime
         .push_event(InvocationEvent {
             event_type: "invocation.started".to_string(),
             timestamp: Utc::now(),
@@ -490,44 +636,6 @@ async fn invocation_create(
             error: None,
         })
         .await;
-
-    let db = state.db.clone();
-    let runtime_config = state.runtime_config.clone();
-    let invocations = state.invocations.clone();
-    if matches!(
-        request.execution_mode,
-        crate::api::InvocationExecutionModeApi::Local
-    ) {
-        let service = InvocationService::new(&db);
-        let spec = service
-            .prepare_local_execution(InvocationRequest {
-                command: map_invocation_command(request.command.clone()),
-                args: request.args.iter().cloned().map(Into::into).collect(),
-                config: runtime_config.clone(),
-                current_dir: Some(PathBuf::from(&request.current_dir)),
-                environment_slug: request.environment_slug.clone(),
-                execution_mode: ExecutionMode::Local,
-            })
-            .await?;
-        info!(
-            invocation_id = %invocation_id,
-            "created local-worker invocation"
-        );
-        return Ok(Json(InvocationCreateResponse {
-            invocation_id,
-            execution_mode: request.execution_mode,
-            execution_spec: Some(InvocationExecutionSpecApi {
-                command: request.command,
-                args: spec
-                    .args
-                    .into_iter()
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .collect(),
-                profiles_yml: spec.profiles_yml,
-                state_manifest: spec.state_manifest,
-            }),
-        }));
-    }
     tokio::spawn(async move {
         let service = InvocationService::new(&db);
         let recorder = InvocationRecorder {
@@ -538,7 +646,10 @@ async fn invocation_create(
         let event_recorder = recorder.clone();
         let event_forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                event_recorder.record(event).await;
+                if let Err(err) = event_recorder.record(event).await {
+                    warn!(invocation_id = %invocation_id, error = %err, "failed to record invocation event");
+                    break;
+                }
             }
         });
         let result = service
@@ -568,13 +679,18 @@ async fn invocation_create(
                     exit_code = result.exit_code,
                     "invocation completed successfully"
                 );
-                recorder
+                if let Err(err) = recorder
                     .complete(ExecutionCompletion {
                         status: InvocationLifecycleStatus::Succeeded,
                         exit_code: result.exit_code,
                         error: None,
+                        dbt_version: None,
+                        manifest: None,
                     })
                     .await
+                {
+                    warn!(invocation_id = %invocation_id, error = %err, "failed to complete invocation");
+                }
             }
             Err(err) => {
                 warn!(
@@ -583,13 +699,18 @@ async fn invocation_create(
                     error = %err,
                     "invocation failed"
                 );
-                recorder
+                if let Err(complete_err) = recorder
                     .complete(ExecutionCompletion {
                         status: InvocationLifecycleStatus::Failed,
                         exit_code: err.exit_code(),
                         error: Some(err.to_string()),
+                        dbt_version: None,
+                        manifest: None,
                     })
                     .await
+                {
+                    warn!(invocation_id = %invocation_id, error = %complete_err, "failed to complete invocation");
+                }
             }
         }
         invocations.schedule_cleanup(invocation_id);
@@ -633,7 +754,7 @@ async fn invocation_append_events(
         ))));
     }
     for event in request.events {
-        recorder.record(event).await;
+        recorder.record(event).await?;
     }
     info!(invocation_id = %id, "appended invocation events");
     Ok(StatusCode::NO_CONTENT)
@@ -651,7 +772,7 @@ async fn invocation_complete(
         ))
     })?;
     let recorder = InvocationRecorder { runtime };
-    recorder.complete(request.completion).await;
+    recorder.complete(request.completion).await?;
     state.invocations.schedule_cleanup(id);
     info!(invocation_id = %id, "completed invocation via api");
     Ok(StatusCode::NO_CONTENT)
@@ -761,6 +882,7 @@ mod tests {
     use chrono::Utc;
     use futures_util::StreamExt;
     use tokio::sync::broadcast;
+    use uuid::Uuid;
 
     fn sample_event(text: &str) -> InvocationEvent {
         InvocationEvent {
@@ -831,7 +953,7 @@ mod tests {
     #[tokio::test]
     async fn recorder_appends_execution_events_into_runtime_history() {
         let manager = InvocationManager::default();
-        let (_id, runtime) = manager.create().await;
+        let (_id, runtime) = manager.create(Uuid::new_v4(), None).await;
         let recorder = InvocationRecorder {
             runtime: runtime.clone(),
         };
@@ -841,12 +963,14 @@ mod tests {
                 kind: ExecutionEventKind::StdoutLine,
                 occurred_at: Utc::now(),
                 text: Some("hello".to_string()),
+                raw_line: None,
                 dbt_event_name: None,
                 node_unique_id: None,
                 level: None,
                 error: None,
             })
-            .await;
+            .await
+            .expect("record event");
 
         let history = runtime.history.lock().await;
         assert_eq!(history.items.len(), 1);
@@ -857,7 +981,7 @@ mod tests {
     #[tokio::test]
     async fn recorder_marks_invocation_complete() {
         let manager = InvocationManager::default();
-        let (_id, runtime) = manager.create().await;
+        let (_id, runtime) = manager.create(Uuid::new_v4(), None).await;
         let recorder = InvocationRecorder { runtime };
 
         recorder
@@ -865,8 +989,11 @@ mod tests {
                 status: crate::api::InvocationLifecycleStatus::Succeeded,
                 exit_code: 0,
                 error: None,
+                dbt_version: None,
+                manifest: None,
             })
-            .await;
+            .await
+            .expect("complete invocation");
 
         let status = recorder.runtime.status().await;
         assert!(matches!(
@@ -880,7 +1007,7 @@ mod tests {
     #[tokio::test]
     async fn recorder_rejects_appends_after_completion() {
         let manager = InvocationManager::default();
-        let (_id, runtime) = manager.create().await;
+        let (_id, runtime) = manager.create(Uuid::new_v4(), None).await;
         let recorder = InvocationRecorder {
             runtime: runtime.clone(),
         };
@@ -892,8 +1019,11 @@ mod tests {
                 status: crate::api::InvocationLifecycleStatus::Succeeded,
                 exit_code: 0,
                 error: None,
+                dbt_version: None,
+                manifest: None,
             })
-            .await;
+            .await
+            .expect("complete invocation");
 
         assert!(!recorder.is_running().await);
     }
@@ -901,7 +1031,7 @@ mod tests {
     #[tokio::test]
     async fn uploaded_events_are_visible_via_sse_history() {
         let manager = InvocationManager::default();
-        let (_id, runtime) = manager.create().await;
+        let (_id, runtime) = manager.create(Uuid::new_v4(), None).await;
         let recorder = InvocationRecorder {
             runtime: runtime.clone(),
         };
@@ -911,23 +1041,27 @@ mod tests {
                 kind: ExecutionEventKind::StdoutLine,
                 occurred_at: Utc::now(),
                 text: Some("one".to_string()),
+                raw_line: None,
                 dbt_event_name: None,
                 node_unique_id: None,
                 level: None,
                 error: None,
             })
-            .await;
+            .await
+            .expect("record event");
         recorder
             .record(ExecutionEvent {
                 kind: ExecutionEventKind::StdoutLine,
                 occurred_at: Utc::now(),
                 text: Some("two".to_string()),
+                raw_line: None,
                 dbt_event_name: None,
                 node_unique_id: None,
                 level: None,
                 error: None,
             })
-            .await;
+            .await
+            .expect("record event");
 
         let history = runtime.history.lock().await;
         assert_eq!(history.items.len(), 2);

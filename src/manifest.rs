@@ -41,14 +41,18 @@ pub struct ReconstructedManifest {
 }
 
 impl ManifestSnapshot {
+    pub fn from_raw(raw: Value) -> Self {
+        let nodes = extract_nodes(&raw);
+        let edges = extract_edges(&raw);
+        Self { raw, nodes, edges }
+    }
+
     pub async fn from_path(path: &Path) -> AppResult<Self> {
         let content = fs::read_to_string(path)
             .await
             .map_err(|_| AppError::MissingManifest(path.display().to_string()))?;
         let raw: Value = serde_json::from_str(&content)?;
-        let nodes = extract_nodes(&raw);
-        let edges = extract_edges(&raw);
-        Ok(Self { raw, nodes, edges })
+        Ok(Self::from_raw(raw))
     }
 
     pub fn reconstruct(raw_manifest: Value, successful_nodes: &BTreeMap<String, Value>) -> Value {
