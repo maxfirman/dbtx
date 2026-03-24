@@ -17,8 +17,7 @@ use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use crate::manifest::ManifestSnapshot;
 use crate::services::{
     EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
-    InvocationObserver, InvocationRequest, InvocationService, ProjectInitRequest, ProjectService,
-    ProjectUpdateRequest,
+    InvocationRequest, InvocationService, ProjectInitRequest, ProjectService, ProjectUpdateRequest,
 };
 use async_stream::stream;
 use axum::extract::{Path, State};
@@ -34,10 +33,10 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast};
 use tokio::time::{Duration, sleep};
 use tower_http::trace::TraceLayer;
-use tracing::{error, info, info_span, warn};
+use tracing::{error, info, info_span};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -356,56 +355,6 @@ impl InvocationRecorder {
     }
 }
 
-struct StreamingInvocationObserver {
-    tx: mpsc::UnboundedSender<ExecutionEvent>,
-}
-
-impl InvocationObserver for StreamingInvocationObserver {
-    fn stdout_line(&mut self, line: &str) {
-        let _ = self.tx.send(ExecutionEvent {
-            kind: ExecutionEventKind::StdoutLine,
-            occurred_at: Utc::now(),
-            text: Some(line.to_string()),
-            raw_line: None,
-            dbt_event_name: None,
-            node_unique_id: None,
-            level: None,
-            error: None,
-        });
-    }
-
-    fn stderr_line(&mut self, line: &str) {
-        let _ = self.tx.send(ExecutionEvent {
-            kind: ExecutionEventKind::StderrLine,
-            occurred_at: Utc::now(),
-            text: Some(line.to_string()),
-            raw_line: None,
-            dbt_event_name: None,
-            node_unique_id: None,
-            level: None,
-            error: None,
-        });
-    }
-
-    fn dbt_log(&mut self, event: &LogEvent, rendered: Option<&str>) {
-        let _ = self.tx.send(ExecutionEvent {
-            kind: ExecutionEventKind::DbtLog,
-            occurred_at: Utc::now(),
-            text: rendered.map(ToString::to_string),
-            raw_line: None,
-            dbt_event_name: Some(event.info.name.clone()),
-            node_unique_id: event
-                .data
-                .get("node_info")
-                .and_then(|value| value.get("unique_id"))
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string),
-            level: Some(event.info.level.clone()),
-            error: None,
-        });
-    }
-}
-
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/state/migrate", post(migrate))
@@ -636,80 +585,53 @@ async fn invocation_create(
         "starting invocation"
     );
 
-    let db = state.db.clone();
     let runtime_config = state.runtime_config.clone();
-    let invocations = state.invocations.clone();
-    if matches!(
-        request.execution_mode,
-        crate::api::InvocationExecutionModeApi::Local
-    ) {
-        let service = InvocationService::new(&db);
-        let prepared = service
-            .prepare_local_execution(
-                invocation_id,
-                InvocationRequest {
-                    command: map_invocation_command(request.command),
-                    args: request.args.iter().cloned().map(Into::into).collect(),
-                    config: runtime_config.clone(),
-                    current_dir: Some(PathBuf::from(&request.current_dir)),
-                    environment_slug: request.environment_slug.clone(),
-                    execution_mode: ExecutionMode::Local,
-                },
-            )
-            .await?;
-        let execution_spec = InvocationExecutionSpecApi {
-            command: request.command,
-            args: prepared
-                .spec
-                .args
-                .into_iter()
-                .map(|value| value.to_string_lossy().into_owned())
-                .collect(),
-            project_dir: request.current_dir.clone(),
-            profiles_yml: prepared.spec.profiles_yml,
-            state_manifest: prepared.spec.state_manifest,
-        };
-        let (invocation_id, runtime) = state
-            .invocations
-            .create(
-                invocation_id,
-                prepared.persistence.map(|p| InvocationPersistence {
-                    db: db.clone(),
-                    run_id: p.run_id,
-                    project_id: p.project_id,
-                    environment_id: p.environment_id,
-                    subcommand: p.subcommand,
-                    promote_base_manifest: p.promote_base_manifest,
-                }),
-                request.execution_mode,
-                Some(execution_spec),
-            )
-            .await;
-        let _ = runtime
-            .push_event(InvocationEvent {
-                event_type: "invocation.started".to_string(),
-                timestamp: Utc::now(),
-                text: None,
-                stream: None,
-                dbt_event_name: None,
-                node_unique_id: None,
-                level: None,
-                exit_code: None,
-                error: None,
-            })
-            .await;
-        info!(
-            invocation_id = %invocation_id,
-            "created local-worker invocation"
-        );
-        return Ok(Json(InvocationCreateResponse {
+    let db = state.db.clone();
+    let service = InvocationService::new(&db);
+    let execution_mode = match request.execution_mode {
+        crate::api::InvocationExecutionModeApi::Server => ExecutionMode::Server,
+        crate::api::InvocationExecutionModeApi::Local => ExecutionMode::Local,
+    };
+    let prepared = service
+        .prepare_local_execution(
             invocation_id,
-            execution_mode: request.execution_mode,
-        }));
-    }
+            InvocationRequest {
+                command: map_invocation_command(request.command),
+                args: request.args.iter().cloned().map(Into::into).collect(),
+                config: runtime_config,
+                current_dir: Some(PathBuf::from(&request.current_dir)),
+                environment_slug: request.environment_slug.clone(),
+                execution_mode,
+            },
+        )
+        .await?;
+    let execution_spec = InvocationExecutionSpecApi {
+        command: request.command,
+        args: prepared
+            .spec
+            .args
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect(),
+        project_dir: request.current_dir.clone(),
+        profiles_yml: prepared.spec.profiles_yml,
+        state_manifest: prepared.spec.state_manifest,
+    };
     let (invocation_id, runtime) = state
         .invocations
-        .create(invocation_id, None, request.execution_mode, None)
+        .create(
+            invocation_id,
+            prepared.persistence.map(|p| InvocationPersistence {
+                db: db.clone(),
+                run_id: p.run_id,
+                project_id: p.project_id,
+                environment_id: p.environment_id,
+                subcommand: p.subcommand,
+                promote_base_manifest: p.promote_base_manifest,
+            }),
+            request.execution_mode,
+            Some(execution_spec),
+        )
         .await;
     let _ = runtime
         .push_event(InvocationEvent {
@@ -724,85 +646,11 @@ async fn invocation_create(
             error: None,
         })
         .await;
-    tokio::spawn(async move {
-        let service = InvocationService::new(&db);
-        let recorder = InvocationRecorder {
-            runtime: runtime.clone(),
-        };
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let mut observer = StreamingInvocationObserver { tx: event_tx };
-        let event_recorder = recorder.clone();
-        let event_forwarder = tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                if let Err(err) = event_recorder.record(event).await {
-                    warn!(invocation_id = %invocation_id, error = %err, "failed to record invocation event");
-                    break;
-                }
-            }
-        });
-        let result = service
-            .invoke(
-                InvocationRequest {
-                    command: map_invocation_command(request.command),
-                    args: request.args.into_iter().map(Into::into).collect(),
-                    config: runtime_config,
-                    current_dir: Some(PathBuf::from(request.current_dir)),
-                    environment_slug: request.environment_slug,
-                    execution_mode: match request.execution_mode {
-                        crate::api::InvocationExecutionModeApi::Server => ExecutionMode::Server,
-                        crate::api::InvocationExecutionModeApi::Local => ExecutionMode::Local,
-                    },
-                },
-                &mut observer,
-            )
-            .await;
-        drop(observer);
-        if let Err(err) = event_forwarder.await {
-            warn!(invocation_id = %invocation_id, error = %err, "event forwarder task failed");
-        }
-        match result {
-            Ok(result) => {
-                info!(
-                    invocation_id = %invocation_id,
-                    exit_code = result.exit_code,
-                    "invocation completed successfully"
-                );
-                if let Err(err) = recorder
-                    .complete(ExecutionCompletion {
-                        status: InvocationLifecycleStatus::Succeeded,
-                        exit_code: result.exit_code,
-                        error: None,
-                        dbt_version: None,
-                        manifest: None,
-                    })
-                    .await
-                {
-                    warn!(invocation_id = %invocation_id, error = %err, "failed to complete invocation");
-                }
-            }
-            Err(err) => {
-                warn!(
-                    invocation_id = %invocation_id,
-                    exit_code = err.exit_code(),
-                    error = %err,
-                    "invocation failed"
-                );
-                if let Err(complete_err) = recorder
-                    .complete(ExecutionCompletion {
-                        status: InvocationLifecycleStatus::Failed,
-                        exit_code: err.exit_code(),
-                        error: Some(err.to_string()),
-                        dbt_version: None,
-                        manifest: None,
-                    })
-                    .await
-                {
-                    warn!(invocation_id = %invocation_id, error = %complete_err, "failed to complete invocation");
-                }
-            }
-        }
-        invocations.schedule_cleanup(invocation_id);
-    });
+    info!(
+        invocation_id = %invocation_id,
+        execution_mode = ?request.execution_mode,
+        "created worker-claimable invocation"
+    );
     Ok(Json(InvocationCreateResponse {
         invocation_id,
         execution_mode: request.execution_mode,
