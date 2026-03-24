@@ -373,6 +373,7 @@ async fn handle_invocation_command(
             client
                 .invocation_cancel(invocation_id, api::InvocationCancelApiRequest::default())
                 .await?;
+            eprintln!("requested cancellation for invocation {invocation_id}");
             let invocation = client.invocation_status(invocation_id).await?;
             print_invocation(&invocation);
         }

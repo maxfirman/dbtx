@@ -166,6 +166,14 @@ impl InvocationManager {
         statuses
     }
 
+    async fn stale_count(&self) -> usize {
+        self.list()
+            .await
+            .into_iter()
+            .filter(|status| status.worker_health == InvocationWorkerHealthApi::Stale)
+            .count()
+    }
+
     async fn claim_next(
         &self,
         worker_id: &str,
@@ -506,6 +514,12 @@ pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
         ))
     })?;
     info!(listen = %addr, "starting dbtx daemon");
+    let reclaimable_stale_invocations = state.invocations.stale_count().await;
+    info!(
+        listen = %addr,
+        reclaimable_stale_invocations,
+        "dbtx daemon execution state initialized"
+    );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(listen = %addr, "dbtx daemon listening");
     axum::serve(listener, router(state)).await.map_err(|err| {

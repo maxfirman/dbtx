@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
+use tracing::{info, warn};
 
 pub async fn execute_claimed_invocation(
     client: &DaemonClient,
@@ -26,6 +27,13 @@ pub async fn execute_claimed_invocation(
     }
 
     let spec = claim.execution_spec;
+    info!(
+        invocation_id = %claim.invocation_id,
+        worker_id = %claim.worker_id,
+        command = ?spec.command,
+        project_dir = %spec.project_dir,
+        "starting claimed invocation execution"
+    );
     let project_dir = PathBuf::from(&spec.project_dir);
     let profiles_dir = write_profiles_dir(&spec.profiles_yml)?;
     let state_dir = write_state_dir(spec.state_manifest.as_ref())?;
@@ -143,6 +151,11 @@ pub async fn execute_claimed_invocation(
                     )
                     .await?;
                 if hb.cancel_requested {
+                    warn!(
+                        invocation_id = %claim.invocation_id,
+                        worker_id = %claim.worker_id,
+                        "cancel requested by control plane"
+                    );
                     cancel_requested = true;
                     let _ = child.start_kill();
                 }
@@ -214,6 +227,14 @@ pub async fn execute_claimed_invocation(
             },
         )
         .await?;
+
+    info!(
+        invocation_id = %claim.invocation_id,
+        worker_id = %claim.worker_id,
+        exit_code,
+        canceled = cancel_requested,
+        "finished claimed invocation execution"
+    );
 
     if cancel_requested {
         Err(AppError::Io(std::io::Error::other("invocation canceled")))
