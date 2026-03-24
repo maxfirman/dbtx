@@ -5,8 +5,8 @@ use crate::api::{
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
     InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionSpecApi,
     InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
-    InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
-    ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
+    InvocationStatusResponse, InvocationsResponse, MigrateResponse, ProjectInitApiRequest,
+    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::Db;
@@ -116,10 +116,12 @@ impl InvocationManager {
     ) -> (Uuid, Arc<InvocationRuntime>) {
         let status = InvocationStatusResponse {
             invocation_id,
+            execution_mode,
             status: InvocationLifecycleStatus::Running,
             exit_code: None,
             error: None,
             started_at: Utc::now(),
+            claimed_at: None,
             last_heartbeat_at: None,
             completed_at: None,
             cancel_requested: false,
@@ -144,6 +146,22 @@ impl InvocationManager {
 
     async fn get(&self, invocation_id: Uuid) -> Option<Arc<InvocationRuntime>> {
         self.inner.lock().await.get(&invocation_id).cloned()
+    }
+
+    async fn list(&self) -> Vec<InvocationStatusResponse> {
+        let runtimes = self
+            .inner
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut statuses = Vec::with_capacity(runtimes.len());
+        for runtime in runtimes {
+            statuses.push(runtime.status().await);
+        }
+        statuses.sort_by_key(|status| std::cmp::Reverse(status.started_at));
+        statuses
     }
 
     async fn claim_next(
@@ -289,6 +307,7 @@ impl InvocationRuntime {
         });
         let mut status = self.status.lock().await;
         status.claimed_by = Some(worker_id.to_string());
+        status.claimed_at = lease.as_ref().map(|value| value.claimed_at);
         drop(status);
         Ok(InvocationClaimResponse {
             invocation_id,
@@ -426,7 +445,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/projects/{project_id}/environments/{slug}",
             get(environment_get).patch(environment_update),
         )
-        .route("/v1/invocations", post(invocation_create))
+        .route("/v1/invocations", get(invocation_list).post(invocation_create))
         .route("/v1/invocations/claim-next", post(invocation_claim_next))
         .route("/v1/invocations/{id}/claim", post(invocation_claim))
         .route("/v1/invocations/{id}", get(invocation_status))
@@ -785,6 +804,12 @@ async fn invocation_status(
     Ok(Json(runtime.status().await))
 }
 
+async fn invocation_list(State(state): State<AppState>) -> Result<Json<InvocationsResponse>, ApiError> {
+    let invocations = state.invocations.list().await;
+    info!(count = invocations.len(), "listed invocations");
+    Ok(Json(InvocationsResponse { invocations }))
+}
+
 async fn invocation_append_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -928,9 +953,11 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        InvocationEvent, InvocationManager, InvocationRecorder, SequencedInvocationEvent,
+        INVOCATION_STALE_AFTER, InvocationEvent, InvocationExecutionSpecApi, InvocationManager,
+        InvocationRecorder, SequencedInvocationEvent,
         event_stream,
     };
+    use crate::api::{InvocationCommandApi, InvocationExecutionModeApi};
     use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
     use chrono::Utc;
     use futures_util::StreamExt;
@@ -1148,5 +1175,45 @@ mod tests {
         assert_eq!(history.items.len(), 2);
         assert_eq!(history.items[0].event.text.as_deref(), Some("one"));
         assert_eq!(history.items[1].event.text.as_deref(), Some("two"));
+    }
+
+    #[tokio::test]
+    async fn stale_claim_can_be_reclaimed_by_another_worker() {
+        let manager = InvocationManager::default();
+        let (invocation_id, runtime) = manager
+            .create(
+                Uuid::new_v4(),
+                None,
+                InvocationExecutionModeApi::Server,
+                Some(InvocationExecutionSpecApi {
+                    command: InvocationCommandApi::Run,
+                    args: vec![],
+                    project_dir: ".".to_string(),
+                    profiles_yml: "profiles".to_string(),
+                    state_manifest: None,
+                }),
+            )
+            .await;
+
+        let claim = runtime
+            .claim_execution(invocation_id, "worker-a")
+            .await
+            .expect("initial claim");
+        assert_eq!(claim.worker_id, "worker-a");
+
+        {
+            let mut lease = runtime.lease.lock().await;
+            let lease = lease.as_mut().expect("lease");
+            lease.claimed_at = Utc::now()
+                - chrono::Duration::from_std(INVOCATION_STALE_AFTER).expect("duration")
+                - chrono::Duration::seconds(1);
+        }
+
+        let reclaimed = runtime
+            .claim_execution(invocation_id, "worker-b")
+            .await
+            .expect("reclaimed");
+        assert_eq!(reclaimed.worker_id, "worker-b");
+        assert_eq!(runtime.status().await.claimed_by.as_deref(), Some("worker-b"));
     }
 }

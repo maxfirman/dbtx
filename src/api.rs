@@ -118,6 +118,11 @@ pub struct InvocationCreateResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationsResponse {
+    pub invocations: Vec<InvocationStatusResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationExecutionSpecApi {
     pub command: InvocationCommandApi,
     pub args: Vec<String>,
@@ -160,10 +165,12 @@ pub struct InvocationCompleteApiRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationStatusResponse {
     pub invocation_id: Uuid,
+    pub execution_mode: InvocationExecutionModeApi,
     pub status: InvocationLifecycleStatus,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
+    pub claimed_at: Option<DateTime<Utc>>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub cancel_requested: bool,
