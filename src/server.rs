@@ -1,12 +1,12 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
-    InvocationClaimResponse, InvocationCommandApi, InvocationCompleteApiRequest,
-    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
-    InvocationEventBatchApiRequest, InvocationExecutionSpecApi, InvocationHeartbeatApiRequest,
-    InvocationHeartbeatResponse, InvocationLifecycleStatus, InvocationStatusResponse,
-    MigrateResponse, ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest,
-    ProjectUpdateApiRequest, ProjectsResponse,
+    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimApiRequest,
+    InvocationClaimNextApiRequest, InvocationClaimResponse, InvocationCommandApi,
+    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
+    InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionSpecApi,
+    InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
+    InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
+    ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::Db;
@@ -80,7 +80,7 @@ struct InvocationRuntime {
     persistence: Option<InvocationPersistence>,
     execution_mode: crate::api::InvocationExecutionModeApi,
     execution_spec: Mutex<Option<InvocationExecutionSpecApi>>,
-    claimed: Mutex<bool>,
+    lease: Mutex<Option<InvocationLease>>,
 }
 
 #[derive(Clone)]
@@ -97,6 +97,14 @@ struct InvocationPersistence {
     subcommand: String,
     promote_base_manifest: bool,
 }
+
+#[derive(Debug, Clone)]
+struct InvocationLease {
+    worker_id: String,
+    claimed_at: chrono::DateTime<Utc>,
+}
+
+const INVOCATION_STALE_AFTER: Duration = Duration::from_secs(15);
 
 impl InvocationManager {
     async fn create(
@@ -115,6 +123,7 @@ impl InvocationManager {
             last_heartbeat_at: None,
             completed_at: None,
             cancel_requested: false,
+            claimed_by: None,
         };
         let (tx, _) = broadcast::channel(1024);
         let runtime = Arc::new(InvocationRuntime {
@@ -124,7 +133,7 @@ impl InvocationManager {
             persistence,
             execution_mode,
             execution_spec: Mutex::new(execution_spec),
-            claimed: Mutex::new(false),
+            lease: Mutex::new(None),
         });
         self.inner
             .lock()
@@ -139,6 +148,7 @@ impl InvocationManager {
 
     async fn claim_next(
         &self,
+        worker_id: &str,
         execution_mode: Option<crate::api::InvocationExecutionModeApi>,
     ) -> AppResult<Option<InvocationClaimResponse>> {
         let runtimes = self
@@ -163,11 +173,11 @@ impl InvocationManager {
             if runtime.execution_spec.lock().await.is_none() {
                 continue;
             }
-            if *runtime.claimed.lock().await {
+            let invocation_id = runtime.status().await.invocation_id;
+            if !runtime.can_be_claimed().await {
                 continue;
             }
-            let invocation_id = runtime.status().await.invocation_id;
-            return runtime.claim_execution(invocation_id).await.map(Some);
+            return runtime.claim_execution(invocation_id, worker_id).await.map(Some);
         }
         Ok(None)
     }
@@ -182,6 +192,17 @@ impl InvocationManager {
 }
 
 impl InvocationRuntime {
+    async fn can_be_claimed(&self) -> bool {
+        if self.execution_spec.lock().await.is_none() {
+            return false;
+        }
+        let lease = self.lease.lock().await;
+        match lease.as_ref() {
+            None => true,
+            Some(lease) => Utc::now() - lease.claimed_at > chrono::Duration::from_std(INVOCATION_STALE_AFTER).unwrap_or_else(|_| chrono::Duration::seconds(15)),
+        }
+    }
+
     async fn push_event(&self, event: InvocationEvent) -> u64 {
         let sequenced = {
             let mut history = self.history.lock().await;
@@ -225,12 +246,15 @@ impl InvocationRuntime {
             error,
         };
         drop(current);
+        *self.lease.lock().await = None;
         let _ = self.push_event(completed).await;
     }
 
-    async fn heartbeat(&self) {
+    async fn heartbeat(&self, worker_id: &str) -> AppResult<bool> {
+        self.ensure_owned_by(worker_id).await?;
         let mut current = self.status.lock().await;
         current.last_heartbeat_at = Some(Utc::now());
+        Ok(current.cancel_requested)
     }
 
     async fn request_cancel(&self) {
@@ -238,9 +262,17 @@ impl InvocationRuntime {
         current.cancel_requested = true;
     }
 
-    async fn claim_execution(&self, invocation_id: Uuid) -> AppResult<InvocationClaimResponse> {
-        let mut claimed = self.claimed.lock().await;
-        if *claimed {
+    async fn claim_execution(
+        &self,
+        invocation_id: Uuid,
+        worker_id: &str,
+    ) -> AppResult<InvocationClaimResponse> {
+        let mut lease = self.lease.lock().await;
+        if let Some(existing) = lease.as_ref()
+            && Utc::now() - existing.claimed_at
+                <= chrono::Duration::from_std(INVOCATION_STALE_AFTER)
+                    .unwrap_or_else(|_| chrono::Duration::seconds(15))
+        {
             return Err(AppError::InvocationAlreadyClaimed(
                 invocation_id.to_string(),
             ));
@@ -251,12 +283,32 @@ impl InvocationRuntime {
             .await
             .clone()
             .ok_or_else(|| AppError::InvocationNotClaimable(invocation_id.to_string()))?;
-        *claimed = true;
+        *lease = Some(InvocationLease {
+            worker_id: worker_id.to_string(),
+            claimed_at: Utc::now(),
+        });
+        let mut status = self.status.lock().await;
+        status.claimed_by = Some(worker_id.to_string());
+        drop(status);
         Ok(InvocationClaimResponse {
             invocation_id,
+            worker_id: worker_id.to_string(),
             execution_mode: self.execution_mode,
             execution_spec: spec,
         })
+    }
+
+    async fn ensure_owned_by(&self, worker_id: &str) -> AppResult<()> {
+        let lease = self.lease.lock().await;
+        match lease.as_ref() {
+            Some(lease) if lease.worker_id == worker_id => Ok(()),
+            Some(_) => Err(AppError::Io(std::io::Error::other(
+                "invocation is owned by a different worker",
+            ))),
+            None => Err(AppError::Io(std::io::Error::other(
+                "invocation has not been claimed",
+            ))),
+        }
     }
 }
 
@@ -660,6 +712,7 @@ async fn invocation_create(
 async fn invocation_claim(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Json(request): Json<InvocationClaimApiRequest>,
 ) -> Result<Json<InvocationClaimResponse>, ApiError> {
     let runtime = state.invocations.get(id).await.ok_or_else(|| {
         AppError::Io(std::io::Error::new(
@@ -667,7 +720,7 @@ async fn invocation_claim(
             "invocation not found",
         ))
     })?;
-    let claimed = runtime.claim_execution(id).await?;
+    let claimed = runtime.claim_execution(id, &request.worker_id).await?;
     info!(invocation_id = %id, "claimed invocation execution");
     Ok(Json(claimed))
 }
@@ -676,7 +729,11 @@ async fn invocation_claim_next(
     State(state): State<AppState>,
     Json(request): Json<InvocationClaimNextApiRequest>,
 ) -> Result<Response, ApiError> {
-    let Some(claimed) = state.invocations.claim_next(request.execution_mode).await? else {
+    let Some(claimed) = state
+        .invocations
+        .claim_next(&request.worker_id, request.execution_mode)
+        .await?
+    else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
     info!(invocation_id = %claimed.invocation_id, "claimed next invocation execution");
@@ -686,7 +743,7 @@ async fn invocation_claim_next(
 async fn invocation_heartbeat(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(_request): Json<InvocationHeartbeatApiRequest>,
+    Json(request): Json<InvocationHeartbeatApiRequest>,
 ) -> Result<Json<InvocationHeartbeatResponse>, ApiError> {
     let runtime = state.invocations.get(id).await.ok_or_else(|| {
         AppError::Io(std::io::Error::new(
@@ -694,8 +751,7 @@ async fn invocation_heartbeat(
             "invocation not found",
         ))
     })?;
-    runtime.heartbeat().await;
-    let cancel_requested = runtime.status().await.cancel_requested;
+    let cancel_requested = runtime.heartbeat(&request.worker_id).await?;
     Ok(Json(InvocationHeartbeatResponse { cancel_requested }))
 }
 
@@ -746,6 +802,7 @@ async fn invocation_append_events(
             "invocation is already completed",
         ))));
     }
+    recorder.runtime.ensure_owned_by(&request.worker_id).await?;
     for event in request.events {
         recorder.record(event).await?;
     }
@@ -765,6 +822,7 @@ async fn invocation_complete(
         ))
     })?;
     let recorder = InvocationRecorder { runtime };
+    recorder.runtime.ensure_owned_by(&request.worker_id).await?;
     recorder.complete(request.completion).await?;
     state.invocations.schedule_cleanup(id);
     info!(invocation_id = %id, "completed invocation via api");

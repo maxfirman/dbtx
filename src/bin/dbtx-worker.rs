@@ -42,6 +42,13 @@ async fn run() -> AppResult<()> {
     let service_url = resolve_service_url(cli.service_url, Some(&current_dir))?
         .ok_or(AppError::MissingServiceUrl)?;
     let client = DaemonClient::new(service_url);
+    let worker_id = format!(
+        "worker-{}-{}",
+        std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("HOST"))
+            .unwrap_or_else(|_| "unknown".to_string()),
+        std::process::id()
+    );
     let execution_mode = match cli.execution_mode {
         WorkerExecutionMode::Server => InvocationExecutionModeApi::Server,
         WorkerExecutionMode::Local => InvocationExecutionModeApi::Local,
@@ -52,6 +59,7 @@ async fn run() -> AppResult<()> {
         match client
             .invocation_claim_next(InvocationClaimNextApiRequest {
                 execution_mode: Some(execution_mode),
+                worker_id: worker_id.clone(),
             })
             .await?
         {

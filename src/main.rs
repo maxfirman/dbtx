@@ -429,9 +429,11 @@ async fn invoke_via_local_worker(
     )
     .await?;
     let client = client::DaemonClient::new(service_url.clone());
+    let worker_id = format!("cli-local-{}", std::process::id());
     let claimed = client
         .invocation_claim_next(api::InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Local),
+            worker_id,
         })
         .await?;
     let claimed = claimed

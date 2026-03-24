@@ -129,22 +129,31 @@ pub struct InvocationExecutionSpecApi {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationClaimResponse {
     pub invocation_id: Uuid,
+    pub worker_id: String,
     pub execution_mode: InvocationExecutionModeApi,
     pub execution_spec: InvocationExecutionSpecApi,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationClaimApiRequest {
+    pub worker_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationClaimNextApiRequest {
     pub execution_mode: Option<InvocationExecutionModeApi>,
+    pub worker_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationEventBatchApiRequest {
+    pub worker_id: String,
     pub events: Vec<ExecutionEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationCompleteApiRequest {
+    pub worker_id: String,
     pub completion: ExecutionCompletion,
 }
 
@@ -158,6 +167,7 @@ pub struct InvocationStatusResponse {
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub cancel_requested: bool,
+    pub claimed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,8 +178,10 @@ pub enum InvocationLifecycleStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct InvocationHeartbeatApiRequest {}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationHeartbeatApiRequest {
+    pub worker_id: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationHeartbeatResponse {
