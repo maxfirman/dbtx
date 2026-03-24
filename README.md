@@ -2,6 +2,12 @@
 
 `dbtx` is a Rust wrapper around `dbt-fusion` that persists run state to PostgreSQL.
 
+The runtime is split into three binaries:
+
+- `dbtx-server`: control plane and state persistence
+- `dbtx-worker`: execution plane
+- `dbtx`: client/operator CLI
+
 Phase 1 supports:
 
 - `dbtx state migrate`
@@ -10,23 +16,53 @@ Phase 1 supports:
 - `dbtx ls ...`
 - `dbtx test ...`
 - `dbtx seed ...`
+- `dbtx invocation list`
+- `dbtx invocation show --invocation-id ...`
+- `dbtx invocation cancel --invocation-id ...`
 
 ## Configuration
 
 - `DBTX_DATABASE_URL`: PostgreSQL connection string for `dbtx-server`
 - `DBTX_SERVICE_URL`: URL for the `dbtx-server` daemon
+- `DBTX_WORKER_PATH`: optional path to the `dbtx-worker` executable used by `dbtx` for local execution
 - `DBTX_DBT_PATH`: optional path to the `dbt` executable, defaults to `dbt`
 - `DBTX_ENVIRONMENT_SLUG`: optional override for environment identity
 
+## Execution Model
+
+- `dbtx-server` owns the control plane:
+  - projects, environments, runs, and reconstructed state
+  - live invocation status and SSE log streaming
+- `dbtx-worker` owns execution:
+  - polls for claimable work in long-running mode
+  - or executes one specific invocation in one-shot mode
+- `dbtx` is a pure client:
+  - talks to `dbtx-server`
+  - for local execution, shells out to `dbtx-worker --execution-mode local --once --invocation-id ...`
+
+This means both local execution and server-style execution use the same worker runtime.
+
 ## Examples
 
-Start the daemon:
+Start the control plane:
 
 ```bash
 DBTX_DATABASE_URL=postgres://localhost/dbtx cargo run --bin dbtx-server -- --listen 127.0.0.1:8585
 ```
 
-Initialize the schema:
+Start a long-running worker for server-mode execution:
+
+```bash
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run --bin dbtx-worker -- --execution-mode server
+```
+
+Optionally start a long-running local-mode worker:
+
+```bash
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run --bin dbtx-worker -- --execution-mode local
+```
+
+Apply schema migrations:
 
 ```bash
 DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- state migrate
@@ -48,6 +84,24 @@ List nodes using reconstructed state:
 
 ```bash
 DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- ls --select orders+
+```
+
+Inspect active invocations:
+
+```bash
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- invocation list
+```
+
+Request cancellation for an invocation:
+
+```bash
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- invocation cancel --invocation-id <uuid>
+```
+
+Execute a single server-mode invocation with a one-shot worker:
+
+```bash
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run --bin dbtx-worker -- --execution-mode server --once
 ```
 
 ## Real Integration Tests
