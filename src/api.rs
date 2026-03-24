@@ -114,6 +114,7 @@ pub enum InvocationExecutionModeApi {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationCreateResponse {
     pub invocation_id: Uuid,
+    pub execution_mode: InvocationExecutionModeApi,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

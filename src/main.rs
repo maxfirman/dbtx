@@ -1,12 +1,12 @@
 use clap::Parser;
 use dbtx::api;
+use dbtx::api::InvocationExecutionModeApi;
 use dbtx::cli::{Cli, Command, EnvironmentCommand, ProjectCommand, StateCommand};
 use dbtx::client;
 use dbtx::config::{self, resolve_service_url};
 use dbtx::db::{self, EnvironmentRecord, ProjectRecord};
 use dbtx::error::{AppError, AppResult};
 use dbtx::services::InvocationCommand;
-use dbtx::api::InvocationExecutionModeApi;
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -352,8 +352,37 @@ async fn invoke_via_daemon(
     args: Vec<OsString>,
     ctx: &config::InvocationContext,
 ) -> AppResult<()> {
+    let response = create_invocation(
+        service_url.clone(),
+        command,
+        args,
+        ctx,
+        InvocationExecutionModeApi::Server,
+    )
+    .await?;
     let client = client::DaemonClient::new(service_url);
-    let response = client
+    let status = client.invocation_status(response.invocation_id).await?;
+    match status.exit_code.unwrap_or(1) {
+        0 => Ok(()),
+        code => {
+            if let Some(error) = status.error {
+                Err(AppError::Io(std::io::Error::other(error)))
+            } else {
+                Err(AppError::DbtFailed(code))
+            }
+        }
+    }
+}
+
+async fn create_invocation(
+    service_url: String,
+    command: InvocationCommand,
+    args: Vec<OsString>,
+    ctx: &config::InvocationContext,
+    execution_mode: InvocationExecutionModeApi,
+) -> AppResult<api::InvocationCreateResponse> {
+    let client = client::DaemonClient::new(service_url);
+    client
         .invocation_create(api::InvocationCreateApiRequest {
             command: match command {
                 InvocationCommand::Build => api::InvocationCommandApi::Build,
@@ -368,36 +397,9 @@ async fn invoke_via_daemon(
                 .collect(),
             current_dir: ctx.project_dir.display().to_string(),
             environment_slug: ctx.environment_slug.clone(),
-            execution_mode: InvocationExecutionModeApi::Server,
+            execution_mode,
         })
-        .await?;
-    client
-        .stream_invocation_events(response.invocation_id, |event| {
-            match event.stream.as_deref() {
-                Some("stderr") => {
-                    if let Some(text) = event.text.as_deref() {
-                        eprintln!("{text}");
-                    }
-                }
-                _ => {
-                    if let Some(text) = event.text.as_deref() {
-                        println!("{text}");
-                    }
-                }
-            }
-        })
-        .await?;
-    let status = client.invocation_status(response.invocation_id).await?;
-    match status.exit_code.unwrap_or(1) {
-        0 => Ok(()),
-        code => {
-            if let Some(error) = status.error {
-                Err(AppError::Io(std::io::Error::other(error)))
-            } else {
-                Err(AppError::DbtFailed(code))
-            }
-        }
-    }
+        .await
 }
 
 fn print_project(project: &ProjectRecord) {

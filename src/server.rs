@@ -490,6 +490,16 @@ async fn invocation_create(
     let db = state.db.clone();
     let runtime_config = state.runtime_config.clone();
     let invocations = state.invocations.clone();
+    if matches!(request.execution_mode, crate::api::InvocationExecutionModeApi::Local) {
+        info!(
+            invocation_id = %invocation_id,
+            "created local-worker invocation"
+        );
+        return Ok(Json(InvocationCreateResponse {
+            invocation_id,
+            execution_mode: request.execution_mode,
+        }));
+    }
     tokio::spawn(async move {
         let service = InvocationService::new(&db);
         let recorder = InvocationRecorder {
@@ -556,7 +566,10 @@ async fn invocation_create(
         }
         invocations.schedule_cleanup(invocation_id);
     });
-    Ok(Json(InvocationCreateResponse { invocation_id }))
+    Ok(Json(InvocationCreateResponse {
+        invocation_id,
+        execution_mode: request.execution_mode,
+    }))
 }
 
 async fn invocation_status(
