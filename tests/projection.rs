@@ -593,10 +593,10 @@ async fn insert_run(pool: &PgPool, run: RunInsert<'_>) {
     sqlx::query(
         r#"
         INSERT INTO runs (
-            id, run_id, project_id, environment_id, dbt_invocation_id, command, args,
+            id, run_id, project_id, environment_id, command, args,
             is_full_graph_run, started_at, finished_at, exit_code, terminal_status
         )
-        VALUES ($1, $2, $3, $4, $2, $5, '[]'::jsonb, $6, NOW(), NOW(), 0, $7)
+        VALUES ($1, $2, $3, $4, $5, '[]'::jsonb, $6, NOW(), NOW(), 0, $7)
         "#,
     )
     .bind(run.id)

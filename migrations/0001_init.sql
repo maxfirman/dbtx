@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id UUID NOT NULL UNIQUE,
     project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     environment_id BIGINT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-    dbt_invocation_id UUID,
     command TEXT NOT NULL,
     args JSONB NOT NULL,
     is_full_graph_run BOOLEAN NOT NULL DEFAULT FALSE,

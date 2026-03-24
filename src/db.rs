@@ -529,10 +529,10 @@ impl Db {
         sqlx::query(
             r#"
             INSERT INTO runs (
-                run_id, project_id, environment_id, dbt_invocation_id, command, args, is_full_graph_run,
+                run_id, project_id, environment_id, command, args, is_full_graph_run,
                 git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref
             )
-            VALUES ($1, $2, $3, $1, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(run.run_id)
