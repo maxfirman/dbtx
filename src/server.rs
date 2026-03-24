@@ -10,6 +10,7 @@ use crate::config::RuntimeConfig;
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
 use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
+use crate::execution::ExecutionMode;
 use crate::event::LogEvent;
 use crate::services::{
     EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
@@ -510,6 +511,10 @@ async fn invocation_create(
                     config: runtime_config,
                     current_dir: Some(PathBuf::from(request.current_dir)),
                     environment_slug: request.environment_slug,
+                    execution_mode: match request.execution_mode {
+                        crate::api::InvocationExecutionModeApi::Server => ExecutionMode::Server,
+                        crate::api::InvocationExecutionModeApi::Local => ExecutionMode::Local,
+                    },
                 },
                 &mut observer,
             )

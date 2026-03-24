@@ -1,5 +1,6 @@
 use crate::config::read_dbtx_project_id;
 use crate::error::{AppError, AppResult};
+use crate::execution::ExecutionMode;
 use crate::event::LogEvent;
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
 use crate::profile::{
@@ -139,6 +140,7 @@ pub(crate) struct RunStart<'a> {
     pub(crate) subcommand: &'a str,
     pub(crate) args_json: Value,
     pub(crate) is_full_graph_run: bool,
+    pub(crate) execution_mode: ExecutionMode,
     pub(crate) git_state: &'a GitState,
 }
 
@@ -530,9 +532,9 @@ impl Db {
             r#"
             INSERT INTO runs (
                 run_id, project_id, environment_id, command, args, is_full_graph_run,
-                git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref
+                execution_mode, git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
         )
         .bind(run.run_id)
@@ -541,6 +543,10 @@ impl Db {
         .bind(run.subcommand)
         .bind(run.args_json)
         .bind(run.is_full_graph_run)
+        .bind(match run.execution_mode {
+            ExecutionMode::Server => "server",
+            ExecutionMode::Local => "local",
+        })
         .bind(run.git_state.branch.as_deref())
         .bind(run.git_state.commit_sha.as_deref())
         .bind(

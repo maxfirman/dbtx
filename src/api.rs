@@ -91,6 +91,7 @@ pub struct InvocationCreateApiRequest {
     pub args: Vec<String>,
     pub current_dir: String,
     pub environment_slug: String,
+    pub execution_mode: InvocationExecutionModeApi,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +102,13 @@ pub enum InvocationCommandApi {
     Ls,
     Test,
     Seed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationExecutionModeApi {
+    Server,
+    Local,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

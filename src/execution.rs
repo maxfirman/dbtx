@@ -2,6 +2,13 @@ use crate::api::InvocationLifecycleStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Server,
+    Local,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExecutionEventKind {
     StdoutLine,

@@ -6,6 +6,7 @@ use crate::db::{
     spawn_dbt_child, validate_environment_git_state,
 };
 use crate::error::{AppError, AppResult};
+use crate::execution::ExecutionMode;
 use crate::event::LogEvent;
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
 use crate::profile::LocalTargetProfile;
@@ -53,6 +54,7 @@ pub struct InvocationRequest {
     pub config: RuntimeConfig,
     pub current_dir: Option<PathBuf>,
     pub environment_slug: String,
+    pub execution_mode: ExecutionMode,
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +349,7 @@ impl<'a> InvocationService<'a> {
             _ => {
                 self.invoke_persisting(
                     request.command.as_str(),
+                    request.execution_mode,
                     &request.config,
                     InvocationScope {
                         ctx,
@@ -364,6 +367,7 @@ impl<'a> InvocationService<'a> {
     async fn invoke_persisting<O: InvocationObserver>(
         &self,
         subcommand: &str,
+        execution_mode: ExecutionMode,
         config: &RuntimeConfig,
         scope: InvocationScope<'_>,
         observer: &mut O,
@@ -412,6 +416,7 @@ impl<'a> InvocationService<'a> {
                 subcommand,
                 args_json,
                 is_full_graph_run: ctx.is_full_graph_run,
+                execution_mode,
                 git_state,
             })
             .await?;

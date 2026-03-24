@@ -6,6 +6,7 @@ use dbtx::config::{self, resolve_service_url};
 use dbtx::db::{self, EnvironmentRecord, ProjectRecord};
 use dbtx::error::{AppError, AppResult};
 use dbtx::services::InvocationCommand;
+use dbtx::api::InvocationExecutionModeApi;
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -367,6 +368,7 @@ async fn invoke_via_daemon(
                 .collect(),
             current_dir: ctx.project_dir.display().to_string(),
             environment_slug: ctx.environment_slug.clone(),
+            execution_mode: InvocationExecutionModeApi::Server,
         })
         .await?;
     client
