@@ -4,6 +4,7 @@ pub mod client;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod execution;
 pub mod event;
 pub mod manifest;
 pub mod profile;

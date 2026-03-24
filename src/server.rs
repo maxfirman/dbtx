@@ -8,6 +8,7 @@ use crate::api::{
 use crate::config::RuntimeConfig;
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
+use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use crate::event::LogEvent;
 use crate::services::{
     EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
@@ -72,6 +73,11 @@ struct InvocationRuntime {
     status: Mutex<InvocationStatusResponse>,
     history: Mutex<InvocationHistory>,
     tx: broadcast::Sender<SequencedInvocationEvent>,
+}
+
+#[derive(Clone)]
+struct InvocationRecorder {
+    runtime: Arc<InvocationRuntime>,
 }
 
 impl InvocationManager {
@@ -157,45 +163,72 @@ impl InvocationRuntime {
     }
 }
 
+impl InvocationRecorder {
+    async fn record(&self, event: ExecutionEvent) {
+        self.runtime.push_event(InvocationEvent {
+            event_type: match event.kind {
+                ExecutionEventKind::StdoutLine => "stdout.line".to_string(),
+                ExecutionEventKind::StderrLine => "stderr.line".to_string(),
+                ExecutionEventKind::DbtLog => "dbt.log".to_string(),
+            },
+            timestamp: event.occurred_at,
+            text: event.text,
+            stream: match event.kind {
+                ExecutionEventKind::StdoutLine | ExecutionEventKind::DbtLog => {
+                    Some("stdout".to_string())
+                }
+                ExecutionEventKind::StderrLine => Some("stderr".to_string()),
+            },
+            dbt_event_name: event.dbt_event_name,
+            node_unique_id: event.node_unique_id,
+            level: event.level,
+            exit_code: None,
+            error: event.error,
+        })
+        .await;
+    }
+
+    async fn complete(&self, completion: ExecutionCompletion) {
+        self.runtime
+            .finish(completion.status, completion.exit_code, completion.error)
+            .await;
+    }
+}
+
 struct StreamingInvocationObserver {
-    tx: mpsc::UnboundedSender<InvocationEvent>,
+    tx: mpsc::UnboundedSender<ExecutionEvent>,
 }
 
 impl InvocationObserver for StreamingInvocationObserver {
     fn stdout_line(&mut self, line: &str) {
-        let _ = self.tx.send(InvocationEvent {
-            event_type: "stdout.line".to_string(),
-            timestamp: Utc::now(),
+        let _ = self.tx.send(ExecutionEvent {
+            kind: ExecutionEventKind::StdoutLine,
+            occurred_at: Utc::now(),
             text: Some(line.to_string()),
-            stream: Some("stdout".to_string()),
             dbt_event_name: None,
             node_unique_id: None,
             level: None,
-            exit_code: None,
             error: None,
         });
     }
 
     fn stderr_line(&mut self, line: &str) {
-        let _ = self.tx.send(InvocationEvent {
-            event_type: "stderr.line".to_string(),
-            timestamp: Utc::now(),
+        let _ = self.tx.send(ExecutionEvent {
+            kind: ExecutionEventKind::StderrLine,
+            occurred_at: Utc::now(),
             text: Some(line.to_string()),
-            stream: Some("stderr".to_string()),
             dbt_event_name: None,
             node_unique_id: None,
             level: None,
-            exit_code: None,
             error: None,
         });
     }
 
     fn dbt_log(&mut self, event: &LogEvent, rendered: Option<&str>) {
-        let _ = self.tx.send(InvocationEvent {
-            event_type: "dbt.log".to_string(),
-            timestamp: Utc::now(),
+        let _ = self.tx.send(ExecutionEvent {
+            kind: ExecutionEventKind::DbtLog,
+            occurred_at: Utc::now(),
             text: rendered.map(ToString::to_string),
-            stream: Some("stdout".to_string()),
             dbt_event_name: Some(event.info.name.clone()),
             node_unique_id: event
                 .data
@@ -204,7 +237,6 @@ impl InvocationObserver for StreamingInvocationObserver {
                 .and_then(|value| value.as_str())
                 .map(ToString::to_string),
             level: Some(event.info.level.clone()),
-            exit_code: None,
             error: None,
         });
     }
@@ -449,12 +481,15 @@ async fn invocation_create(
     let invocations = state.invocations.clone();
     tokio::spawn(async move {
         let service = InvocationService::new(&db);
+        let recorder = InvocationRecorder {
+            runtime: runtime.clone(),
+        };
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let mut observer = StreamingInvocationObserver { tx: event_tx };
-        let event_runtime = runtime.clone();
+        let event_recorder = recorder.clone();
         let event_forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                event_runtime.push_event(event).await;
+                event_recorder.record(event).await;
             }
         });
         let result = service
@@ -480,8 +515,12 @@ async fn invocation_create(
                     exit_code = result.exit_code,
                     "invocation completed successfully"
                 );
-                runtime
-                    .finish(InvocationLifecycleStatus::Succeeded, result.exit_code, None)
+                recorder
+                    .complete(ExecutionCompletion {
+                        status: InvocationLifecycleStatus::Succeeded,
+                        exit_code: result.exit_code,
+                        error: None,
+                    })
                     .await
             }
             Err(err) => {
@@ -491,12 +530,12 @@ async fn invocation_create(
                     error = %err,
                     "invocation failed"
                 );
-                runtime
-                    .finish(
-                        InvocationLifecycleStatus::Failed,
-                        err.exit_code(),
-                        Some(err.to_string()),
-                    )
+                recorder
+                    .complete(ExecutionCompletion {
+                        status: InvocationLifecycleStatus::Failed,
+                        exit_code: err.exit_code(),
+                        error: Some(err.to_string()),
+                    })
                     .await
             }
         }
