@@ -355,7 +355,7 @@ async fn invoke_via_daemon(
     args: Vec<OsString>,
     ctx: &config::InvocationContext,
 ) -> AppResult<()> {
-    if matches!(command, InvocationCommand::Ls) {
+    if matches!(command, InvocationCommand::Ls) || command.persists_state() {
         return invoke_via_local_worker(service_url, command, args, ctx).await;
     }
     let response = create_invocation(
@@ -472,26 +472,64 @@ async fn invoke_via_local_worker(
         }
         Result::<Vec<String>, std::io::Error>::Ok(lines)
     });
+    let mut dbt_version: Option<String> = None;
 
     while let Some(line) = stdout_reader.next_line().await? {
-        println!("{line}");
-        client
-            .invocation_append_events(
-                response.invocation_id,
-                api::InvocationEventBatchApiRequest {
-                    events: vec![dbtx::execution::ExecutionEvent {
-                        kind: dbtx::execution::ExecutionEventKind::StdoutLine,
-                        occurred_at: chrono::Utc::now(),
-                        text: Some(line),
-                        raw_line: None,
-                        dbt_event_name: None,
-                        node_unique_id: None,
-                        level: None,
-                        error: None,
-                    }],
-                },
-            )
-            .await?;
+        if command.persists_state()
+            && let Some(event) = dbtx::event::LogEvent::parse(&line)
+        {
+            if dbt_version.is_none() && event.info.name == "MainReportVersion" {
+                dbt_version = event
+                    .data
+                    .get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string);
+            }
+            if let Some(rendered) = event.render_text_line() {
+                println!("{rendered}");
+            }
+            client
+                .invocation_append_events(
+                    response.invocation_id,
+                    api::InvocationEventBatchApiRequest {
+                        events: vec![dbtx::execution::ExecutionEvent {
+                            kind: dbtx::execution::ExecutionEventKind::DbtLog,
+                            occurred_at: chrono::Utc::now(),
+                            text: event.render_text_line(),
+                            raw_line: Some(line),
+                            dbt_event_name: Some(event.info.name.clone()),
+                            node_unique_id: event
+                                .data
+                                .get("node_info")
+                                .and_then(|value| value.get("unique_id"))
+                                .and_then(|value| value.as_str())
+                                .map(ToString::to_string),
+                            level: Some(event.info.level.clone()),
+                            error: None,
+                        }],
+                    },
+                )
+                .await?;
+        } else {
+            println!("{line}");
+            client
+                .invocation_append_events(
+                    response.invocation_id,
+                    api::InvocationEventBatchApiRequest {
+                        events: vec![dbtx::execution::ExecutionEvent {
+                            kind: dbtx::execution::ExecutionEventKind::StdoutLine,
+                            occurred_at: chrono::Utc::now(),
+                            text: Some(line.clone()),
+                            raw_line: Some(line),
+                            dbt_event_name: None,
+                            node_unique_id: None,
+                            level: None,
+                            error: None,
+                        }],
+                    },
+                )
+                .await?;
+        }
     }
 
     let status = child.wait().await?;
@@ -506,8 +544,8 @@ async fn invoke_via_local_worker(
                     events: vec![dbtx::execution::ExecutionEvent {
                         kind: dbtx::execution::ExecutionEventKind::StderrLine,
                         occurred_at: chrono::Utc::now(),
-                        text: Some(line),
-                        raw_line: None,
+                        text: Some(line.clone()),
+                        raw_line: Some(line),
                         dbt_event_name: None,
                         node_unique_id: None,
                         level: None,
@@ -519,6 +557,14 @@ async fn invoke_via_local_worker(
     }
 
     let exit_code = status.code().unwrap_or(1);
+    let manifest = if command.persists_state() {
+        let manifest_path = ctx.target_path.join("manifest.json");
+        std::fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+    } else {
+        None
+    };
     client
         .invocation_complete(
             response.invocation_id,
@@ -532,8 +578,8 @@ async fn invoke_via_local_worker(
                     exit_code,
                     error: (!status.success())
                         .then(|| format!("dbt invocation failed with exit code {exit_code}")),
-                    dbt_version: None,
-                    manifest: None,
+                    dbt_version,
+                    manifest,
                 },
             },
         )
