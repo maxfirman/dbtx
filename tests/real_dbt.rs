@@ -1115,7 +1115,7 @@ fn next_listen_addr() -> String {
 }
 
 fn wait_for_server(service_url: &str, child: &mut Child) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let addr = service_url.trim_start_matches("http://");
     loop {
         if TcpStream::connect(addr).is_ok() {

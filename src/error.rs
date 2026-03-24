@@ -38,6 +38,8 @@ pub enum AppError {
     Encryption(String),
     #[error("invalid encrypted secret payload: {0}")]
     InvalidEncryptedSecret(String),
+    #[error("local execution is not supported for command '{0}' yet")]
+    UnsupportedLocalExecution(String),
     #[error("dbt invocation failed with exit code {0}")]
     DbtFailed(i32),
     #[error("missing manifest at {0}")]

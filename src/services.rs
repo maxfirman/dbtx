@@ -6,8 +6,8 @@ use crate::db::{
     spawn_dbt_child, validate_environment_git_state,
 };
 use crate::error::{AppError, AppResult};
-use crate::execution::ExecutionMode;
 use crate::event::LogEvent;
+use crate::execution::ExecutionMode;
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
 use crate::profile::LocalTargetProfile;
 use serde_json::Value;
@@ -60,6 +60,14 @@ pub struct InvocationRequest {
 #[derive(Debug, Clone)]
 pub struct InvocationResult {
     pub exit_code: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalExecutionSpec {
+    pub command: InvocationCommand,
+    pub args: Vec<OsString>,
+    pub profiles_yml: String,
+    pub state_manifest: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +370,71 @@ impl<'a> InvocationService<'a> {
                 .await
             }
         }
+    }
+
+    pub async fn prepare_local_execution(
+        &self,
+        request: InvocationRequest,
+    ) -> AppResult<LocalExecutionSpec> {
+        self.db.require_current_schema().await?;
+        let inject_json_logging = request.command.persists_state();
+        let current_dir = request
+            .current_dir
+            .clone()
+            .unwrap_or(std::env::current_dir()?);
+        let ctx =
+            InvocationContext::from_args_in_dir(&request.args, inject_json_logging, &current_dir)?;
+        let ctx = InvocationContext {
+            environment_slug: request.environment_slug.clone(),
+            ..ctx
+        };
+        let project = self.db.resolve_local_project(&ctx.project_dir).await?;
+        let git_state = read_git_state(&ctx.project_dir);
+        let environment = self
+            .db
+            .get_environment(&project.project_id, &ctx.environment_slug)
+            .await?;
+        validate_environment_git_state(&project, &environment, &git_state)?;
+
+        if !matches!(request.command, InvocationCommand::Ls) {
+            return Err(AppError::UnsupportedLocalExecution(
+                request.command.as_str().to_string(),
+            ));
+        }
+
+        let reconstructed_manifest = self
+            .db
+            .load_reconstructed_manifest(project.id, environment.id)
+            .await?
+            .or(if ctx.wants_state_modified {
+                Some(
+                    ReconstructedManifest::write_empty_state(
+                        &read_dbt_project_name(&ctx.project_dir),
+                        &environment.adapter_type,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            });
+        let state_manifest = if let Some(reconstructed_manifest) = reconstructed_manifest.as_ref() {
+            let path = reconstructed_manifest.temp_dir.path().join("manifest.json");
+            let content = tokio::fs::read_to_string(path).await?;
+            Some(serde_json::from_str(&content)?)
+        } else {
+            None
+        };
+        let generated_profiles = build_generated_profiles(&ctx.project_dir, &environment)?;
+        let profiles_yml =
+            tokio::fs::read_to_string(generated_profiles.temp_dir.path().join("profiles.yml"))
+                .await?;
+
+        Ok(LocalExecutionSpec {
+            command: request.command,
+            args: ctx.dbt_args,
+            profiles_yml,
+            state_manifest,
+        })
     }
 
     async fn invoke_persisting<O: InvocationObserver>(

@@ -2,16 +2,16 @@ use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
     EnvironmentsResponse, InvocationCommandApi, InvocationCompleteApiRequest,
     InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
-    InvocationEventBatchApiRequest, InvocationLifecycleStatus, InvocationStatusResponse,
-    MigrateResponse, ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest,
-    ProjectUpdateApiRequest, ProjectsResponse,
+    InvocationEventBatchApiRequest, InvocationExecutionSpecApi, InvocationLifecycleStatus,
+    InvocationStatusResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
+    ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
-use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
-use crate::execution::ExecutionMode;
 use crate::event::LogEvent;
+use crate::execution::ExecutionMode;
+use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use crate::services::{
     EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
     InvocationObserver, InvocationRequest, InvocationService, ProjectInitRequest, ProjectService,
@@ -167,27 +167,28 @@ impl InvocationRuntime {
 
 impl InvocationRecorder {
     async fn record(&self, event: ExecutionEvent) {
-        self.runtime.push_event(InvocationEvent {
-            event_type: match event.kind {
-                ExecutionEventKind::StdoutLine => "stdout.line".to_string(),
-                ExecutionEventKind::StderrLine => "stderr.line".to_string(),
-                ExecutionEventKind::DbtLog => "dbt.log".to_string(),
-            },
-            timestamp: event.occurred_at,
-            text: event.text,
-            stream: match event.kind {
-                ExecutionEventKind::StdoutLine | ExecutionEventKind::DbtLog => {
-                    Some("stdout".to_string())
-                }
-                ExecutionEventKind::StderrLine => Some("stderr".to_string()),
-            },
-            dbt_event_name: event.dbt_event_name,
-            node_unique_id: event.node_unique_id,
-            level: event.level,
-            exit_code: None,
-            error: event.error,
-        })
-        .await;
+        self.runtime
+            .push_event(InvocationEvent {
+                event_type: match event.kind {
+                    ExecutionEventKind::StdoutLine => "stdout.line".to_string(),
+                    ExecutionEventKind::StderrLine => "stderr.line".to_string(),
+                    ExecutionEventKind::DbtLog => "dbt.log".to_string(),
+                },
+                timestamp: event.occurred_at,
+                text: event.text,
+                stream: match event.kind {
+                    ExecutionEventKind::StdoutLine | ExecutionEventKind::DbtLog => {
+                        Some("stdout".to_string())
+                    }
+                    ExecutionEventKind::StderrLine => Some("stderr".to_string()),
+                },
+                dbt_event_name: event.dbt_event_name,
+                node_unique_id: event.node_unique_id,
+                level: event.level,
+                exit_code: None,
+                error: event.error,
+            })
+            .await;
     }
 
     async fn complete(&self, completion: ExecutionCompletion) {
@@ -273,7 +274,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/invocations", post(invocation_create))
         .route("/v1/invocations/{id}", get(invocation_status))
         .route("/v1/invocations/{id}/complete", post(invocation_complete))
-        .route("/v1/invocations/{id}/events", post(invocation_append_events))
+        .route(
+            "/v1/invocations/{id}/events",
+            post(invocation_append_events),
+        )
         .route("/v1/invocations/{id}/events", get(invocation_events))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
@@ -490,7 +494,21 @@ async fn invocation_create(
     let db = state.db.clone();
     let runtime_config = state.runtime_config.clone();
     let invocations = state.invocations.clone();
-    if matches!(request.execution_mode, crate::api::InvocationExecutionModeApi::Local) {
+    if matches!(
+        request.execution_mode,
+        crate::api::InvocationExecutionModeApi::Local
+    ) {
+        let service = InvocationService::new(&db);
+        let spec = service
+            .prepare_local_execution(InvocationRequest {
+                command: map_invocation_command(request.command.clone()),
+                args: request.args.iter().cloned().map(Into::into).collect(),
+                config: runtime_config.clone(),
+                current_dir: Some(PathBuf::from(&request.current_dir)),
+                environment_slug: request.environment_slug.clone(),
+                execution_mode: ExecutionMode::Local,
+            })
+            .await?;
         info!(
             invocation_id = %invocation_id,
             "created local-worker invocation"
@@ -498,6 +516,16 @@ async fn invocation_create(
         return Ok(Json(InvocationCreateResponse {
             invocation_id,
             execution_mode: request.execution_mode,
+            execution_spec: Some(InvocationExecutionSpecApi {
+                command: request.command,
+                args: spec
+                    .args
+                    .into_iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect(),
+                profiles_yml: spec.profiles_yml,
+                state_manifest: spec.state_manifest,
+            }),
         }));
     }
     tokio::spawn(async move {
@@ -569,6 +597,7 @@ async fn invocation_create(
     Ok(Json(InvocationCreateResponse {
         invocation_id,
         execution_mode: request.execution_mode,
+        execution_spec: None,
     }))
 }
 
@@ -704,7 +733,8 @@ impl IntoResponse for ApiError {
             | AppError::CommitEnvironmentRequiresSha
             | AppError::InvalidProfileConfig(_)
             | AppError::InvalidProfileSecret(_)
-            | AppError::MissingSecretKey => StatusCode::BAD_REQUEST,
+            | AppError::MissingSecretKey
+            | AppError::UnsupportedLocalExecution(_) => StatusCode::BAD_REQUEST,
             AppError::ProjectIdNotFound(_) | AppError::EnvironmentNotFound(_, _) => {
                 StatusCode::NOT_FOUND
             }
@@ -802,17 +832,21 @@ mod tests {
     async fn recorder_appends_execution_events_into_runtime_history() {
         let manager = InvocationManager::default();
         let (_id, runtime) = manager.create().await;
-        let recorder = InvocationRecorder { runtime: runtime.clone() };
+        let recorder = InvocationRecorder {
+            runtime: runtime.clone(),
+        };
 
-        recorder.record(ExecutionEvent {
-            kind: ExecutionEventKind::StdoutLine,
-            occurred_at: Utc::now(),
-            text: Some("hello".to_string()),
-            dbt_event_name: None,
-            node_unique_id: None,
-            level: None,
-            error: None,
-        }).await;
+        recorder
+            .record(ExecutionEvent {
+                kind: ExecutionEventKind::StdoutLine,
+                occurred_at: Utc::now(),
+                text: Some("hello".to_string()),
+                dbt_event_name: None,
+                node_unique_id: None,
+                level: None,
+                error: None,
+            })
+            .await;
 
         let history = runtime.history.lock().await;
         assert_eq!(history.items.len(), 1);
@@ -826,14 +860,19 @@ mod tests {
         let (_id, runtime) = manager.create().await;
         let recorder = InvocationRecorder { runtime };
 
-        recorder.complete(ExecutionCompletion {
-            status: crate::api::InvocationLifecycleStatus::Succeeded,
-            exit_code: 0,
-            error: None,
-        }).await;
+        recorder
+            .complete(ExecutionCompletion {
+                status: crate::api::InvocationLifecycleStatus::Succeeded,
+                exit_code: 0,
+                error: None,
+            })
+            .await;
 
         let status = recorder.runtime.status().await;
-        assert!(matches!(status.status, crate::api::InvocationLifecycleStatus::Succeeded));
+        assert!(matches!(
+            status.status,
+            crate::api::InvocationLifecycleStatus::Succeeded
+        ));
         assert_eq!(status.exit_code, Some(0));
         assert!(status.completed_at.is_some());
     }
@@ -842,7 +881,9 @@ mod tests {
     async fn recorder_rejects_appends_after_completion() {
         let manager = InvocationManager::default();
         let (_id, runtime) = manager.create().await;
-        let recorder = InvocationRecorder { runtime: runtime.clone() };
+        let recorder = InvocationRecorder {
+            runtime: runtime.clone(),
+        };
 
         assert!(recorder.is_running().await);
 
