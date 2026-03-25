@@ -10,7 +10,10 @@ use crate::api::{
     ProjectsResponse, ReadyResponse,
 };
 use crate::config::RuntimeConfig;
-use crate::db::{CreateInvocationInput, Db, InvocationPersistenceRecord, TimedOutInvocationRecord};
+use crate::db::{
+    CreateInvocationInput, Db, InvocationCancellationRecord, InvocationPersistenceRecord,
+    TimedOutInvocationRecord,
+};
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
@@ -377,29 +380,13 @@ async fn publish_timed_out_invocations(
     timed_out: &[TimedOutInvocationRecord],
 ) -> AppResult<()> {
     for timed_out_invocation in timed_out {
-        let runtime = state
-            .invocations
-            .get_or_create(timed_out_invocation.invocation_id, None)
-            .await;
-        let completed_event = InvocationEvent {
-            event_type: "invocation.completed".to_string(),
-            timestamp: Utc::now(),
-            text: None,
-            stream: None,
-            dbt_event_name: None,
-            node_unique_id: None,
-            level: None,
-            exit_code: Some(timed_out_invocation.exit_code),
-            error: Some(timed_out_invocation.error.clone()),
-        };
-        let sequence = state
-            .db
-            .append_invocation_event(timed_out_invocation.invocation_id, &completed_event)
-            .await?;
-        runtime.push_event(sequence, completed_event).await;
-        state
-            .invocations
-            .schedule_cleanup(timed_out_invocation.invocation_id);
+        publish_terminal_invocation(
+            state,
+            timed_out_invocation.invocation_id,
+            timed_out_invocation.exit_code,
+            timed_out_invocation.error.clone(),
+        )
+        .await?;
         info!(
             invocation_id = %timed_out_invocation.invocation_id,
             status = ?timed_out_invocation.status,
@@ -407,6 +394,33 @@ async fn publish_timed_out_invocations(
             "failed timed out invocation"
         );
     }
+    Ok(())
+}
+
+async fn publish_terminal_invocation(
+    state: &AppState,
+    invocation_id: Uuid,
+    exit_code: i32,
+    error: String,
+) -> AppResult<()> {
+    let runtime = state.invocations.get_or_create(invocation_id, None).await;
+    let completed_event = InvocationEvent {
+        event_type: "invocation.completed".to_string(),
+        timestamp: Utc::now(),
+        text: None,
+        stream: None,
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        exit_code: Some(exit_code),
+        error: Some(error),
+    };
+    let sequence = state
+        .db
+        .append_invocation_event(invocation_id, &completed_event)
+        .await?;
+    runtime.push_event(sequence, completed_event).await;
+    state.invocations.schedule_cleanup(invocation_id);
     Ok(())
 }
 
@@ -768,7 +782,18 @@ async fn invocation_cancel(
     Path(id): Path<Uuid>,
     Json(_request): Json<InvocationCancelApiRequest>,
 ) -> Result<StatusCode, ApiError> {
-    state.db.request_cancel_invocation(id).await?;
+    reconcile_timed_out_invocations(&state).await?;
+    if let Some(InvocationCancellationRecord {
+        invocation_id,
+        status,
+        exit_code,
+        error,
+    }) = state.db.request_cancel_invocation(id).await?
+    {
+        publish_terminal_invocation(&state, invocation_id, exit_code, error.clone()).await?;
+        info!(invocation_id = %id, status = ?status, error = %error, "canceled unclaimed invocation immediately");
+        return Ok(StatusCode::NO_CONTENT);
+    }
     info!(invocation_id = %id, "requested invocation cancel");
     Ok(StatusCode::NO_CONTENT)
 }

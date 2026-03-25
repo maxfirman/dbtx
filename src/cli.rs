@@ -189,6 +189,8 @@ pub enum InvocationCommand {
     Cancel {
         #[arg(long)]
         invocation_id: String,
+        #[arg(long)]
+        wait: bool,
     },
     #[command(about = "Delete old terminal invocations and their invocation events")]
     Cleanup {
@@ -303,10 +305,15 @@ mod tests {
             "cancel",
             "--invocation-id",
             "123e4567-e89b-12d3-a456-426614174000",
+            "--wait",
         ]);
         match cli.command {
-            Command::Invocation(InvocationCommand::Cancel { invocation_id }) => {
+            Command::Invocation(InvocationCommand::Cancel {
+                invocation_id,
+                wait,
+            }) => {
                 assert_eq!(invocation_id, "123e4567-e89b-12d3-a456-426614174000");
+                assert!(wait);
             }
             _ => panic!("expected invocation cancel command"),
         }

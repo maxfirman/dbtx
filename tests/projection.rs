@@ -1,7 +1,7 @@
 use dbtx::api::{
-    InvocationClaimNextApiRequest, InvocationCommandApi, InvocationCompleteApiRequest,
-    InvocationCreateApiRequest, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
-    InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
+    InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationCommandApi,
+    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationEventBatchApiRequest,
+    InvocationExecutionModeApi, InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
 };
 use dbtx::client::DaemonClient;
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
@@ -796,6 +796,104 @@ async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
         server_status.error.as_deref(),
         Some("worker heartbeat timed out")
     );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn canceling_unclaimed_invocation_finishes_it_immediately() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+
+    let created = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Local,
+            worker_queue: Some("cancel-immediate".to_string()),
+        })
+        .await
+        .expect("create invocation");
+
+    client
+        .invocation_cancel(created.invocation_id, Default::default())
+        .await
+        .expect("cancel invocation");
+
+    let status = client
+        .invocation_status(created.invocation_id)
+        .await
+        .expect("load invocation status");
+    assert!(matches!(status.status, InvocationLifecycleStatus::Canceled));
+    assert!(matches!(
+        status.cancel_state,
+        InvocationCancelStateApi::Completed
+    ));
+    assert_eq!(status.error.as_deref(), Some("invocation canceled"));
+    assert!(status.cancel_requested_at.is_some());
+
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invocation_events WHERE invocation_id = $1 AND event_type = 'invocation.completed'",
+    )
+    .bind(created.invocation_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("invocation completion event count");
+    assert_eq!(event_count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finishes() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+
+    let created = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: None,
+        })
+        .await
+        .expect("create invocation");
+    let _claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queue: None,
+        })
+        .await
+        .expect("claim invocation")
+        .expect("claimed");
+
+    client
+        .invocation_cancel(created.invocation_id, Default::default())
+        .await
+        .expect("cancel claimed invocation");
+
+    let status = client
+        .invocation_status(created.invocation_id)
+        .await
+        .expect("load invocation status");
+    assert!(matches!(status.status, InvocationLifecycleStatus::Running));
+    assert!(status.cancel_requested);
+    assert!(matches!(
+        status.cancel_state,
+        InvocationCancelStateApi::Requested
+    ));
+    assert!(status.cancel_requested_at.is_some());
 }
 
 struct ScopeIds {

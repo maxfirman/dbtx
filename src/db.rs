@@ -1,5 +1,5 @@
 use crate::api::{
-    InvocationClaimResponse, InvocationEvent, InvocationExecutionModeApi,
+    InvocationCancelStateApi, InvocationClaimResponse, InvocationEvent, InvocationExecutionModeApi,
     InvocationExecutionSpecApi, InvocationLifecycleStatus, InvocationStatusResponse,
     InvocationWorkerHealthApi,
 };
@@ -178,6 +178,14 @@ pub(crate) struct InvocationPersistenceRecord {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TimedOutInvocationRecord {
+    pub(crate) invocation_id: Uuid,
+    pub(crate) status: InvocationLifecycleStatus,
+    pub(crate) exit_code: i32,
+    pub(crate) error: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InvocationCancellationRecord {
     pub(crate) invocation_id: Uuid,
     pub(crate) status: InvocationLifecycleStatus,
     pub(crate) exit_code: i32,
@@ -599,7 +607,8 @@ impl Db {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', $8, $9, $10)
             RETURNING invocation_id, execution_mode, worker_queue, status, exit_code, error,
-                started_at, claimed_at, last_heartbeat_at, completed_at, cancel_requested, claimed_by
+                started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
+                cancel_requested, claimed_by
             "#,
         )
         .bind(input.invocation_id)
@@ -624,7 +633,8 @@ impl Db {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
-                started_at, claimed_at, last_heartbeat_at, completed_at, cancel_requested, claimed_by
+                started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
+                cancel_requested, claimed_by
             FROM invocations
             ORDER BY started_at DESC, invocation_id DESC
             "#,
@@ -641,7 +651,8 @@ impl Db {
         let row = sqlx::query(
             r#"
             SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
-                started_at, claimed_at, last_heartbeat_at, completed_at, cancel_requested, claimed_by
+                started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
+                cancel_requested, claimed_by
             FROM invocations
             WHERE invocation_id = $1
             "#,
@@ -745,19 +756,61 @@ impl Db {
         Ok(row.get("cancel_requested"))
     }
 
-    pub(crate) async fn request_cancel_invocation(&self, invocation_id: Uuid) -> AppResult<()> {
-        let updated =
-            sqlx::query("UPDATE invocations SET cancel_requested = TRUE WHERE invocation_id = $1")
-                .bind(invocation_id)
-                .execute(&self.pool)
-                .await?;
-        if updated.rows_affected() == 0 {
+    pub(crate) async fn request_cancel_invocation(
+        &self,
+        invocation_id: Uuid,
+    ) -> AppResult<Option<InvocationCancellationRecord>> {
+        let row = sqlx::query(
+            r#"
+            UPDATE invocations
+            SET cancel_requested = CASE
+                    WHEN status = 'running' THEN TRUE
+                    ELSE cancel_requested
+                END,
+                cancel_requested_at = CASE
+                    WHEN status = 'running' THEN COALESCE(cancel_requested_at, NOW())
+                    ELSE cancel_requested_at
+                END,
+                status = CASE
+                    WHEN status = 'running' AND claimed_by IS NULL THEN 'canceled'
+                    ELSE status
+                END,
+                exit_code = CASE
+                    WHEN status = 'running' AND claimed_by IS NULL THEN 130
+                    ELSE exit_code
+                END,
+                error = CASE
+                    WHEN status = 'running' AND claimed_by IS NULL THEN 'invocation canceled'
+                    ELSE error
+                END,
+                completed_at = CASE
+                    WHEN status = 'running' AND claimed_by IS NULL THEN NOW()
+                    ELSE completed_at
+                END
+            WHERE invocation_id = $1
+            RETURNING status, exit_code, error, claimed_by
+            "#,
+        )
+        .bind(invocation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
             return Err(AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "invocation not found",
             )));
+        };
+        if row.get::<String, _>("status") == "canceled"
+            && row.get::<Option<String>, _>("claimed_by").is_none()
+        {
+            return Ok(Some(InvocationCancellationRecord {
+                invocation_id,
+                status: InvocationLifecycleStatus::Canceled,
+                exit_code: row.get("exit_code"),
+                error: row.get("error"),
+            }));
         }
-        Ok(())
+        Ok(None)
     }
 
     pub(crate) async fn reconcile_timed_out_invocations(
@@ -2092,17 +2145,20 @@ fn invocation_status_from_row(row: &sqlx::postgres::PgRow) -> InvocationStatusRe
         execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
         worker_queue: row.get("worker_queue"),
         worker_health: InvocationWorkerHealthApi::Unclaimed,
+        cancel_state: InvocationCancelStateApi::None,
         status: invocation_status_from_db(&row.get::<String, _>("status")),
         exit_code: row.get("exit_code"),
         error: row.get("error"),
         started_at: row.get("started_at"),
         claimed_at: row.get("claimed_at"),
         last_heartbeat_at: row.get("last_heartbeat_at"),
+        cancel_requested_at: row.get("cancel_requested_at"),
         completed_at: row.get("completed_at"),
         cancel_requested: row.get("cancel_requested"),
         claimed_by: row.get("claimed_by"),
     };
     status.worker_health = compute_worker_health(&status);
+    status.cancel_state = compute_cancel_state(&status);
     status
 }
 
@@ -2159,6 +2215,16 @@ fn compute_worker_health(status: &InvocationStatusResponse) -> InvocationWorkerH
             InvocationWorkerHealthApi::Stale
         }
         (_, _, Some(_)) => InvocationWorkerHealthApi::Claimed,
+    }
+}
+
+fn compute_cancel_state(status: &InvocationStatusResponse) -> InvocationCancelStateApi {
+    if matches!(status.status, InvocationLifecycleStatus::Canceled) {
+        InvocationCancelStateApi::Completed
+    } else if status.cancel_requested {
+        InvocationCancelStateApi::Requested
+    } else {
+        InvocationCancelStateApi::None
     }
 }
 

@@ -369,7 +369,10 @@ async fn handle_invocation_command(
             let invocation = client.invocation_status(invocation_id).await?;
             print_invocation(&invocation);
         }
-        InvocationCliCommand::Cancel { invocation_id } => {
+        InvocationCliCommand::Cancel {
+            invocation_id,
+            wait,
+        } => {
             let invocation_id = uuid::Uuid::parse_str(&invocation_id).map_err(|err| {
                 AppError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -380,7 +383,11 @@ async fn handle_invocation_command(
                 .invocation_cancel(invocation_id, api::InvocationCancelApiRequest::default())
                 .await?;
             eprintln!("requested cancellation for invocation {invocation_id}");
-            let invocation = client.invocation_status(invocation_id).await?;
+            let invocation = if wait {
+                wait_for_invocation_completion(&client, invocation_id).await?
+            } else {
+                client.invocation_status(invocation_id).await?
+            };
             print_invocation(&invocation);
         }
         InvocationCliCommand::Cleanup { older_than_hours } => {
@@ -485,7 +492,7 @@ async fn invoke_via_local_worker(
     ctx: &config::InvocationContext,
 ) -> AppResult<()> {
     let queue = format!("local-{}", uuid::Uuid::new_v4().simple());
-    create_invocation(
+    let response = create_invocation(
         service_url.clone(),
         command,
         args,
@@ -500,7 +507,7 @@ async fn invoke_via_local_worker(
     let worker_path = resolve_worker_binary_path()?;
     let status = StdCommand::new(worker_path)
         .arg("--service-url")
-        .arg(service_url)
+        .arg(&service_url)
         .arg("--execution-mode")
         .arg("local")
         .arg("--once")
@@ -513,7 +520,15 @@ async fn invoke_via_local_worker(
         .status()?;
     match status.code().unwrap_or(1) {
         0 => Ok(()),
-        code => Err(AppError::DbtFailed(code)),
+        code => {
+            let client = client::DaemonClient::new(service_url);
+            let invocation = client.invocation_status(response.invocation_id).await?;
+            if let Some(error) = invocation.error {
+                Err(AppError::Io(std::io::Error::other(error)))
+            } else {
+                Err(AppError::DbtFailed(code))
+            }
+        }
     }
 }
 
@@ -618,11 +633,12 @@ fn print_environment(environment: &EnvironmentRecord) {
 
 fn print_invocation(invocation: &api::InvocationStatusResponse) {
     println!(
-        "invocation id={} mode={:?} worker_queue={} worker_health={:?} status={:?} exit_code={} claimed_by={} claimed_at={} last_heartbeat_at={} started_at={} completed_at={} cancel_requested={} error={}",
+        "invocation id={} mode={:?} worker_queue={} worker_health={:?} cancel_state={:?} status={:?} exit_code={} claimed_by={} claimed_at={} last_heartbeat_at={} cancel_requested_at={} started_at={} completed_at={} cancel_requested={} error={}",
         invocation.invocation_id,
         invocation.execution_mode,
         invocation.worker_queue,
         invocation.worker_health,
+        invocation.cancel_state,
         invocation.status,
         invocation
             .exit_code
@@ -635,6 +651,10 @@ fn print_invocation(invocation: &api::InvocationStatusResponse) {
             .unwrap_or_default(),
         invocation
             .last_heartbeat_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_default(),
+        invocation
+            .cancel_requested_at
             .map(|value| value.to_rfc3339())
             .unwrap_or_default(),
         invocation.started_at.to_rfc3339(),

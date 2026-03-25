@@ -193,12 +193,14 @@ pub struct InvocationStatusResponse {
     pub execution_mode: InvocationExecutionModeApi,
     pub worker_queue: String,
     pub worker_health: InvocationWorkerHealthApi,
+    pub cancel_state: InvocationCancelStateApi,
     pub status: InvocationLifecycleStatus,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub cancel_requested_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub cancel_requested: bool,
     pub claimed_by: Option<String>,
@@ -210,6 +212,14 @@ pub enum InvocationWorkerHealthApi {
     Unclaimed,
     Claimed,
     Stale,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationCancelStateApi {
+    None,
+    Requested,
     Completed,
 }
 
