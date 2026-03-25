@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 pub async fn execute_claimed_invocation(
     client: &DaemonClient,
@@ -27,7 +27,7 @@ pub async fn execute_claimed_invocation(
     }
 
     let spec = claim.execution_spec;
-    info!(
+    debug!(
         invocation_id = %claim.invocation_id,
         worker_id = %claim.worker_id,
         command = ?spec.command,
@@ -230,7 +230,7 @@ pub async fn execute_claimed_invocation(
         )
         .await?;
 
-    info!(
+    debug!(
         invocation_id = %claim.invocation_id,
         worker_id = %claim.worker_id,
         exit_code,

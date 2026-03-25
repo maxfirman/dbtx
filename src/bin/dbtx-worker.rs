@@ -6,7 +6,7 @@ use dbtx::error::{AppError, AppResult};
 use dbtx::worker;
 use std::sync::Once;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -45,7 +45,7 @@ async fn run() -> AppResult<()> {
     let current_dir = std::env::current_dir()?;
     let service_url = resolve_service_url(cli.service_url, Some(&current_dir))?
         .ok_or(AppError::MissingServiceUrl)?;
-    let client = DaemonClient::new(service_url);
+    let client = DaemonClient::new(service_url.clone());
     let worker_id = format!(
         "worker-{}-{}",
         std::env::var("HOSTNAME")
@@ -59,6 +59,16 @@ async fn run() -> AppResult<()> {
     };
     let poll_interval = Duration::from_millis(cli.poll_interval_ms);
 
+    debug!(
+        worker_id = %worker_id,
+        service_url = %service_url,
+        execution_mode = ?execution_mode,
+        queue = cli.queue.as_deref().unwrap_or("any"),
+        once = cli.once,
+        poll_interval_ms = cli.poll_interval_ms,
+        "starting dbtx worker"
+    );
+
     loop {
         match client
             .invocation_claim_next(InvocationClaimNextApiRequest {
@@ -69,22 +79,41 @@ async fn run() -> AppResult<()> {
             .await?
         {
             Some(claim) => {
-                info!(invocation_id = %claim.invocation_id, ?execution_mode, "claimed invocation");
+                debug!(
+                    invocation_id = %claim.invocation_id,
+                    worker_id = %worker_id,
+                    execution_mode = ?execution_mode,
+                    queue = cli.queue.as_deref().unwrap_or("any"),
+                    "claimed invocation"
+                );
                 if let Err(err) = worker::execute_claimed_invocation(&client, claim, None).await {
-                    warn!(error = %err, "worker invocation failed");
+                    warn!(worker_id = %worker_id, error = %err, "worker invocation failed");
                     if cli.once {
                         return Err(err);
                     }
                 } else if cli.once {
+                    debug!(worker_id = %worker_id, "one-shot worker completed successfully");
                     return Ok(());
                 }
             }
             None => {
                 if cli.once {
+                    warn!(
+                        worker_id = %worker_id,
+                        execution_mode = ?execution_mode,
+                        queue = cli.queue.as_deref().unwrap_or("any"),
+                        "no invocation available for one-shot worker"
+                    );
                     return Err(AppError::Io(std::io::Error::other(
                         "no invocation available for worker",
                     )));
                 }
+                debug!(
+                    worker_id = %worker_id,
+                    execution_mode = ?execution_mode,
+                    queue = cli.queue.as_deref().unwrap_or("any"),
+                    "no invocation available, polling again"
+                );
                 tokio::time::sleep(poll_interval).await;
             }
         }
