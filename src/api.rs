@@ -10,6 +10,18 @@ pub struct MigrateResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyResponse {
+    pub status: String,
+    pub database: String,
+    pub schema: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectResponse {
     pub project: ProjectRecord,
 }

@@ -195,6 +195,13 @@ impl Db {
         }
     }
 
+    pub async fn ping(&self) -> AppResult<()> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn migrate(&self) -> AppResult<Vec<AppliedMigration>> {
         let before_versions = self.migration_versions().await?;
         MIGRATOR.run(&self.pool).await?;

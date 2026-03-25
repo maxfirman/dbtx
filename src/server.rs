@@ -1,12 +1,13 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
-    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
-    InvocationCleanupApiRequest, InvocationCleanupResponse, InvocationCommandApi,
-    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
-    InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionSpecApi,
-    InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
-    InvocationStatusResponse, InvocationsResponse, MigrateResponse, ProjectInitApiRequest,
-    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
+    EnvironmentsResponse, HealthResponse, InvocationCancelApiRequest,
+    InvocationClaimNextApiRequest, InvocationCleanupApiRequest, InvocationCleanupResponse,
+    InvocationCommandApi, InvocationCompleteApiRequest, InvocationCreateApiRequest,
+    InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
+    InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
+    InvocationLifecycleStatus, InvocationStatusResponse, InvocationsResponse, MigrateResponse,
+    ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest,
+    ProjectsResponse, ReadyResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{CreateInvocationInput, Db, InvocationPersistenceRecord};
@@ -285,6 +286,8 @@ impl InvocationRecorder {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/v1/state/migrate", post(migrate))
         .route("/v1/projects:init", post(project_init))
         .route("/v1/projects", get(projects_list))
@@ -351,6 +354,55 @@ pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
         error!(error = %err, "dbtx server stopped with error");
         AppError::Io(err)
     })
+}
+
+async fn healthz() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok".to_string(),
+    })
+}
+
+async fn readyz(State(state): State<AppState>) -> Result<(StatusCode, Json<ReadyResponse>), ApiError> {
+    let database = match state.db.ping().await {
+        Ok(()) => "ok",
+        Err(err) => {
+            error!(error = %err, "readiness database check failed");
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ReadyResponse {
+                    status: "not_ready".to_string(),
+                    database: "error".to_string(),
+                    schema: "unknown".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let (status_code, schema, status) = match state.db.require_current_schema().await {
+        Ok(()) => (StatusCode::OK, "ok", "ready"),
+        Err(AppError::SchemaOutOfDate) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "out_of_date",
+            "not_ready",
+        ),
+        Err(err) => {
+            error!(error = %err, "readiness schema check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "error",
+                "not_ready",
+            )
+        }
+    };
+
+    Ok((
+        status_code,
+        Json(ReadyResponse {
+            status: status.to_string(),
+            database: database.to_string(),
+            schema: schema.to_string(),
+        }),
+    ))
 }
 
 async fn migrate(State(state): State<AppState>) -> Result<Json<MigrateResponse>, ApiError> {
