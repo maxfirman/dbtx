@@ -407,6 +407,95 @@ async fn immutable_environment_rejects_identity_updates() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn remote_invocation_requires_project_git_metadata() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    bootstrap_project_and_env(&repo, db.service_url(), "remote").await;
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+
+    sqlx::query("UPDATE projects SET git_repo_url = NULL WHERE project_id = $1")
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .expect("null git_repo_url");
+
+    assert!(
+        client
+            .invocation_create(remote_invocation_request(
+                &project_id,
+                "remote",
+                InvocationCommandApi::Ls,
+                None,
+            ))
+            .await
+            .is_err()
+    );
+
+    sqlx::query("UPDATE projects SET git_repo_url = 'https://example.com/repo.git', project_root = NULL WHERE project_id = $1")
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .expect("null project_root");
+
+    assert!(
+        client
+            .invocation_create(remote_invocation_request(
+                &project_id,
+                "remote",
+                InvocationCommandApi::Ls,
+                None,
+            ))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn remote_invocation_requires_commit_pinned_immutable_environment() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &["project", "init"],
+    ));
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "create",
+            "--slug",
+            "mutable",
+            "--target",
+            "dev",
+        ],
+    ));
+
+    assert!(
+        client
+            .invocation_create(remote_invocation_request(
+                &project_id,
+                "mutable",
+                InvocationCommandApi::Ls,
+                None,
+            ))
+            .await
+            .is_err()
+    );
+
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn lease_tokens_enforce_invocation_ownership() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -414,16 +503,13 @@ async fn lease_tokens_enforce_invocation_ownership() {
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
-
     let created = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Local,
-            worker_queue: Some("lease-test".to_string()),
-        })
+        .invocation_create(local_invocation_request(
+            repo.project_dir(),
+            InvocationCommandApi::Ls,
+            Some("dev"),
+            Some("lease-test"),
+        ))
         .await
         .expect("create invocation");
     let claim = client
@@ -531,16 +617,15 @@ async fn claimed_invocation_timeout_fails_without_reclaim() {
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     let created = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: None,
-        })
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "dev",
+            InvocationCommandApi::Ls,
+            None,
+        ))
         .await
         .expect("create invocation");
     let claim = client
@@ -621,27 +706,24 @@ async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations()
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     let local = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Local,
-            worker_queue: Some("local-deadline-test".to_string()),
-        })
+        .invocation_create(local_invocation_request(
+            repo.project_dir(),
+            InvocationCommandApi::Ls,
+            Some("dev"),
+            Some("local-deadline-test"),
+        ))
         .await
         .expect("create local invocation");
     let server = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: None,
-        })
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "dev",
+            InvocationCommandApi::Ls,
+            None,
+        ))
         .await
         .expect("create server invocation");
 
@@ -709,27 +791,24 @@ async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     let local = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Local,
-            worker_queue: Some("local-heartbeat-test".to_string()),
-        })
+        .invocation_create(local_invocation_request(
+            repo.project_dir(),
+            InvocationCommandApi::Ls,
+            Some("dev"),
+            Some("local-heartbeat-test"),
+        ))
         .await
         .expect("create local invocation");
     let server = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: None,
-        })
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "dev",
+            InvocationCommandApi::Ls,
+            None,
+        ))
         .await
         .expect("create server invocation");
 
@@ -811,14 +890,12 @@ async fn canceling_unclaimed_invocation_finishes_it_immediately() {
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
 
     let created = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Local,
-            worker_queue: Some("cancel-immediate".to_string()),
-        })
+        .invocation_create(local_invocation_request(
+            repo.project_dir(),
+            InvocationCommandApi::Ls,
+            Some("dev"),
+            Some("cancel-immediate"),
+        ))
         .await
         .expect("create invocation");
 
@@ -858,16 +935,15 @@ async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finish
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     let created = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: None,
-        })
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "dev",
+            InvocationCommandApi::Ls,
+            None,
+        ))
         .await
         .expect("create invocation");
     let _claim = client
@@ -907,38 +983,33 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     let _server_generic_1 = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: Some("generic".to_string()),
-        })
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "dev",
+            InvocationCommandApi::Ls,
+            Some("generic"),
+        ))
         .await
         .expect("create server invocation 1");
     let _server_generic_2 = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: Some("generic".to_string()),
-        })
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "dev",
+            InvocationCommandApi::Ls,
+            Some("generic"),
+        ))
         .await
         .expect("create server invocation 2");
     let local_isolated = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Local,
-            worker_queue: Some("isolated".to_string()),
-        })
+        .invocation_create(local_invocation_request(
+            repo.project_dir(),
+            InvocationCommandApi::Ls,
+            Some("dev"),
+            Some("isolated"),
+        ))
         .await
         .expect("create local invocation");
 
@@ -1013,27 +1084,24 @@ async fn invocation_list_filters_apply_to_operator_views() {
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+    let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
     let running = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: Some("generic".to_string()),
-        })
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "dev",
+            InvocationCommandApi::Ls,
+            Some("generic"),
+        ))
         .await
         .expect("create running invocation");
     let canceled = client
-        .invocation_create(InvocationCreateApiRequest {
-            command: InvocationCommandApi::Ls,
-            args: vec![],
-            current_dir: repo.project_dir().display().to_string(),
-            environment_slug: "dev".to_string(),
-            execution_mode: InvocationExecutionModeApi::Local,
-            worker_queue: Some("special".to_string()),
-        })
+        .invocation_create(local_invocation_request(
+            repo.project_dir(),
+            InvocationCommandApi::Ls,
+            Some("dev"),
+            Some("special"),
+        ))
         .await
         .expect("create canceled invocation");
 
@@ -1522,6 +1590,7 @@ async fn reset_db(pool: &PgPool) {
 }
 
 async fn bootstrap_project_and_env(repo: &TempProjectRepo, service_url: &str, slug: &str) {
+    let commit_sha = git_rev_parse(repo.project_dir(), "HEAD");
     assert_success(&run_dbtx_in_dir(
         service_url,
         repo.project_dir(),
@@ -1538,9 +1607,63 @@ async fn bootstrap_project_and_env(repo: &TempProjectRepo, service_url: &str, sl
             "--target",
             "dev",
             "--kind",
-            "persistent",
+            "commit",
+            "--immutable",
+            "--git-branch",
+            "main",
+            "--git-commit-sha",
+            &commit_sha,
         ],
     ));
+}
+
+fn git_rev_parse(cwd: &Path, rev: &str) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", rev])
+        .current_dir(cwd)
+        .output()
+        .expect("git rev-parse");
+    assert!(
+        output.status.success(),
+        "git rev-parse failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn local_invocation_request(
+    project_dir: &Path,
+    command: InvocationCommandApi,
+    environment_slug: Option<&str>,
+    worker_queue: Option<&str>,
+) -> InvocationCreateApiRequest {
+    InvocationCreateApiRequest {
+        command,
+        args: vec![],
+        current_dir: Some(project_dir.display().to_string()),
+        project_id: None,
+        environment_slug: environment_slug.map(ToString::to_string),
+        execution_mode: InvocationExecutionModeApi::Local,
+        worker_queue: worker_queue.map(ToString::to_string),
+    }
+}
+
+fn remote_invocation_request(
+    project_id: &str,
+    environment_slug: &str,
+    command: InvocationCommandApi,
+    worker_queue: Option<&str>,
+) -> InvocationCreateApiRequest {
+    InvocationCreateApiRequest {
+        command,
+        args: vec![],
+        current_dir: None,
+        project_id: Some(project_id.to_string()),
+        environment_slug: Some(environment_slug.to_string()),
+        execution_mode: InvocationExecutionModeApi::Server,
+        worker_queue: worker_queue.map(ToString::to_string),
+    }
 }
 
 fn sample_execution_event(text: &str) -> ExecutionEvent {

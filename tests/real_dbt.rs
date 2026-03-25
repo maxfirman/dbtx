@@ -1,7 +1,13 @@
 #![allow(clippy::await_holding_lock)]
 
+use dbtx::api::{
+    InvocationCommandApi, InvocationCreateApiRequest, InvocationExecutionModeApi,
+    InvocationLifecycleStatus,
+};
+use dbtx::client::DaemonClient;
 use dbtx::services::infer_local_project_defaults;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
@@ -227,6 +233,139 @@ async fn dbtx_run_persists_real_jaffle_state() {
     assert_eq!(
         run_row.get::<Option<String>, _>("project_ref").as_deref(),
         Some(project.project_id().as_str())
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+
+    assert_success(&run_dbtx(db.service_url(), &project, &["project", "init"]));
+    assert_success(&run_dbtx(
+        db.service_url(),
+        &project,
+        &[
+            "environment",
+            "create",
+            "--slug",
+            "remote",
+            "--target",
+            "dev",
+            "--kind",
+            "commit",
+            "--immutable",
+            "--git-branch",
+            "main",
+            "--git-commit-sha",
+            &project.head_sha(),
+        ],
+    ));
+    sqlx::query("UPDATE environments SET profile_config = jsonb_set(profile_config, '{path}', to_jsonb($2::text)) WHERE slug = 'remote' AND project_id = (SELECT id FROM projects WHERE project_id = $1)")
+        .bind(project.project_id())
+        .bind(
+            project
+                .path()
+                .join("warehouse.duckdb")
+                .to_string_lossy()
+                .to_string(),
+        )
+        .execute(db.pool())
+        .await
+        .expect("update remote duckdb path");
+    sqlx::query("UPDATE projects SET git_repo_url = $2, project_root = '.' WHERE project_id = $1")
+        .bind(project.project_id())
+        .bind(project.path_str())
+        .execute(db.pool())
+        .await
+        .expect("update project for remote execution");
+
+    let client = DaemonClient::new(db.service_url().to_string());
+    let invocation = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Run,
+            args: vec!["--select".to_string(), "stg_customers".to_string()],
+            current_dir: None,
+            project_id: Some(project.project_id()),
+            environment_slug: Some("remote".to_string()),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: None,
+        })
+        .await
+        .expect("create remote invocation");
+
+    let git_cache = TempDir::new().expect("git cache dir");
+    let worker = Command::new(env!("CARGO_BIN_EXE_dbtx-worker"))
+        .args([
+            "--service-url",
+            db.service_url(),
+            "--execution-mode",
+            "server",
+            "--once",
+        ])
+        .env("DBTX_GIT_CACHE_DIR", git_cache.path())
+        .output()
+        .expect("run remote worker");
+    assert_success(&worker);
+
+    let status = wait_for_invocation_terminal(&client, invocation.invocation_id).await;
+    assert!(matches!(
+        status.status,
+        InvocationLifecycleStatus::Succeeded
+    ));
+    assert_eq!(status.exit_code, Some(0));
+
+    let run_row = sqlx::query(
+        "SELECT git_repo_url, git_commit_sha, project_root, project_ref FROM runs ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("remote run row");
+    assert_eq!(
+        run_row.get::<Option<String>, _>("git_repo_url").as_deref(),
+        Some(project.path_str())
+    );
+    assert_eq!(
+        run_row
+            .get::<Option<String>, _>("git_commit_sha")
+            .as_deref(),
+        Some(project.head_sha().as_str())
+    );
+    assert_eq!(
+        run_row.get::<Option<String>, _>("project_root").as_deref(),
+        Some(".")
+    );
+    assert_eq!(
+        run_row.get::<Option<String>, _>("project_ref").as_deref(),
+        Some(project.project_id().as_str())
+    );
+
+    let repo_hash = short_hash(project.path_str());
+    let mirror_dir = git_cache
+        .path()
+        .join("mirrors")
+        .join(format!("{repo_hash}.git"));
+    let worktree_dir = git_cache
+        .path()
+        .join("worktrees")
+        .join(repo_hash)
+        .join(project.head_sha());
+    assert!(
+        mirror_dir.is_dir(),
+        "expected mirror at {}",
+        mirror_dir.display()
+    );
+    assert!(
+        worktree_dir.is_dir(),
+        "expected worktree at {}",
+        worktree_dir.display()
     );
 }
 
@@ -1271,6 +1410,32 @@ fn listed_unique_ids_for_env_impl(
                 .map(ToString::to_string)
         })
         .collect()
+}
+
+async fn wait_for_invocation_terminal(
+    client: &DaemonClient,
+    invocation_id: Uuid,
+) -> dbtx::api::InvocationStatusResponse {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = client
+            .invocation_status(invocation_id)
+            .await
+            .expect("invocation status");
+        if !matches!(status.status, InvocationLifecycleStatus::Running) {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for invocation completion"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn short_hash(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    format!("{digest:x}").chars().take(20).collect()
 }
 
 fn jaffle_fixture_dir() -> PathBuf {

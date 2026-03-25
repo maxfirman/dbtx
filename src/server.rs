@@ -24,7 +24,8 @@ use crate::execution::{
 };
 use crate::services::{
     EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
-    InvocationRequest, InvocationService, ProjectInitRequest, ProjectService, ProjectUpdateRequest,
+    InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectInitRequest,
+    ProjectService, ProjectUpdateRequest,
 };
 use async_stream::stream;
 use axum::extract::{Path, Query, State};
@@ -641,7 +642,9 @@ async fn invocation_create(
     info!(
         invocation_id = %invocation_id,
         command = ?request.command,
-        current_dir = %request.current_dir,
+        current_dir = request.current_dir.as_deref().unwrap_or(""),
+        project_id = request.project_id.as_deref().unwrap_or(""),
+        environment_slug = request.environment_slug.as_deref().unwrap_or(""),
         "starting invocation"
     );
 
@@ -652,30 +655,74 @@ async fn invocation_create(
         crate::api::InvocationExecutionModeApi::Server => ExecutionMode::Server,
         crate::api::InvocationExecutionModeApi::Local => ExecutionMode::Local,
     };
-    let prepared = service
-        .prepare_local_execution(
-            invocation_id,
-            InvocationRequest {
-                command: map_invocation_command(request.command),
-                args: request.args.iter().cloned().map(Into::into).collect(),
-                config: runtime_config,
-                current_dir: Some(PathBuf::from(&request.current_dir)),
-                environment_slug: request.environment_slug.clone(),
-                execution_mode,
-            },
-        )
-        .await?;
-    let execution_spec = InvocationExecutionSpecApi {
-        command: request.command,
-        args: prepared
-            .spec
-            .args
-            .into_iter()
-            .map(|value| value.to_string_lossy().into_owned())
-            .collect(),
-        project_dir: request.current_dir.clone(),
-        profiles_yml: prepared.spec.profiles_yml,
-        state_manifest: prepared.spec.state_manifest,
+    let prepared = match request.execution_mode {
+        crate::api::InvocationExecutionModeApi::Local => {
+            let current_dir =
+                request
+                    .current_dir
+                    .as_deref()
+                    .ok_or(AppError::UnsupportedLocalExecution(
+                        "local invocation requires current_dir".to_string(),
+                    ))?;
+            service
+                .prepare_local_execution(
+                    invocation_id,
+                    InvocationRequest {
+                        command: map_invocation_command(request.command),
+                        args: request.args.iter().cloned().map(Into::into).collect(),
+                        config: runtime_config,
+                        current_dir: Some(PathBuf::from(current_dir)),
+                        environment_slug: request.environment_slug.clone().unwrap_or_default(),
+                        execution_mode,
+                    },
+                )
+                .await?
+        }
+        crate::api::InvocationExecutionModeApi::Server => {
+            let project_id = request
+                .project_id
+                .as_deref()
+                .ok_or(AppError::RemoteExecutionRequiresProjectId)?;
+            let environment_slug = request
+                .environment_slug
+                .as_deref()
+                .ok_or(AppError::RemoteExecutionRequiresEnvironmentSlug)?;
+            service
+                .prepare_remote_execution(
+                    invocation_id,
+                    map_invocation_command(request.command),
+                    request.args.iter().cloned().map(Into::into).collect(),
+                    project_id,
+                    environment_slug,
+                )
+                .await?
+        }
+    };
+    let execution_spec = match prepared.spec {
+        PreparedExecutionSpec::Local(spec) => InvocationExecutionSpecApi::Local {
+            command: request.command,
+            args: spec
+                .args
+                .into_iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect(),
+            project_dir: request.current_dir.clone().unwrap_or_default(),
+            profiles_yml: spec.profiles_yml,
+            state_manifest: spec.state_manifest,
+        },
+        PreparedExecutionSpec::Remote(spec) => InvocationExecutionSpecApi::Remote {
+            command: request.command,
+            args: spec
+                .args
+                .into_iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect(),
+            repo_url: spec.repo_url,
+            commit_sha: spec.commit_sha,
+            project_root: spec.project_root,
+            profiles_yml: spec.profiles_yml,
+            state_manifest: spec.state_manifest,
+        },
     };
     let worker_queue = request
         .worker_queue
@@ -991,6 +1038,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
             AppError::ProjectIdMissing
+            | AppError::RemoteExecutionRequiresProjectId
+            | AppError::RemoteExecutionRequiresEnvironmentSlug
+            | AppError::RemoteExecutionRequiresGitRepoUrl(_)
+            | AppError::RemoteExecutionRequiresProjectRoot(_)
+            | AppError::RemoteExecutionRequiresCommitSha(_, _)
             | AppError::MissingDatabaseUrl
             | AppError::UserStateNotAllowed
             | AppError::UserTargetNotAllowed
@@ -1012,7 +1064,8 @@ impl IntoResponse for ApiError {
             AppError::InvocationNotClaimable(_) => StatusCode::BAD_REQUEST,
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,
             AppError::ImmutableEnvironment(_, _)
-            | AppError::ImmutableEnvironmentGitMismatch(_, _) => StatusCode::CONFLICT,
+            | AppError::ImmutableEnvironmentGitMismatch(_, _)
+            | AppError::RemoteExecutionRequiresImmutableEnvironment(_, _) => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = serde_json::json!({ "error": self.0.to_string() });

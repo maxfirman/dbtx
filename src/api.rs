@@ -103,8 +103,9 @@ pub struct EnvironmentUpdateApiRequest {
 pub struct InvocationCreateApiRequest {
     pub command: InvocationCommandApi,
     pub args: Vec<String>,
-    pub current_dir: String,
-    pub environment_slug: String,
+    pub current_dir: Option<String>,
+    pub project_id: Option<String>,
+    pub environment_slug: Option<String>,
     pub execution_mode: InvocationExecutionModeApi,
     pub worker_queue: Option<String>,
 }
@@ -159,12 +160,24 @@ pub struct InvocationCleanupResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InvocationExecutionSpecApi {
-    pub command: InvocationCommandApi,
-    pub args: Vec<String>,
-    pub project_dir: String,
-    pub profiles_yml: String,
-    pub state_manifest: Option<serde_json::Value>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InvocationExecutionSpecApi {
+    Local {
+        command: InvocationCommandApi,
+        args: Vec<String>,
+        project_dir: String,
+        profiles_yml: String,
+        state_manifest: Option<serde_json::Value>,
+    },
+    Remote {
+        command: InvocationCommandApi,
+        args: Vec<String>,
+        repo_url: String,
+        commit_sha: String,
+        project_root: String,
+        profiles_yml: String,
+        state_manifest: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

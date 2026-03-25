@@ -60,6 +60,20 @@ pub enum AppError {
     ProjectIdAlreadyConfigured(String),
     #[error("dbtx project id is missing from dbtx.toml. Run `dbtx project init` first.")]
     ProjectIdMissing,
+    #[error("remote execution requires --project or project_id")]
+    RemoteExecutionRequiresProjectId,
+    #[error("remote execution requires an environment slug")]
+    RemoteExecutionRequiresEnvironmentSlug,
+    #[error("project '{0}' is missing git_repo_url required for remote execution")]
+    RemoteExecutionRequiresGitRepoUrl(String),
+    #[error("project '{0}' is missing project_root required for remote execution")]
+    RemoteExecutionRequiresProjectRoot(String),
+    #[error("environment '{1}' for project '{0}' must be immutable for remote execution")]
+    RemoteExecutionRequiresImmutableEnvironment(String, String),
+    #[error(
+        "environment '{1}' for project '{0}' is missing git_commit_sha required for remote execution"
+    )]
+    RemoteExecutionRequiresCommitSha(String, String),
     #[error(
         "database url is not configured. Set --database-url or DBTX_DATABASE_URL for dbtx-server."
     )]

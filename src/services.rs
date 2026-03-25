@@ -72,8 +72,25 @@ pub struct LocalExecutionSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteExecutionSpec {
+    pub command: InvocationCommand,
+    pub args: Vec<OsString>,
+    pub repo_url: String,
+    pub commit_sha: String,
+    pub project_root: String,
+    pub profiles_yml: String,
+    pub state_manifest: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PreparedExecutionSpec {
+    Local(LocalExecutionSpec),
+    Remote(RemoteExecutionSpec),
+}
+
+#[derive(Debug, Clone)]
 pub struct LocalExecutionPrepared {
-    pub spec: LocalExecutionSpec,
+    pub spec: PreparedExecutionSpec,
     pub persistence: Option<LocalExecutionPersistence>,
     pub worker_queue: String,
     pub project_id: i64,
@@ -496,12 +513,135 @@ impl<'a> InvocationService<'a> {
         };
 
         Ok(LocalExecutionPrepared {
-            spec: LocalExecutionSpec {
+            spec: PreparedExecutionSpec::Local(LocalExecutionSpec {
                 command: request.command,
                 args: dbt_args,
                 profiles_yml,
                 state_manifest,
-            },
+            }),
+            persistence,
+            worker_queue: environment.worker_queue.clone(),
+            project_id: project.id,
+            environment_id: environment.id,
+        })
+    }
+
+    pub async fn prepare_remote_execution(
+        &self,
+        run_id: Uuid,
+        command: InvocationCommand,
+        args: Vec<OsString>,
+        project_id: &str,
+        environment_slug: &str,
+    ) -> AppResult<LocalExecutionPrepared> {
+        self.db.require_current_schema().await?;
+        let project = self.db.get_project_by_project_id(project_id).await?;
+        let environment = self
+            .db
+            .get_environment(project_id, environment_slug)
+            .await?;
+
+        if !environment.immutable {
+            return Err(AppError::RemoteExecutionRequiresImmutableEnvironment(
+                project.project_id.clone(),
+                environment.slug.clone(),
+            ));
+        }
+        let repo_url = project.git_repo_url.clone().ok_or_else(|| {
+            AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone())
+        })?;
+        let project_root = project.project_root.clone().ok_or_else(|| {
+            AppError::RemoteExecutionRequiresProjectRoot(project.project_id.clone())
+        })?;
+        let commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
+            AppError::RemoteExecutionRequiresCommitSha(
+                project.project_id.clone(),
+                environment.slug.clone(),
+            )
+        })?;
+
+        let inject_json_logging = command.persists_state();
+        let fake_project_dir = PathBuf::from("/");
+        let ctx =
+            InvocationContext::from_args_in_dir(&args, inject_json_logging, &fake_project_dir)?;
+        let project_name = project.project_name.clone();
+
+        let reconstructed_manifest = self
+            .db
+            .load_reconstructed_manifest(project.id, environment.id)
+            .await?
+            .or(if ctx.wants_state_modified {
+                Some(
+                    ReconstructedManifest::write_empty_state(
+                        &project_name,
+                        &environment.adapter_type,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            });
+        let state_manifest = if let Some(reconstructed_manifest) = reconstructed_manifest.as_ref() {
+            let path = reconstructed_manifest.temp_dir.path().join("manifest.json");
+            let content = tokio::fs::read_to_string(path).await?;
+            Some(serde_json::from_str(&content)?)
+        } else {
+            None
+        };
+        let generated_profiles = build_generated_profiles(Path::new("."), &environment)?;
+        let profiles_yml =
+            tokio::fs::read_to_string(generated_profiles.temp_dir.path().join("profiles.yml"))
+                .await?;
+        let dbt_args = if command.persists_state() {
+            append_invocation_id(ctx.dbt_args, run_id)
+        } else {
+            ctx.dbt_args
+        };
+        let persistence = if command.persists_state() {
+            let args_json = Value::Array(
+                dbt_args
+                    .iter()
+                    .map(|value| Value::String(value.to_string_lossy().into_owned()))
+                    .collect(),
+            );
+            let git_state = GitState {
+                branch: environment.git_branch.clone(),
+                commit_sha: Some(commit_sha.clone()),
+                repo_url: Some(repo_url.clone()),
+            };
+            self.db
+                .insert_run_started(RunStart {
+                    run_id,
+                    project: &project,
+                    environment: &environment,
+                    subcommand: command.as_str(),
+                    args_json,
+                    is_full_graph_run: ctx.is_full_graph_run,
+                    execution_mode: ExecutionMode::Server,
+                    git_state: &git_state,
+                })
+                .await?;
+            Some(LocalExecutionPersistence {
+                run_id,
+                project_id: project.id,
+                environment_id: environment.id,
+                subcommand: command.as_str().to_string(),
+                promote_base_manifest: ctx.is_full_graph_run,
+            })
+        } else {
+            None
+        };
+
+        Ok(LocalExecutionPrepared {
+            spec: PreparedExecutionSpec::Remote(RemoteExecutionSpec {
+                command,
+                args: dbt_args,
+                repo_url,
+                commit_sha,
+                project_root,
+                profiles_yml,
+                state_manifest,
+            }),
             persistence,
             worker_queue: environment.worker_queue.clone(),
             project_id: project.id,

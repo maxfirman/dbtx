@@ -634,8 +634,9 @@ async fn create_invocation(
                 .into_iter()
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect(),
-            current_dir: ctx.project_dir.display().to_string(),
-            environment_slug: ctx.target_name.clone().unwrap_or_default(),
+            current_dir: Some(ctx.project_dir.display().to_string()),
+            project_id: None,
+            environment_slug: Some(ctx.target_name.clone().unwrap_or_default()),
             execution_mode,
             worker_queue,
         })

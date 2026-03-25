@@ -1,10 +1,12 @@
 use crate::api::{
     InvocationClaimResponse, InvocationCommandApi, InvocationCompleteApiRequest,
-    InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
+    InvocationEventBatchApiRequest, InvocationExecutionSpecApi, InvocationHeartbeatApiRequest,
+    InvocationLifecycleStatus,
 };
 use crate::client::DaemonClient;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -27,18 +29,19 @@ pub async fn execute_claimed_invocation(
     }
 
     let spec = claim.execution_spec;
+    let command_name = spec.command();
+    let project_dir = materialize_execution_project_dir(&spec).await?;
     info!(
         invocation_id = %claim.invocation_id,
         worker_id = %claim.worker_id,
-        command = ?spec.command,
-        project_dir = %spec.project_dir,
+        command = ?command_name,
+        project_dir = %project_dir.display(),
         "starting claimed invocation execution"
     );
-    let project_dir = PathBuf::from(&spec.project_dir);
-    let profiles_dir = write_profiles_dir(&spec.profiles_yml)?;
-    let state_dir = write_state_dir(spec.state_manifest.as_ref())?;
+    let profiles_dir = write_profiles_dir(spec.profiles_yml())?;
+    let state_dir = write_state_dir(spec.state_manifest())?;
 
-    let mut dbt_args: Vec<OsString> = spec.args.iter().cloned().map(Into::into).collect();
+    let mut dbt_args: Vec<OsString> = spec.args().iter().cloned().map(Into::into).collect();
     if let Some(state_dir) = state_dir.as_ref() {
         dbt_args.push("--state".into());
         dbt_args.push(state_dir.path().as_os_str().to_os_string());
@@ -46,7 +49,7 @@ pub async fn execute_claimed_invocation(
     dbt_args.push("--profiles-dir".into());
     dbt_args.push(profiles_dir.path().as_os_str().to_os_string());
 
-    let command = map_command(spec.command);
+    let command = map_command(command_name);
     let mut child =
         TokioCommand::new(std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string()))
             .arg(command)
@@ -83,7 +86,7 @@ pub async fn execute_claimed_invocation(
         tokio::select! {
             line = stdout_reader.next_line() => {
                 let Some(line) = line? else { break; };
-                if persists_state(spec.command)
+                if persists_state(command_name)
                     && let Some(event) = LogEvent::parse(&line)
                 {
                     if dbt_version.is_none() && event.info.name == "MainReportVersion" {
@@ -197,7 +200,7 @@ pub async fn execute_claimed_invocation(
     } else {
         status.code().unwrap_or(1)
     };
-    let manifest = if persists_state(spec.command) {
+    let manifest = if persists_state(command_name) {
         let manifest_path = project_dir.join("target").join("manifest.json");
         std::fs::read_to_string(&manifest_path)
             .ok()
@@ -250,6 +253,179 @@ pub async fn execute_claimed_invocation(
     } else {
         Err(AppError::DbtFailed(exit_code))
     }
+}
+
+impl InvocationExecutionSpecApi {
+    fn command(&self) -> InvocationCommandApi {
+        match self {
+            Self::Local { command, .. } | Self::Remote { command, .. } => *command,
+        }
+    }
+
+    fn args(&self) -> &[String] {
+        match self {
+            Self::Local { args, .. } | Self::Remote { args, .. } => args,
+        }
+    }
+
+    fn profiles_yml(&self) -> &str {
+        match self {
+            Self::Local { profiles_yml, .. } | Self::Remote { profiles_yml, .. } => profiles_yml,
+        }
+    }
+
+    fn state_manifest(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Local { state_manifest, .. } | Self::Remote { state_manifest, .. } => {
+                state_manifest.as_ref()
+            }
+        }
+    }
+}
+
+async fn materialize_execution_project_dir(
+    spec: &InvocationExecutionSpecApi,
+) -> AppResult<PathBuf> {
+    match spec {
+        InvocationExecutionSpecApi::Local { project_dir, .. } => Ok(PathBuf::from(project_dir)),
+        InvocationExecutionSpecApi::Remote {
+            repo_url,
+            commit_sha,
+            project_root,
+            ..
+        } => {
+            let worktree_root = ensure_git_worktree(repo_url, commit_sha).await?;
+            let project_dir = if project_root == "." || project_root.is_empty() {
+                worktree_root
+            } else {
+                worktree_root.join(project_root)
+            };
+            if !project_dir.join("dbt_project.yml").is_file() {
+                return Err(AppError::NotDbtProjectRoot);
+            }
+            Ok(project_dir)
+        }
+    }
+}
+
+async fn ensure_git_worktree(repo_url: &str, commit_sha: &str) -> AppResult<PathBuf> {
+    let cache_root = git_cache_root()?;
+    let repo_hash = short_hash(repo_url);
+    let mirror_dir = cache_root.join("mirrors").join(format!("{repo_hash}.git"));
+    let worktree_dir = cache_root
+        .join("worktrees")
+        .join(repo_hash)
+        .join(commit_sha);
+
+    tokio::fs::create_dir_all(mirror_dir.parent().expect("mirror parent")).await?;
+    tokio::fs::create_dir_all(worktree_dir.parent().expect("worktree parent")).await?;
+
+    if !mirror_dir.exists() {
+        info!(repo_url = %repo_url, mirror = %mirror_dir.display(), "creating git mirror cache");
+        run_git(
+            None,
+            [
+                "clone",
+                "--mirror",
+                repo_url,
+                mirror_dir.to_string_lossy().as_ref(),
+            ],
+        )
+        .await?;
+    } else {
+        info!(repo_url = %repo_url, mirror = %mirror_dir.display(), "refreshing git mirror cache");
+        run_git_with_git_dir(&mirror_dir, ["remote", "set-url", "origin", repo_url]).await?;
+        run_git_with_git_dir(&mirror_dir, ["fetch", "--prune", "origin"]).await?;
+    }
+
+    run_git_with_git_dir(
+        &mirror_dir,
+        ["cat-file", "-e", &format!("{commit_sha}^{{commit}}")],
+    )
+    .await?;
+
+    if !worktree_dir.exists() {
+        info!(
+            repo_url = %repo_url,
+            commit_sha = %commit_sha,
+            worktree = %worktree_dir.display(),
+            "creating git worktree"
+        );
+        run_git_with_git_dir(
+            &mirror_dir,
+            [
+                "worktree",
+                "add",
+                "--detach",
+                worktree_dir.to_string_lossy().as_ref(),
+                commit_sha,
+            ],
+        )
+        .await?;
+    } else {
+        info!(
+            repo_url = %repo_url,
+            commit_sha = %commit_sha,
+            worktree = %worktree_dir.display(),
+            "reusing git worktree"
+        );
+    }
+
+    Ok(worktree_dir)
+}
+
+fn git_cache_root() -> AppResult<PathBuf> {
+    if let Ok(value) = std::env::var("DBTX_GIT_CACHE_DIR")
+        && !value.trim().is_empty()
+    {
+        return Ok(PathBuf::from(value));
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        return Ok(PathBuf::from(home).join(".cache").join("dbtx").join("git"));
+    }
+    Ok(std::env::temp_dir().join("dbtx").join("git"))
+}
+
+async fn run_git_with_git_dir<const N: usize>(
+    git_dir: &std::path::Path,
+    args: [&str; N],
+) -> AppResult<()> {
+    let mut command = TokioCommand::new("git");
+    command.env("GIT_DIR", git_dir);
+    command.args(args);
+    let output = command.output().await?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Io(std::io::Error::other(format!(
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))))
+    }
+}
+
+async fn run_git<const N: usize>(cwd: Option<&std::path::Path>, args: [&str; N]) -> AppResult<()> {
+    let mut command = TokioCommand::new("git");
+    command.args(args);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command.output().await?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Io(std::io::Error::other(format!(
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))))
+    }
+}
+
+fn short_hash(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    format!("{digest:x}").chars().take(20).collect()
 }
 
 fn persists_state(command: InvocationCommandApi) -> bool {
