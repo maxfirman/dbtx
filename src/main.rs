@@ -224,8 +224,11 @@ async fn handle_project_command(
             project_root,
             default_branch,
         } => {
-            let project_id =
-                config::read_dbtx_project_id(&current_dir)?.ok_or(AppError::ProjectIdMissing)?;
+            let project_id = client
+                .project_show_with_context(&current_dir, None)
+                .await?
+                .project
+                .project_id;
             let project = client
                 .project_update(
                     &project_id,
@@ -632,7 +635,7 @@ async fn create_invocation(
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect(),
             current_dir: ctx.project_dir.display().to_string(),
-            environment_slug: ctx.environment_slug.clone(),
+            environment_slug: ctx.target_name.clone().unwrap_or_default(),
             execution_mode,
             worker_queue,
         })
@@ -654,12 +657,13 @@ fn print_project(project: &ProjectRecord) {
 
 fn print_environment(environment: &EnvironmentRecord) {
     println!(
-        "environment id={} project_pk={} project_id={} project={} slug={} target_name={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} immutable={} status={} adapter_type={} worker_queue={} schema_name={} threads={} profile_config={} metadata={}",
+        "environment id={} project_pk={} project_id={} project={} slug={} profile_name={} target_name={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} immutable={} status={} adapter_type={} worker_queue={} schema_name={} threads={} profile_config={} metadata={}",
         environment.id,
         environment.project_id,
         environment.project_ref,
         environment.project_name,
         environment.slug,
+        environment.profile_name,
         environment.target_name,
         environment.kind,
         environment
@@ -801,10 +805,9 @@ fn parse_cancel_state_filter(value: Option<&str>) -> AppResult<Option<Invocation
 
 #[cfg(test)]
 mod tests {
-    use dbtx::config::{read_dbtx_project_id, write_dbtx_toml};
     use dbtx::error::AppError;
     use dbtx::services::{
-        infer_project_defaults, read_dbt_project_name_from_root, relative_project_root,
+        infer_local_project_defaults, read_dbt_project_name_from_root, relative_project_root,
     };
     use std::process::Command;
     use tempfile::TempDir;
@@ -827,11 +830,24 @@ mod tests {
             repo_root,
         );
 
-        let inferred = infer_project_defaults(&project_root, None, None, None).expect("inferred");
+        let inferred =
+            infer_local_project_defaults(&project_root, None, None, None).expect("inferred");
 
         assert_eq!(inferred.project_name, "jaffle_shop_project");
-        assert_eq!(inferred.git_repo_url, "git@github.com:example/repo.git");
-        assert_eq!(inferred.project_root, "analytics");
+        assert_eq!(
+            inferred.git_repo_url.as_deref(),
+            Some("git@github.com:example/repo.git")
+        );
+        assert_eq!(
+            inferred.project_root.as_deref(),
+            Some(
+                project_root
+                    .canonicalize()
+                    .expect("canonical")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
         assert_eq!(inferred.default_branch, None);
     }
 
@@ -846,34 +862,6 @@ mod tests {
     fn relative_project_root_uses_dot_for_repo_root() {
         let temp = TempDir::new().expect("temp dir");
         assert_eq!(relative_project_root(temp.path(), temp.path()), ".");
-    }
-
-    #[test]
-    fn write_and_read_dbtx_project_id_round_trip() {
-        let temp = TempDir::new().expect("temp dir");
-        std::fs::write(
-            temp.path().join("dbt_project.yml"),
-            "name: sample\nversion: '1.0'\n",
-        )
-        .expect("dbt project");
-
-        write_dbtx_toml(temp.path(), Some("prj_123"), false).expect("write project id");
-        assert_eq!(
-            read_dbtx_project_id(temp.path()).expect("read project id"),
-            Some("prj_123".to_string())
-        );
-    }
-
-    #[test]
-    fn write_dbtx_project_id_overwrites_existing_nested_value() {
-        let temp = TempDir::new().expect("temp dir");
-        std::fs::write(temp.path().join("dbt_project.yml"), "name: sample\n").expect("dbt project");
-        write_dbtx_toml(temp.path(), Some("prj_old"), false).expect("initial config");
-        write_dbtx_toml(temp.path(), Some("prj_new"), true).expect("overwrite project id");
-        assert_eq!(
-            read_dbtx_project_id(temp.path()).expect("read project id"),
-            Some("prj_new".to_string())
-        );
     }
 
     fn run_git_cmd<const N: usize>(args: [&str; N], cwd: &std::path::Path) {

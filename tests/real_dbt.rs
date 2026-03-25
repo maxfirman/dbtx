@@ -1,5 +1,6 @@
 #![allow(clippy::await_holding_lock)]
 
+use dbtx::services::infer_local_project_defaults;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use std::fs;
@@ -115,11 +116,12 @@ async fn dbtx_ls_requires_project_init() {
             project.path_str(),
         ],
     );
-    assert_failure(&output);
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Run `dbtx project init` first"),
-        "unexpected stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+    assert_success(&output);
+    assert_eq!(
+        project.project_id(),
+        infer_local_project_defaults(project.path(), None, None, None)
+            .expect("infer local project")
+            .project_id
     );
 }
 
@@ -216,7 +218,7 @@ async fn dbtx_run_persists_real_jaffle_state() {
     );
     assert_eq!(
         run_row.get::<Option<String>, _>("project_root").as_deref(),
-        Some(".")
+        Some(project.path_str())
     );
     assert_eq!(
         run_row.get::<Option<String>, _>("project_name").as_deref(),
@@ -580,11 +582,6 @@ async fn project_init_and_force_reset_state_modified_baseline() {
 
     let init_output = run_dbtx(db.service_url(), &project, &["project", "init"]);
     assert_success(&init_output);
-    assert_success(&run_dbtx(
-        db.service_url(),
-        &project,
-        &["environment", "create", "--target", "dev"],
-    ));
 
     let initial_all = listed_unique_ids(db.service_url(), &project);
     let initial_modified = modified_unique_ids(db.service_url(), &project);
@@ -625,26 +622,15 @@ async fn project_init_and_force_reset_state_modified_baseline() {
     );
 
     let init_again = run_dbtx(db.service_url(), &project, &["project", "init"]);
-    assert_failure(&init_again);
-    let stderr = String::from_utf8_lossy(&init_again.stderr);
-    assert!(
-        stderr.contains("dbtx project id is already configured"),
-        "expected clear existing-project-id error, got: {stderr}"
-    );
+    assert_success(&init_again);
 
     let force_output = run_dbtx(db.service_url(), &project, &["project", "init", "--force"]);
     assert_success(&force_output);
-    assert_success(&run_dbtx(
-        db.service_url(),
-        &project,
-        &["environment", "create", "--target", "dev"],
-    ));
 
-    let forced_all = listed_unique_ids(db.service_url(), &project);
     let forced_modified = modified_unique_ids(db.service_url(), &project);
     assert_eq!(
-        forced_modified, forced_all,
-        "expected state:modified to match dbtx ls after project init --force"
+        forced_modified, modified_after_build,
+        "expected project init to leave the local modified baseline unchanged"
     );
 }
 
@@ -950,15 +936,9 @@ impl RealProject {
     }
 
     fn project_id(&self) -> String {
-        let content = fs::read_to_string(self.path().join("dbtx.toml")).expect("read dbtx config");
-        let config: toml::Value = toml::from_str(&content).expect("parse dbtx config");
-        config
-            .get("project")
-            .and_then(toml::Value::as_table)
-            .and_then(|table| table.get("id"))
-            .and_then(toml::Value::as_str)
-            .expect("project id")
-            .to_string()
+        infer_local_project_defaults(self.path(), None, None, None)
+            .expect("infer local project")
+            .project_id
     }
 
     fn head_sha(&self) -> String {
@@ -988,12 +968,6 @@ impl RealProject {
     fn init_dbtx_project(&self, service_url: &str) -> String {
         let output = run_dbtx(service_url, self, &["project", "init"]);
         assert_success(&output);
-        let create_env = run_dbtx(
-            service_url,
-            self,
-            &["environment", "create", "--target", "dev"],
-        );
-        assert_success(&create_env);
         self.project_id()
     }
 

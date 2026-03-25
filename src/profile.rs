@@ -30,6 +30,7 @@ pub struct GeneratedProfiles {
 
 #[derive(Debug, Clone)]
 pub struct LocalTargetProfile {
+    pub profile_name: String,
     pub target_name: String,
     pub adapter_type: String,
     pub schema_name: String,
@@ -212,7 +213,7 @@ impl LocalTargetProfile {
             AppError::ProfileTargetNotFound(profile_name.to_string(), target_name.clone())
         })?;
         let output_json = serde_json::to_value(output)?;
-        split_local_target_profile(&target_name, output_json)
+        split_local_target_profile(profile_name, &target_name, output_json)
     }
 
     pub fn encrypted_secrets(&self) -> AppResult<Value> {
@@ -396,6 +397,7 @@ pub fn decrypt_json(value: &Value) -> AppResult<Value> {
 }
 
 fn split_local_target_profile(
+    profile_name: &str,
     target_name: &str,
     raw_output: Value,
 ) -> AppResult<LocalTargetProfile> {
@@ -428,6 +430,7 @@ fn split_local_target_profile(
         false,
     )?;
     Ok(LocalTargetProfile {
+        profile_name: profile_name.to_string(),
         target_name: target_name.to_string(),
         adapter_type,
         schema_name,
@@ -530,6 +533,7 @@ mod tests {
     #[test]
     fn reads_local_duckdb_target() {
         let profile = super::split_local_target_profile(
+            "jaffle",
             "dev",
             json!({
                 "type": "duckdb",
@@ -540,6 +544,7 @@ mod tests {
         )
         .expect("split");
         assert_eq!(profile.target_name, "dev");
+        assert_eq!(profile.profile_name, "jaffle");
         assert_eq!(profile.adapter_type, "duckdb");
         assert_eq!(profile.schema_name, "main");
         assert_eq!(profile.profile_config["path"], "warehouse.duckdb");
@@ -549,6 +554,7 @@ mod tests {
     fn resolves_profile_with_environment_schema_override() {
         unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
         let store = LocalTargetProfile {
+            profile_name: "jaffle".to_string(),
             target_name: "dev".to_string(),
             adapter_type: "duckdb".to_string(),
             schema_name: "main".to_string(),

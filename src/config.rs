@@ -12,7 +12,7 @@ pub struct RuntimeConfig {
 
 #[derive(Debug, Clone)]
 pub struct InvocationContext {
-    pub environment_slug: String,
+    pub target_name: Option<String>,
     pub project_dir: PathBuf,
     pub target_path: PathBuf,
     pub is_full_graph_run: bool,
@@ -23,14 +23,7 @@ pub struct InvocationContext {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DbtxToml {
     #[serde(default)]
-    pub project: ProjectConfig,
-    #[serde(default)]
     pub service: ServiceConfig,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProjectConfig {
-    pub id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -63,9 +56,6 @@ impl InvocationContext {
         if has_option(args, "--state") {
             return Err(AppError::UserStateNotAllowed);
         }
-        if has_any_option(args, &["--target"]) {
-            return Err(AppError::UserTargetNotAllowed);
-        }
         if has_option(args, "--profiles-dir") {
             return Err(AppError::UserProfilesDirNotAllowed);
         }
@@ -76,9 +66,7 @@ impl InvocationContext {
         let target_path = parse_path_option(args, "--target-path")
             .map(|path| absolutize(current_dir, &path))
             .unwrap_or_else(|| project_dir.join("target"));
-
-        let environment_slug =
-            env::var("DBTX_ENVIRONMENT_SLUG").unwrap_or_else(|_| "default".to_string());
+        let target_name = parse_string_option(args, "--target");
         let is_full_graph_run =
             !has_any_option(args, &["--select", "-s", "--exclude", "-x", "--selector"]);
         let wants_state_modified = args.iter().any(|arg| {
@@ -94,7 +82,7 @@ impl InvocationContext {
         }
 
         Ok(Self {
-            environment_slug,
+            target_name,
             project_dir,
             target_path,
             is_full_graph_run,
@@ -111,12 +99,6 @@ pub fn read_dbtx_toml(project_root: &Path) -> AppResult<Option<DbtxToml>> {
     }
     let content = std::fs::read_to_string(path)?;
     Ok(Some(toml::from_str(&content)?))
-}
-
-pub fn read_dbtx_project_id(project_root: &Path) -> AppResult<Option<String>> {
-    Ok(read_dbtx_toml(project_root)?
-        .and_then(|config| config.project.id)
-        .filter(|value| !value.is_empty()))
 }
 
 pub fn resolve_database_url(
@@ -140,29 +122,6 @@ pub fn resolve_service_url(
     Ok(service_url_override
         .or_else(|| env::var("DBTX_SERVICE_URL").ok())
         .or(file_service_url))
-}
-
-pub fn write_dbtx_toml(
-    project_root: &Path,
-    project_id: Option<&str>,
-    force_project_id: bool,
-) -> AppResult<()> {
-    let path = dbtx_toml_path(project_root);
-    let mut config = read_dbtx_toml(project_root)?.unwrap_or_default();
-
-    if let Some(existing) = config.project.id.as_deref()
-        && !force_project_id
-        && project_id.is_some()
-    {
-        return Err(AppError::ProjectIdAlreadyConfigured(existing.to_string()));
-    }
-
-    if let Some(project_id) = project_id {
-        config.project.id = Some(project_id.to_string());
-    }
-
-    std::fs::write(path, toml::to_string_pretty(&config)?)?;
-    Ok(())
 }
 
 pub fn dbtx_toml_path(project_root: &Path) -> PathBuf {
@@ -213,30 +172,27 @@ fn absolutize(base: &Path, path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{DbtxToml, InvocationContext, read_dbtx_project_id, write_dbtx_toml};
+    use super::{DbtxToml, InvocationContext};
     use crate::error::AppError;
-    use std::env;
     use std::ffi::OsString;
-    use tempfile::TempDir;
-
     #[test]
     fn derives_context_from_args() {
-        unsafe { env::set_var("DBTX_ENVIRONMENT_SLUG", "prod") };
         let args = vec![
             OsString::from("--project-dir"),
             OsString::from("/tmp/example"),
             OsString::from("--target-path=artifacts"),
+            OsString::from("--target"),
+            OsString::from("prod"),
             OsString::from("--select"),
             OsString::from("state:modified"),
         ];
 
         let ctx = InvocationContext::from_args(&args, true).expect("context should build");
-        assert_eq!(ctx.environment_slug, "prod");
+        assert_eq!(ctx.target_name.as_deref(), Some("prod"));
         assert!(ctx.target_path.ends_with("artifacts"));
         assert!(!ctx.is_full_graph_run);
         assert!(ctx.wants_state_modified);
         assert!(ctx.dbt_args.iter().any(|arg| arg == "--log-format"));
-        unsafe { env::remove_var("DBTX_ENVIRONMENT_SLUG") };
     }
 
     #[test]
@@ -257,37 +213,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_user_supplied_target() {
-        let args = vec![OsString::from("--target"), OsString::from("prod")];
-        let err = InvocationContext::from_args(&args, false).expect_err("target should fail");
-        assert!(matches!(err, AppError::UserTargetNotAllowed));
-    }
-
-    #[test]
-    fn writes_and_reads_dbtx_toml() {
-        let temp = TempDir::new().expect("temp dir");
-        write_dbtx_toml(temp.path(), Some("prj_123"), false).expect("write dbtx.toml");
-        assert_eq!(
-            read_dbtx_project_id(temp.path()).expect("read project id"),
-            Some("prj_123".to_string())
-        );
-        let config = super::read_dbtx_toml(temp.path()).expect("read config");
-        assert!(config.is_some());
-    }
-
-    #[test]
     fn serializes_expected_shape() {
         let config = DbtxToml {
-            project: super::ProjectConfig {
-                id: Some("prj_123".to_string()),
-            },
             service: super::ServiceConfig {
                 url: Some("http://127.0.0.1:8585".to_string()),
             },
         };
         let rendered = toml::to_string_pretty(&config).expect("render toml");
-        assert!(rendered.contains("[project]"));
-        assert!(rendered.contains("id = \"prj_123\""));
         assert!(rendered.contains("[service]"));
     }
 }

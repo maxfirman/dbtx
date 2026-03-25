@@ -3,7 +3,6 @@ use crate::api::{
     InvocationExecutionSpecApi, InvocationLifecycleStatus, InvocationListApiRequest,
     InvocationStatusResponse, InvocationWorkerHealthApi, QueueStatusResponse, WorkerStatusResponse,
 };
-use crate::config::read_dbtx_project_id;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::execution::{ExecutionMode, heartbeat_stale_timeout};
@@ -56,6 +55,7 @@ pub struct EnvironmentRecord {
     pub project_ref: String,
     pub project_name: String,
     pub slug: String,
+    pub profile_name: String,
     pub target_name: String,
     pub kind: String,
     pub baseline_environment_id: Option<i64>,
@@ -78,15 +78,16 @@ pub struct EnvironmentRecord {
 pub struct CreateProjectInput {
     pub project_id: String,
     pub project_name: String,
-    pub git_repo_url: String,
+    pub git_repo_url: Option<String>,
     pub default_branch: Option<String>,
-    pub project_root: String,
+    pub project_root: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateEnvironmentInput {
     pub project: String,
     pub slug: String,
+    pub profile_name: String,
     pub target_name: String,
     pub kind: String,
     pub baseline_slug: Option<String>,
@@ -116,6 +117,7 @@ pub struct UpdateEnvironmentInput {
     pub status: Option<String>,
     pub adapter_type: Option<String>,
     pub worker_queue: Option<String>,
+    pub profile_name: Option<String>,
     pub target_name: Option<String>,
     pub schema_name: Option<String>,
     pub threads: Option<i32>,
@@ -174,6 +176,18 @@ pub(crate) struct InvocationPersistenceRecord {
     pub(crate) environment_id: i64,
     pub(crate) command: String,
     pub(crate) promote_base_manifest: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalEnvironmentUpsertInput<'a> {
+    pub(crate) project: &'a ProjectRecord,
+    pub(crate) profile_name: &'a str,
+    pub(crate) target_name: &'a str,
+    pub(crate) adapter_type: &'a str,
+    pub(crate) schema_name: &'a str,
+    pub(crate) threads: Option<i32>,
+    pub(crate) profile_config: &'a Value,
+    pub(crate) profile_secrets: &'a Value,
 }
 
 #[derive(Debug, Clone)]
@@ -249,9 +263,9 @@ impl Db {
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
-        .bind(&input.git_repo_url)
+        .bind(input.git_repo_url.as_deref())
         .bind(input.default_branch.as_deref())
-        .bind(&input.project_root)
+        .bind(input.project_root.as_deref())
         .fetch_one(&self.pool)
         .await?;
         Ok(project_record_from_row(&row))
@@ -271,12 +285,35 @@ impl Db {
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
-        .bind(&input.git_repo_url)
+        .bind(input.git_repo_url.as_deref())
         .bind(input.default_branch.as_deref())
-        .bind(&input.project_root)
+        .bind(input.project_root.as_deref())
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::ProjectIdNotFound(input.project_id.clone()))?;
+        Ok(project_record_from_row(&row))
+    }
+
+    pub async fn upsert_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root)
+            VALUES ($1, $2, $3, COALESCE($4, 'main'), $5)
+            ON CONFLICT (project_id) DO UPDATE
+            SET project_name = EXCLUDED.project_name,
+                git_repo_url = EXCLUDED.git_repo_url,
+                default_branch = EXCLUDED.default_branch,
+                project_root = EXCLUDED.project_root
+            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
+            "#,
+        )
+        .bind(&input.project_id)
+        .bind(&input.project_name)
+        .bind(input.git_repo_url.as_deref())
+        .bind(input.default_branch.as_deref())
+        .bind(input.project_root.as_deref())
+        .fetch_one(&self.pool)
+        .await?;
         Ok(project_record_from_row(&row))
     }
 
@@ -322,9 +359,9 @@ impl Db {
         .bind(project_pk)
         .bind(&input.project_id)
         .bind(&input.project_name)
-        .bind(&input.git_repo_url)
+        .bind(input.git_repo_url.as_deref())
         .bind(input.default_branch.as_deref())
-        .bind(&input.project_root)
+        .bind(input.project_root.as_deref())
         .fetch_one(&mut *tx)
         .await?;
 
@@ -382,16 +419,17 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO environments (
-                project_id, slug, target_name, kind, baseline_environment_id, git_branch, git_commit_sha,
+                project_id, slug, profile_name, target_name, kind, baseline_environment_id, git_branch, git_commit_sha,
                 pr_number, immutable, status, adapter_type, worker_queue, schema_name, threads,
                 profile_config, profile_secrets
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             RETURNING id
             "#,
         )
         .bind(project.id)
         .bind(&input.slug)
+        .bind(&input.profile_name)
         .bind(&input.target_name)
         .bind(&input.kind)
         .bind(baseline.as_ref().map(|env| env.id))
@@ -473,6 +511,11 @@ impl Db {
             .as_deref()
             .unwrap_or(&existing.worker_queue)
             .to_string();
+        let profile_name = input
+            .profile_name
+            .as_deref()
+            .unwrap_or(&existing.profile_name)
+            .to_string();
         let target_name = input
             .target_name
             .as_deref()
@@ -514,11 +557,12 @@ impl Db {
                 status = $9,
                 adapter_type = $10,
                 worker_queue = $11,
-                target_name = $12,
-                schema_name = $13,
-                threads = $14,
-                profile_config = $15,
-                profile_secrets = $16
+                profile_name = $12,
+                target_name = $13,
+                schema_name = $14,
+                threads = $15,
+                profile_config = $16,
+                profile_secrets = $17
             WHERE id = $1 AND project_id = $2
             "#,
         )
@@ -533,6 +577,7 @@ impl Db {
         .bind(&status)
         .bind(&adapter_type)
         .bind(&worker_queue)
+        .bind(&profile_name)
         .bind(&target_name)
         .bind(&schema_name)
         .bind(threads)
@@ -567,6 +612,7 @@ impl Db {
                 p.project_id AS project_ref,
                 p.project_name,
                 e.slug,
+                e.profile_name,
                 e.target_name,
                 e.kind,
                 e.baseline_environment_id,
@@ -1368,14 +1414,61 @@ impl Db {
         Ok(())
     }
 
-    pub(crate) async fn resolve_local_project(
+    pub(crate) async fn upsert_local_environment(
         &self,
-        project_dir: &Path,
-    ) -> AppResult<ProjectRecord> {
-        let project_id = read_dbtx_project_id(project_dir)?.ok_or(AppError::ProjectIdMissing)?;
-        let project = self.get_project_by_project_id(&project_id).await?;
-        validate_project_record(&project, project_dir)?;
-        Ok(project)
+        input: LocalEnvironmentUpsertInput<'_>,
+    ) -> AppResult<EnvironmentRecord> {
+        let LocalEnvironmentUpsertInput {
+            project,
+            profile_name,
+            target_name,
+            adapter_type,
+            schema_name,
+            threads,
+            profile_config,
+            profile_secrets,
+        } = input;
+        validate_environment_profile(
+            adapter_type,
+            schema_name,
+            threads,
+            profile_config,
+            profile_secrets,
+            false,
+        )?;
+        let slug = format!("{profile_name}__{target_name}");
+        let row = sqlx::query(
+            r#"
+            INSERT INTO environments (
+                project_id, slug, profile_name, target_name, kind, status, adapter_type,
+                worker_queue, schema_name, threads, profile_config, profile_secrets
+            )
+            VALUES ($1, $2, $3, $4, 'persistent', 'active', $5, 'generic', $6, $7, $8, $9)
+            ON CONFLICT (project_id, slug) DO UPDATE
+            SET slug = EXCLUDED.slug,
+                profile_name = EXCLUDED.profile_name,
+                target_name = EXCLUDED.target_name,
+                adapter_type = EXCLUDED.adapter_type,
+                schema_name = EXCLUDED.schema_name,
+                threads = EXCLUDED.threads,
+                profile_config = EXCLUDED.profile_config,
+                profile_secrets = EXCLUDED.profile_secrets
+            RETURNING id
+            "#,
+        )
+        .bind(project.id)
+        .bind(&slug)
+        .bind(profile_name)
+        .bind(target_name)
+        .bind(adapter_type)
+        .bind(schema_name)
+        .bind(threads)
+        .bind(sqlx::types::Json(profile_config))
+        .bind(sqlx::types::Json(profile_secrets))
+        .fetch_one(&self.pool)
+        .await?;
+        let environment_id: i64 = row.get("id");
+        self.get_environment_by_id(environment_id).await
     }
 
     pub(crate) async fn finalize_run(&self, finalization: RunFinalization<'_>) -> AppResult<()> {
@@ -1523,6 +1616,7 @@ impl Db {
                 p.project_id AS project_ref,
                 p.project_name,
                 e.slug,
+                e.profile_name,
                 e.target_name,
                 e.kind,
                 e.baseline_environment_id,
@@ -1565,6 +1659,7 @@ impl Db {
                 p.project_id AS project_ref,
                 p.project_name,
                 e.slug,
+                e.profile_name,
                 e.target_name,
                 e.kind,
                 e.baseline_environment_id,
@@ -1606,6 +1701,7 @@ impl Db {
                 p.project_id AS project_ref,
                 p.project_name,
                 e.slug,
+                e.profile_name,
                 e.target_name,
                 e.kind,
                 e.baseline_environment_id,
@@ -2273,6 +2369,7 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         project_ref: row.get("project_ref"),
         project_name: row.get("project_name"),
         slug: row.get("slug"),
+        profile_name: row.get("profile_name"),
         target_name: row.get("target_name"),
         kind: row.get("kind"),
         baseline_environment_id: row.get("baseline_environment_id"),
@@ -2441,36 +2538,6 @@ fn git_remote_origin_url(repo_root: &Path) -> AppResult<String> {
         .map_err(|_| AppError::GitRemoteNotFound)
 }
 
-fn relative_project_root(repo_root: &Path, project_root: &Path) -> String {
-    match project_root.strip_prefix(repo_root) {
-        Ok(path) if path.as_os_str().is_empty() => ".".to_string(),
-        Ok(path) => path.to_string_lossy().into_owned(),
-        Err(_) => project_root.to_string_lossy().into_owned(),
-    }
-}
-
-pub(crate) fn validate_project_record(
-    project: &ProjectRecord,
-    project_dir: &Path,
-) -> AppResult<()> {
-    let repo_root = git_repo_root(project_dir)?;
-    let current_name = read_dbt_project_name(project_dir);
-    let current_git_repo_url = git_remote_origin_url(&repo_root)?;
-    let current_project_root = relative_project_root(&repo_root, project_dir);
-
-    let matches = project.project_name == current_name
-        && project.git_repo_url.as_deref() == Some(current_git_repo_url.as_str())
-        && project.project_root.as_deref() == Some(current_project_root.as_str());
-
-    if matches {
-        Ok(())
-    } else {
-        Err(AppError::ProjectValidationFailed(
-            project.project_id.clone(),
-        ))
-    }
-}
-
 pub(crate) fn read_git_state(project_dir: &Path) -> GitState {
     let repo_root = git_repo_root(project_dir).ok();
     let repo_url = repo_root
@@ -2516,12 +2583,11 @@ pub(crate) fn validate_environment_git_state(
 }
 
 pub(crate) fn build_generated_profiles(
-    project_dir: &Path,
+    _project_dir: &Path,
     environment: &EnvironmentRecord,
 ) -> AppResult<GeneratedProfiles> {
-    let profile_name = read_dbt_profile_name(project_dir)?;
     let resolved = resolve_runtime_profile(
-        &profile_name,
+        &environment.profile_name,
         &environment.target_name,
         &EnvironmentProfileRecord {
             adapter_type: environment.adapter_type.clone(),
@@ -2547,13 +2613,4 @@ fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
         return Err(AppError::GitRepoNotFound);
     }
     Ok(stdout)
-}
-
-fn read_dbt_profile_name(project_dir: &Path) -> AppResult<String> {
-    let yaml = read_dbt_project_yaml(project_dir)?;
-    yaml.get("profile")
-        .and_then(serde_yaml::Value::as_str)
-        .or_else(|| yaml.get("name").and_then(serde_yaml::Value::as_str))
-        .map(ToString::to_string)
-        .ok_or(AppError::MissingDbtProfile)
 }

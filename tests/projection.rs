@@ -6,6 +6,7 @@ use dbtx::api::{
 };
 use dbtx::client::DaemonClient;
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
+use dbtx::services::infer_local_project_defaults;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::fs;
@@ -1473,15 +1474,9 @@ impl TempProjectRepo {
 }
 
 fn read_project_id_from_dbt_project(project_dir: &Path) -> String {
-    let content = fs::read_to_string(project_dir.join("dbtx.toml")).expect("read dbtx config");
-    let config: toml::Value = toml::from_str(&content).expect("parse dbtx config");
-    config
-        .get("project")
-        .and_then(toml::Value::as_table)
-        .and_then(|table| table.get("id"))
-        .and_then(toml::Value::as_str)
-        .expect("project id")
-        .to_string()
+    infer_local_project_defaults(project_dir, None, None, None)
+        .expect("infer local project")
+        .project_id
 }
 
 fn git(args: &[&str], cwd: &Path) {
