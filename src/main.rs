@@ -380,6 +380,20 @@ async fn handle_invocation_command(
             let invocation = client.invocation_status(invocation_id).await?;
             print_invocation(&invocation);
         }
+        InvocationCliCommand::Cleanup { older_than_hours } => {
+            if older_than_hours <= 0 {
+                return Err(AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--older-than-hours must be greater than 0",
+                )));
+            }
+            let response = client
+                .invocation_cleanup(api::InvocationCleanupApiRequest {
+                    older_than_seconds: older_than_hours * 3600,
+                })
+                .await?;
+            println!("deleted {} invocation(s)", response.deleted);
+        }
     }
     Ok(())
 }

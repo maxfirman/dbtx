@@ -778,6 +778,24 @@ impl Db {
         Ok(result.rows_affected())
     }
 
+    pub(crate) async fn cleanup_terminal_invocations_older_than(
+        &self,
+        cutoff: chrono::DateTime<Utc>,
+    ) -> AppResult<u64> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM invocations
+            WHERE status IN ('succeeded', 'failed', 'canceled')
+              AND completed_at IS NOT NULL
+              AND completed_at < $1
+            "#,
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub(crate) async fn get_invocation_persistence(
         &self,
         invocation_id: Uuid,

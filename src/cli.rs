@@ -190,6 +190,11 @@ pub enum InvocationCommand {
         #[arg(long)]
         invocation_id: String,
     },
+    #[command(about = "Delete old terminal invocations and their invocation events")]
+    Cleanup {
+        #[arg(long)]
+        older_than_hours: i64,
+    },
 }
 
 #[cfg(test)]
@@ -399,6 +404,23 @@ mod tests {
                 assert!(immutable);
             }
             _ => panic!("expected environment update command"),
+        }
+    }
+
+    #[test]
+    fn invocation_cleanup_parses() {
+        let cli = Cli::parse_from([
+            "dbtx",
+            "invocation",
+            "cleanup",
+            "--older-than-hours",
+            "24",
+        ]);
+        match cli.command {
+            Command::Invocation(InvocationCommand::Cleanup { older_than_hours }) => {
+                assert_eq!(older_than_hours, 24);
+            }
+            _ => panic!("expected invocation cleanup command"),
         }
     }
 }

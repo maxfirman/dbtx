@@ -1,12 +1,12 @@
 use crate::api::{
     EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
     EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
-    InvocationCommandApi, InvocationCompleteApiRequest, InvocationCreateApiRequest,
-    InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
-    InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
-    InvocationLifecycleStatus, InvocationStatusResponse, InvocationsResponse, MigrateResponse,
-    ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest,
-    ProjectsResponse,
+    InvocationCleanupApiRequest, InvocationCleanupResponse, InvocationCommandApi,
+    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
+    InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionSpecApi,
+    InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
+    InvocationStatusResponse, InvocationsResponse, MigrateResponse, ProjectInitApiRequest,
+    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{CreateInvocationInput, Db, InvocationPersistenceRecord};
@@ -303,6 +303,7 @@ pub fn router(state: AppState) -> Router {
             get(environment_get).patch(environment_update),
         )
         .route("/v1/invocations", get(invocation_list).post(invocation_create))
+        .route("/v1/invocations/cleanup", post(invocation_cleanup))
         .route("/v1/invocations/claim-next", post(invocation_claim_next))
         .route("/v1/invocations/{id}", get(invocation_status))
         .route("/v1/invocations/{id}/heartbeat", post(invocation_heartbeat))
@@ -673,6 +674,25 @@ async fn invocation_list(State(state): State<AppState>) -> Result<Json<Invocatio
     let invocations = state.db.list_invocations().await?;
     info!(count = invocations.len(), "listed invocations");
     Ok(Json(InvocationsResponse { invocations }))
+}
+
+async fn invocation_cleanup(
+    State(state): State<AppState>,
+    Json(request): Json<InvocationCleanupApiRequest>,
+) -> Result<Json<InvocationCleanupResponse>, ApiError> {
+    if request.older_than_seconds <= 0 {
+        return Err(ApiError(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "older_than_seconds must be greater than 0",
+        ))));
+    }
+    let cutoff = Utc::now() - chrono::Duration::seconds(request.older_than_seconds);
+    let deleted = state
+        .db
+        .cleanup_terminal_invocations_older_than(cutoff)
+        .await?;
+    info!(older_than_seconds = request.older_than_seconds, deleted, "cleaned up terminal invocations");
+    Ok(Json(InvocationCleanupResponse { deleted }))
 }
 
 async fn invocation_append_events(

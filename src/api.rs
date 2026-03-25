@@ -127,6 +127,16 @@ pub struct InvocationsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationCleanupApiRequest {
+    pub older_than_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationCleanupResponse {
+    pub deleted: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationExecutionSpecApi {
     pub command: InvocationCommandApi,
     pub args: Vec<String>,
