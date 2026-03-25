@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(name = "dbtx-server")]
-#[command(about = "Run the dbtx local daemon")]
+#[command(about = "Run the dbtx local server")]
 struct ServerCli {
     #[arg(long)]
     database_url: Option<String>,

@@ -23,7 +23,7 @@ Phase 1 supports:
 ## Configuration
 
 - `DBTX_DATABASE_URL`: PostgreSQL connection string for `dbtx-server`
-- `DBTX_SERVICE_URL`: URL for the `dbtx-server` daemon
+- `DBTX_SERVICE_URL`: URL for the `dbtx-server` service
 - `DBTX_WORKER_PATH`: optional path to the `dbtx-worker` executable used by `dbtx` for local execution
 - `DBTX_DBT_PATH`: optional path to the `dbt` executable, defaults to `dbt`
 - `DBTX_ENVIRONMENT_SLUG`: optional override for environment identity

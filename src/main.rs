@@ -489,6 +489,11 @@ async fn invoke_via_local_worker(
         .arg("--once")
         .arg("--queue")
         .arg(queue)
+        .env(
+            "RUST_LOG",
+            std::env::var("DBTX_ONE_SHOT_WORKER_LOG")
+                .unwrap_or_else(|_| "dbtx=warn".to_string()),
+        )
         .status()?;
     match status.code().unwrap_or(1) {
         0 => Ok(()),

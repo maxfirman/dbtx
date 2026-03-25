@@ -6,7 +6,7 @@ use dbtx::error::{AppError, AppResult};
 use dbtx::worker;
 use std::sync::Once;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -59,7 +59,7 @@ async fn run() -> AppResult<()> {
     };
     let poll_interval = Duration::from_millis(cli.poll_interval_ms);
 
-    debug!(
+    info!(
         worker_id = %worker_id,
         service_url = %service_url,
         execution_mode = ?execution_mode,
@@ -79,7 +79,7 @@ async fn run() -> AppResult<()> {
             .await?
         {
             Some(claim) => {
-                debug!(
+                info!(
                     invocation_id = %claim.invocation_id,
                     worker_id = %worker_id,
                     execution_mode = ?execution_mode,
@@ -92,7 +92,7 @@ async fn run() -> AppResult<()> {
                         return Err(err);
                     }
                 } else if cli.once {
-                    debug!(worker_id = %worker_id, "one-shot worker completed successfully");
+                    info!(worker_id = %worker_id, "one-shot worker completed successfully");
                     return Ok(());
                 }
             }

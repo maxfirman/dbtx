@@ -328,17 +328,17 @@ pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
             format!("invalid listen address '{listen}': {err}"),
         ))
     })?;
-    info!(listen = %addr, "starting dbtx daemon");
+    info!(listen = %addr, "starting dbtx server");
     let reclaimable_stale_invocations = state.db.stale_invocation_count().await.unwrap_or(0);
     info!(
         listen = %addr,
         reclaimable_stale_invocations,
-        "dbtx daemon execution state initialized"
+        "dbtx server execution state initialized"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(listen = %addr, "dbtx daemon listening");
+    info!(listen = %addr, "dbtx server listening");
     axum::serve(listener, router(state)).await.map_err(|err| {
-        error!(error = %err, "dbtx daemon stopped with error");
+        error!(error = %err, "dbtx server stopped with error");
         AppError::Io(err)
     })
 }
