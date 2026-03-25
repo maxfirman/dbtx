@@ -19,7 +19,7 @@ use crate::services::{
     InvocationRequest, InvocationService, ProjectInitRequest, ProjectService, ProjectUpdateRequest,
 };
 use async_stream::stream;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -68,7 +68,6 @@ struct SequencedInvocationEvent {
 
 #[derive(Default)]
 struct InvocationHistory {
-    next_sequence: u64,
     items: Vec<SequencedInvocationEvent>,
 }
 
@@ -164,20 +163,17 @@ impl InvocationManager {
 }
 
 impl InvocationRuntime {
-    async fn push_event(&self, event: InvocationEvent) -> u64 {
+    async fn push_event(&self, sequence: u64, event: InvocationEvent) {
         let sequenced = {
             let mut history = self.history.lock().await;
-            history.next_sequence += 1;
             let sequenced = SequencedInvocationEvent {
-                sequence: history.next_sequence,
+                sequence,
                 event,
             };
             history.items.push(sequenced.clone());
             sequenced
         };
-        let sequence = sequenced.sequence;
         let _ = self.tx.send(sequenced);
-        sequence
     }
 }
 
@@ -203,7 +199,11 @@ impl InvocationRecorder {
             exit_code: None,
             error: event.error.clone(),
         };
-        let sequence = self.runtime.push_event(sse_event).await as i64;
+        let sequence = self
+            .db
+            .append_invocation_event(self.invocation_id, &sse_event)
+            .await? as i64;
+        self.runtime.push_event(sequence as u64, sse_event).await;
         if let Some(persistence) = self.persistence().await? {
             match event.kind {
                 ExecutionEventKind::DbtLog => {
@@ -239,20 +239,24 @@ impl InvocationRecorder {
         self.db
             .complete_invocation(self.invocation_id, worker_id, &completion)
             .await?;
-        let _ = self
-            .runtime
-            .push_event(InvocationEvent {
-                event_type: "invocation.completed".to_string(),
-                timestamp: Utc::now(),
-                text: None,
-                stream: None,
-                dbt_event_name: None,
-                node_unique_id: None,
-                level: None,
-                exit_code: Some(completion.exit_code),
-                error: completion.error.clone(),
-            })
+        let completed_event = InvocationEvent {
+            event_type: "invocation.completed".to_string(),
+            timestamp: Utc::now(),
+            text: None,
+            stream: None,
+            dbt_event_name: None,
+            node_unique_id: None,
+            level: None,
+            exit_code: Some(completion.exit_code),
+            error: completion.error.clone(),
+        };
+        let sequence = self
+            .db
+            .append_invocation_event(self.invocation_id, &completed_event)
             .await;
+        if let Ok(sequence) = sequence {
+            self.runtime.push_event(sequence, completed_event).await;
+        }
         Ok(())
     }
 
@@ -319,6 +323,11 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .with_state(state)
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct InvocationEventsQuery {
+    after_sequence: Option<u64>,
 }
 
 pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
@@ -582,19 +591,24 @@ async fn invocation_create(
         .invocations
         .get_or_create(invocation_id, persistence)
         .await;
-    let _ = runtime
-        .push_event(InvocationEvent {
-            event_type: "invocation.started".to_string(),
-            timestamp: Utc::now(),
-            text: None,
-            stream: None,
-            dbt_event_name: None,
-            node_unique_id: None,
-            level: None,
-            exit_code: None,
-            error: None,
-        })
+    let started_event = InvocationEvent {
+        event_type: "invocation.started".to_string(),
+        timestamp: Utc::now(),
+        text: None,
+        stream: None,
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        exit_code: None,
+        error: None,
+    };
+    let started_sequence = state
+        .db
+        .append_invocation_event(invocation_id, &started_event)
         .await;
+    if let Ok(sequence) = started_sequence {
+        runtime.push_event(sequence, started_event).await;
+    }
     info!(
         invocation_id = %invocation_id,
         execution_mode = ?request.execution_mode,
@@ -712,13 +726,27 @@ async fn invocation_complete(
 async fn invocation_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<InvocationEventsQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let runtime = state.invocations.get_or_create(id, None).await;
     let rx = runtime.tx.subscribe();
-    let history = runtime.history.lock().await;
-    let buffered_events = history.items.len();
-    let last_sequence = history.items.last().map(|item| item.sequence).unwrap_or(0);
-    let stream = event_stream(history.items.clone(), last_sequence, rx);
+    let header_resume = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let after_sequence = query.after_sequence.or(header_resume).unwrap_or(0);
+    let history = state.db.load_invocation_events_since(id, after_sequence).await?;
+    let buffered_events = history.len();
+    let last_sequence = history.last().map(|item| item.0).unwrap_or(after_sequence);
+    let stream = event_stream(
+        history
+            .into_iter()
+            .map(|(sequence, event)| SequencedInvocationEvent { sequence, event })
+            .collect(),
+        last_sequence,
+        rx,
+    );
     info!(invocation_id = %id, buffered_events, "subscribed to invocation event stream");
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -729,12 +757,17 @@ fn event_stream(
     mut rx: broadcast::Receiver<SequencedInvocationEvent>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     stream! {
+        let mut last_seen_sequence = last_history_sequence;
         for item in history {
-            yield Ok(to_sse_event(&item.event));
+            last_seen_sequence = item.sequence;
+            yield Ok(to_sse_event(&item));
         }
         loop {
             match rx.recv().await {
-                Ok(item) if item.sequence > last_history_sequence => yield Ok(to_sse_event(&item.event)),
+                Ok(item) if item.sequence > last_seen_sequence => {
+                    last_seen_sequence = item.sequence;
+                    yield Ok(to_sse_event(&item))
+                }
                 Ok(_) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -743,10 +776,11 @@ fn event_stream(
     }
 }
 
-fn to_sse_event(event: &InvocationEvent) -> Event {
+fn to_sse_event(item: &SequencedInvocationEvent) -> Event {
     Event::default()
-        .event(event.event_type.clone())
-        .data(serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string()))
+        .event(item.event.event_type.clone())
+        .id(item.sequence.to_string())
+        .data(serde_json::to_string(&item.event).unwrap_or_else(|_| "{}".to_string()))
 }
 
 fn map_invocation_command(command: InvocationCommandApi) -> InvocationCommand {

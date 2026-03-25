@@ -3,8 +3,9 @@ use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
 use crate::api::{
-    InvocationClaimResponse, InvocationExecutionModeApi, InvocationExecutionSpecApi,
-    InvocationLifecycleStatus, InvocationStatusResponse, InvocationWorkerHealthApi,
+    InvocationClaimResponse, InvocationEvent, InvocationExecutionModeApi,
+    InvocationExecutionSpecApi, InvocationLifecycleStatus, InvocationStatusResponse,
+    InvocationWorkerHealthApi,
 };
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
 use crate::profile::{
@@ -807,6 +808,76 @@ impl Db {
             command: row.get("command"),
             promote_base_manifest: row.get("promote_base_manifest"),
         })
+    }
+
+    pub(crate) async fn append_invocation_event(
+        &self,
+        invocation_id: Uuid,
+        event: &InvocationEvent,
+    ) -> AppResult<u64> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            UPDATE invocations
+            SET next_event_sequence = next_event_sequence + 1
+            WHERE invocation_id = $1
+            RETURNING next_event_sequence
+            "#,
+        )
+        .bind(invocation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "invocation not found",
+            ))
+        })?;
+        let sequence_no: i64 = row.get("next_event_sequence");
+        sqlx::query(
+            r#"
+            INSERT INTO invocation_events (
+                invocation_id, sequence_no, occurred_at, event_type, payload
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(sequence_no)
+        .bind(event.timestamp)
+        .bind(&event.event_type)
+        .bind(sqlx::types::Json(event))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(sequence_no as u64)
+    }
+
+    pub(crate) async fn load_invocation_events_since(
+        &self,
+        invocation_id: Uuid,
+        after_sequence: u64,
+    ) -> AppResult<Vec<(u64, InvocationEvent)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT sequence_no, payload
+            FROM invocation_events
+            WHERE invocation_id = $1
+              AND sequence_no > $2
+            ORDER BY sequence_no ASC
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(after_sequence as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let payload: sqlx::types::Json<InvocationEvent> = row.get("payload");
+                (row.get::<i64, _>("sequence_no") as u64, payload.0)
+            })
+            .collect())
     }
 
     pub(crate) async fn complete_invocation(
