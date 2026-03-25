@@ -1,12 +1,12 @@
-use crate::config::read_dbtx_project_id;
-use crate::error::{AppError, AppResult};
-use crate::event::LogEvent;
-use crate::execution::ExecutionMode;
 use crate::api::{
     InvocationClaimResponse, InvocationEvent, InvocationExecutionModeApi,
     InvocationExecutionSpecApi, InvocationLifecycleStatus, InvocationStatusResponse,
     InvocationWorkerHealthApi,
 };
+use crate::config::read_dbtx_project_id;
+use crate::error::{AppError, AppResult};
+use crate::event::LogEvent;
+use crate::execution::{ExecutionMode, heartbeat_stale_timeout};
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
 use crate::profile::{
     EnvironmentProfileRecord, GeneratedProfiles, resolve_runtime_profile,
@@ -174,6 +174,14 @@ pub(crate) struct InvocationPersistenceRecord {
     pub(crate) environment_id: i64,
     pub(crate) command: String,
     pub(crate) promote_base_manifest: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TimedOutInvocationRecord {
+    pub(crate) invocation_id: Uuid,
+    pub(crate) status: InvocationLifecycleStatus,
+    pub(crate) exit_code: i32,
+    pub(crate) error: String,
 }
 
 impl Db {
@@ -613,7 +621,6 @@ impl Db {
     }
 
     pub(crate) async fn list_invocations(&self) -> AppResult<Vec<InvocationStatusResponse>> {
-        self.reconcile_expired_unclaimed_invocations().await?;
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
@@ -631,7 +638,6 @@ impl Db {
         &self,
         invocation_id: Uuid,
     ) -> AppResult<InvocationStatusResponse> {
-        self.reconcile_expired_unclaimed_invocations().await?;
         let row = sqlx::query(
             r#"
             SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
@@ -652,28 +658,14 @@ impl Db {
         Ok(invocation_status_from_row(&row))
     }
 
-    pub(crate) async fn stale_invocation_count(&self) -> AppResult<usize> {
-        self.reconcile_expired_unclaimed_invocations().await?;
-        Ok(self
-            .list_invocations()
-            .await?
-            .into_iter()
-            .filter(|status| status.worker_health == InvocationWorkerHealthApi::Stale)
-            .count())
-    }
-
     pub(crate) async fn claim_next_invocation(
         &self,
         worker_id: &str,
         execution_mode: Option<InvocationExecutionModeApi>,
         worker_queue: Option<&str>,
-        stale_after: std::time::Duration,
     ) -> AppResult<Option<InvocationClaimResponse>> {
-        self.reconcile_expired_unclaimed_invocations().await?;
         let mut tx = self.pool.begin().await?;
-        let stale_at = Utc::now()
-            - chrono::Duration::from_std(stale_after)
-                .unwrap_or_else(|_| chrono::Duration::seconds(15));
+        let lease_token = Uuid::new_v4();
         let row = sqlx::query(
             r#"
             WITH next_invocation AS (
@@ -684,20 +676,19 @@ impl Db {
                   AND ($1::TEXT IS NULL OR execution_mode = $1)
                   AND ($2::TEXT IS NULL OR worker_queue = $2)
                   AND (claim_deadline_at IS NULL OR claim_deadline_at >= NOW())
-                  AND (
-                    claimed_by IS NULL OR COALESCE(last_heartbeat_at, claimed_at, started_at) < $3
-                  )
+                  AND claimed_by IS NULL
                 ORDER BY started_at ASC, invocation_id ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
             UPDATE invocations inv
-            SET claimed_by = $4,
+            SET claimed_by = $3,
+                lease_token = $4,
                 claimed_at = NOW(),
                 last_heartbeat_at = NOW()
             FROM next_invocation
             WHERE inv.invocation_id = next_invocation.invocation_id
-            RETURNING inv.invocation_id, inv.execution_mode, inv.execution_spec
+            RETURNING inv.invocation_id, inv.lease_token, inv.execution_mode, inv.execution_spec
             "#,
         )
         .bind(execution_mode.map(|mode| match mode {
@@ -705,8 +696,8 @@ impl Db {
             InvocationExecutionModeApi::Local => "local",
         }))
         .bind(worker_queue)
-        .bind(stale_at)
         .bind(worker_id)
+        .bind(lease_token)
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -718,6 +709,7 @@ impl Db {
         Ok(Some(InvocationClaimResponse {
             invocation_id: row.get("invocation_id"),
             worker_id: worker_id.to_string(),
+            lease_token: row.get("lease_token"),
             execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
             execution_spec: execution_spec.0,
         }))
@@ -727,6 +719,7 @@ impl Db {
         &self,
         invocation_id: Uuid,
         worker_id: &str,
+        lease_token: Uuid,
     ) -> AppResult<bool> {
         let row = sqlx::query(
             r#"
@@ -734,12 +727,14 @@ impl Db {
             SET last_heartbeat_at = NOW()
             WHERE invocation_id = $1
               AND claimed_by = $2
+              AND lease_token = $3
               AND status = 'running'
             RETURNING cancel_requested
             "#,
         )
         .bind(invocation_id)
         .bind(worker_id)
+        .bind(lease_token)
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -751,12 +746,11 @@ impl Db {
     }
 
     pub(crate) async fn request_cancel_invocation(&self, invocation_id: Uuid) -> AppResult<()> {
-        let updated = sqlx::query(
-            "UPDATE invocations SET cancel_requested = TRUE WHERE invocation_id = $1",
-        )
-        .bind(invocation_id)
-        .execute(&self.pool)
-        .await?;
+        let updated =
+            sqlx::query("UPDATE invocations SET cancel_requested = TRUE WHERE invocation_id = $1")
+                .bind(invocation_id)
+                .execute(&self.pool)
+                .await?;
         if updated.rows_affected() == 0 {
             return Err(AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -766,23 +760,72 @@ impl Db {
         Ok(())
     }
 
-    pub(crate) async fn reconcile_expired_unclaimed_invocations(&self) -> AppResult<u64> {
-        let result = sqlx::query(
+    pub(crate) async fn reconcile_timed_out_invocations(
+        &self,
+        local_heartbeat_timeout: std::time::Duration,
+        server_heartbeat_timeout: std::time::Duration,
+    ) -> AppResult<Vec<TimedOutInvocationRecord>> {
+        let mut tx = self.pool.begin().await?;
+        let local_stale_at = Utc::now()
+            - chrono::Duration::from_std(local_heartbeat_timeout)
+                .unwrap_or_else(|_| chrono::Duration::seconds(15));
+        let server_stale_at = Utc::now()
+            - chrono::Duration::from_std(server_heartbeat_timeout)
+                .unwrap_or_else(|_| chrono::Duration::seconds(60));
+        let mut timed_out = Vec::new();
+
+        let unclaimed_rows = sqlx::query(
             r#"
             UPDATE invocations
             SET status = 'failed',
                 exit_code = 1,
-                error = 'local worker did not claim invocation',
-                completed_at = NOW()
+                error = 'worker did not claim invocation before startup deadline',
+                completed_at = NOW(),
+                lease_token = NULL
             WHERE status = 'running'
               AND claimed_by IS NULL
               AND claim_deadline_at IS NOT NULL
               AND claim_deadline_at < NOW()
+            RETURNING invocation_id, status, exit_code, error
             "#,
         )
-        .execute(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
-        Ok(result.rows_affected())
+        timed_out.extend(
+            unclaimed_rows
+                .into_iter()
+                .map(timed_out_invocation_from_row),
+        );
+
+        let claimed_rows = sqlx::query(
+            r#"
+            UPDATE invocations
+            SET status = 'failed',
+                exit_code = 1,
+                error = 'worker heartbeat timed out',
+                completed_at = NOW(),
+                claimed_by = NULL,
+                lease_token = NULL,
+                claimed_at = NULL,
+                last_heartbeat_at = NULL
+            WHERE status = 'running'
+              AND claimed_by IS NOT NULL
+              AND (
+                (execution_mode = 'local' AND COALESCE(last_heartbeat_at, claimed_at, started_at) < $1)
+                OR
+                (execution_mode = 'server' AND COALESCE(last_heartbeat_at, claimed_at, started_at) < $2)
+              )
+            RETURNING invocation_id, status, exit_code, error
+            "#,
+        )
+        .bind(local_stale_at)
+        .bind(server_stale_at)
+        .fetch_all(&mut *tx)
+        .await?;
+        timed_out.extend(claimed_rows.into_iter().map(timed_out_invocation_from_row));
+
+        tx.commit().await?;
+        Ok(timed_out)
     }
 
     pub(crate) async fn cleanup_terminal_invocations_older_than(
@@ -807,6 +850,7 @@ impl Db {
         &self,
         invocation_id: Uuid,
         worker_id: Option<&str>,
+        lease_token: Option<Uuid>,
     ) -> AppResult<InvocationPersistenceRecord> {
         let row = sqlx::query(
             r#"
@@ -814,10 +858,12 @@ impl Db {
             FROM invocations
             WHERE invocation_id = $1
               AND ($2::TEXT IS NULL OR claimed_by = $2)
+              AND ($3::UUID IS NULL OR lease_token = $3)
             "#,
         )
         .bind(invocation_id)
         .bind(worker_id)
+        .bind(lease_token)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
@@ -909,10 +955,11 @@ impl Db {
         &self,
         invocation_id: Uuid,
         worker_id: &str,
+        lease_token: Uuid,
         completion: &crate::execution::ExecutionCompletion,
     ) -> AppResult<()> {
         let persistence = self
-            .get_invocation_persistence(invocation_id, Some(worker_id))
+            .get_invocation_persistence(invocation_id, Some(worker_id), Some(lease_token))
             .await?;
         let mut tx = self.pool.begin().await?;
 
@@ -949,10 +996,12 @@ impl Db {
                 error = $5,
                 completed_at = NOW(),
                 claimed_by = NULL,
+                lease_token = NULL,
                 claimed_at = NULL,
                 last_heartbeat_at = NULL
             WHERE invocation_id = $1
               AND claimed_by = $2
+              AND lease_token = $6
             "#,
         )
         .bind(invocation_id)
@@ -960,6 +1009,7 @@ impl Db {
         .bind(invocation_status_to_db(completion.status.clone()))
         .bind(completion.exit_code)
         .bind(completion.error.as_deref())
+        .bind(lease_token)
         .execute(&mut *tx)
         .await?;
 
@@ -2056,6 +2106,15 @@ fn invocation_status_from_row(row: &sqlx::postgres::PgRow) -> InvocationStatusRe
     status
 }
 
+fn timed_out_invocation_from_row(row: sqlx::postgres::PgRow) -> TimedOutInvocationRecord {
+    TimedOutInvocationRecord {
+        invocation_id: row.get("invocation_id"),
+        status: invocation_status_from_db(&row.get::<String, _>("status")),
+        exit_code: row.get("exit_code"),
+        error: row.get("error"),
+    }
+}
+
 fn execution_mode_from_db(value: &str) -> InvocationExecutionModeApi {
     match value {
         "local" => InvocationExecutionModeApi::Local,
@@ -2085,21 +2144,18 @@ fn compute_worker_health(status: &InvocationStatusResponse) -> InvocationWorkerH
     if !matches!(status.status, InvocationLifecycleStatus::Running) {
         return InvocationWorkerHealthApi::Completed;
     }
+    let stale_after = chrono::Duration::from_std(heartbeat_stale_timeout(status.execution_mode))
+        .unwrap_or_else(|_| chrono::Duration::seconds(15));
     match (
         status.claimed_at,
         status.last_heartbeat_at.as_ref(),
         status.claimed_by.as_ref(),
     ) {
         (_, _, None) => InvocationWorkerHealthApi::Unclaimed,
-        (_, Some(last_heartbeat), Some(_))
-            if Utc::now() - *last_heartbeat
-                > chrono::Duration::seconds(15) =>
-        {
+        (_, Some(last_heartbeat), Some(_)) if Utc::now() - *last_heartbeat > stale_after => {
             InvocationWorkerHealthApi::Stale
         }
-        (Some(claimed_at), None, Some(_))
-            if Utc::now() - claimed_at > chrono::Duration::seconds(15) =>
-        {
+        (Some(claimed_at), None, Some(_)) if Utc::now() - claimed_at > stale_after => {
             InvocationWorkerHealthApi::Stale
         }
         (_, _, Some(_)) => InvocationWorkerHealthApi::Claimed,

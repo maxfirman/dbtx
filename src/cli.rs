@@ -199,7 +199,9 @@ pub enum InvocationCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, EnvironmentCommand, InvocationCommand, ProjectCommand, StateCommand};
+    use super::{
+        Cli, Command, EnvironmentCommand, InvocationCommand, ProjectCommand, StateCommand,
+    };
     use clap::Parser;
 
     #[test]
@@ -409,13 +411,7 @@ mod tests {
 
     #[test]
     fn invocation_cleanup_parses() {
-        let cli = Cli::parse_from([
-            "dbtx",
-            "invocation",
-            "cleanup",
-            "--older-than-hours",
-            "24",
-        ]);
+        let cli = Cli::parse_from(["dbtx", "invocation", "cleanup", "--older-than-hours", "24"]);
         match cli.command {
             Command::Invocation(InvocationCommand::Cleanup { older_than_hours }) => {
                 assert_eq!(older_than_hours, 24);

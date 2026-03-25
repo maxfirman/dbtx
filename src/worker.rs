@@ -101,6 +101,7 @@ pub async fn execute_claimed_invocation(
                             claim.invocation_id,
                             InvocationEventBatchApiRequest {
                                 worker_id: claim.worker_id.clone(),
+                                lease_token: claim.lease_token,
                                 events: vec![crate::execution::ExecutionEvent {
                                     kind: crate::execution::ExecutionEventKind::DbtLog,
                                     occurred_at: chrono::Utc::now(),
@@ -126,6 +127,7 @@ pub async fn execute_claimed_invocation(
                             claim.invocation_id,
                             InvocationEventBatchApiRequest {
                                 worker_id: claim.worker_id.clone(),
+                                lease_token: claim.lease_token,
                                 events: vec![crate::execution::ExecutionEvent {
                                     kind: crate::execution::ExecutionEventKind::StdoutLine,
                                     occurred_at: chrono::Utc::now(),
@@ -147,6 +149,7 @@ pub async fn execute_claimed_invocation(
                         claim.invocation_id,
                         InvocationHeartbeatApiRequest {
                             worker_id: claim.worker_id.clone(),
+                            lease_token: claim.lease_token,
                         },
                     )
                     .await?;
@@ -173,6 +176,7 @@ pub async fn execute_claimed_invocation(
                 claim.invocation_id,
                 InvocationEventBatchApiRequest {
                     worker_id: claim.worker_id.clone(),
+                    lease_token: claim.lease_token,
                     events: vec![crate::execution::ExecutionEvent {
                         kind: crate::execution::ExecutionEventKind::StderrLine,
                         occurred_at: chrono::Utc::now(),
@@ -207,6 +211,7 @@ pub async fn execute_claimed_invocation(
             claim.invocation_id,
             InvocationCompleteApiRequest {
                 worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
                 completion: crate::execution::ExecutionCompletion {
                     status: if cancel_requested {
                         InvocationLifecycleStatus::Canceled

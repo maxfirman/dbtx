@@ -161,6 +161,7 @@ pub struct InvocationExecutionSpecApi {
 pub struct InvocationClaimResponse {
     pub invocation_id: Uuid,
     pub worker_id: String,
+    pub lease_token: Uuid,
     pub execution_mode: InvocationExecutionModeApi,
     pub execution_spec: InvocationExecutionSpecApi,
 }
@@ -175,12 +176,14 @@ pub struct InvocationClaimNextApiRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationEventBatchApiRequest {
     pub worker_id: String,
+    pub lease_token: Uuid,
     pub events: Vec<ExecutionEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationCompleteApiRequest {
     pub worker_id: String,
+    pub lease_token: Uuid,
     pub completion: ExecutionCompletion,
 }
 
@@ -222,6 +225,7 @@ pub enum InvocationLifecycleStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationHeartbeatApiRequest {
     pub worker_id: String,
+    pub lease_token: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

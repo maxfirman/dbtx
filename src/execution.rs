@@ -1,6 +1,26 @@
-use crate::api::InvocationLifecycleStatus;
+use crate::api::{InvocationExecutionModeApi, InvocationLifecycleStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+pub const LOCAL_CLAIM_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+pub const SERVER_CLAIM_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+pub const LOCAL_HEARTBEAT_STALE_TIMEOUT: Duration = Duration::from_secs(15);
+pub const SERVER_HEARTBEAT_STALE_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub fn claim_startup_timeout(mode: InvocationExecutionModeApi) -> Duration {
+    match mode {
+        InvocationExecutionModeApi::Local => LOCAL_CLAIM_STARTUP_TIMEOUT,
+        InvocationExecutionModeApi::Server => SERVER_CLAIM_STARTUP_TIMEOUT,
+    }
+}
+
+pub fn heartbeat_stale_timeout(mode: InvocationExecutionModeApi) -> Duration {
+    match mode {
+        InvocationExecutionModeApi::Local => LOCAL_HEARTBEAT_STALE_TIMEOUT,
+        InvocationExecutionModeApi::Server => SERVER_HEARTBEAT_STALE_TIMEOUT,
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

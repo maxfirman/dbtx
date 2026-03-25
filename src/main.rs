@@ -1,7 +1,10 @@
 use clap::Parser;
 use dbtx::api;
 use dbtx::api::InvocationExecutionModeApi;
-use dbtx::cli::{Cli, Command, EnvironmentCommand, InvocationCommand as InvocationCliCommand, ProjectCommand, StateCommand};
+use dbtx::cli::{
+    Cli, Command, EnvironmentCommand, InvocationCommand as InvocationCliCommand, ProjectCommand,
+    StateCommand,
+};
 use dbtx::client;
 use dbtx::config::{self, resolve_service_url};
 use dbtx::db::{self, EnvironmentRecord, ProjectRecord};
@@ -505,8 +508,7 @@ async fn invoke_via_local_worker(
         .arg(queue)
         .env(
             "RUST_LOG",
-            std::env::var("DBTX_ONE_SHOT_WORKER_LOG")
-                .unwrap_or_else(|_| "dbtx=warn".to_string()),
+            std::env::var("DBTX_ONE_SHOT_WORKER_LOG").unwrap_or_else(|_| "dbtx=warn".to_string()),
         )
         .status()?;
     match status.code().unwrap_or(1) {

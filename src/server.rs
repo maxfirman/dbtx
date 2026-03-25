@@ -10,11 +10,14 @@ use crate::api::{
     ProjectsResponse, ReadyResponse,
 };
 use crate::config::RuntimeConfig;
-use crate::db::{CreateInvocationInput, Db, InvocationPersistenceRecord};
+use crate::db::{CreateInvocationInput, Db, InvocationPersistenceRecord, TimedOutInvocationRecord};
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
-use crate::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
+use crate::execution::{
+    ExecutionCompletion, ExecutionEvent, ExecutionEventKind, claim_startup_timeout,
+    heartbeat_stale_timeout,
+};
 use crate::services::{
     EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
     InvocationRequest, InvocationService, ProjectInitRequest, ProjectService, ProjectUpdateRequest,
@@ -93,9 +96,6 @@ struct InvocationPersistence {
     promote_base_manifest: bool,
 }
 
-const INVOCATION_STALE_AFTER: Duration = Duration::from_secs(15);
-const LOCAL_ONE_SHOT_CLAIM_TIMEOUT: Duration = Duration::from_secs(10);
-
 impl InvocationPersistence {
     fn from_record(record: InvocationPersistenceRecord) -> Option<Self> {
         Some(Self {
@@ -160,17 +160,13 @@ impl InvocationManager {
             inner.lock().await.remove(&invocation_id);
         });
     }
-
 }
 
 impl InvocationRuntime {
     async fn push_event(&self, sequence: u64, event: InvocationEvent) {
         let sequenced = {
             let mut history = self.history.lock().await;
-            let sequenced = SequencedInvocationEvent {
-                sequence,
-                event,
-            };
+            let sequenced = SequencedInvocationEvent { sequence, event };
             history.items.push(sequenced.clone());
             sequenced
         };
@@ -236,9 +232,14 @@ impl InvocationRecorder {
         Ok(())
     }
 
-    async fn complete(&self, worker_id: &str, completion: ExecutionCompletion) -> AppResult<()> {
+    async fn complete(
+        &self,
+        worker_id: &str,
+        lease_token: Uuid,
+        completion: ExecutionCompletion,
+    ) -> AppResult<()> {
         self.db
-            .complete_invocation(self.invocation_id, worker_id, &completion)
+            .complete_invocation(self.invocation_id, worker_id, lease_token, &completion)
             .await?;
         let completed_event = InvocationEvent {
             event_type: "invocation.completed".to_string(),
@@ -276,7 +277,7 @@ impl InvocationRecorder {
         if guard.is_none() {
             let loaded = self
                 .db
-                .get_invocation_persistence(self.invocation_id, None)
+                .get_invocation_persistence(self.invocation_id, None, None)
                 .await?;
             *guard = InvocationPersistence::from_record(loaded);
         }
@@ -305,7 +306,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/projects/{project_id}/environments/{slug}",
             get(environment_get).patch(environment_update),
         )
-        .route("/v1/invocations", get(invocation_list).post(invocation_create))
+        .route(
+            "/v1/invocations",
+            get(invocation_list).post(invocation_create),
+        )
         .route("/v1/invocations/cleanup", post(invocation_cleanup))
         .route("/v1/invocations/claim-next", post(invocation_claim_next))
         .route("/v1/invocations/{id}", get(invocation_status))
@@ -342,10 +346,10 @@ pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
         ))
     })?;
     info!(listen = %addr, "starting dbtx server");
-    let reclaimable_stale_invocations = state.db.stale_invocation_count().await.unwrap_or(0);
+    let timed_out_invocations = reconcile_timed_out_invocations(&state).await.unwrap_or(0);
     info!(
         listen = %addr,
-        reclaimable_stale_invocations,
+        timed_out_invocations,
         "dbtx server execution state initialized"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -356,13 +360,65 @@ pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
     })
 }
 
+async fn reconcile_timed_out_invocations(state: &AppState) -> AppResult<usize> {
+    let timed_out = state
+        .db
+        .reconcile_timed_out_invocations(
+            heartbeat_stale_timeout(crate::api::InvocationExecutionModeApi::Local),
+            heartbeat_stale_timeout(crate::api::InvocationExecutionModeApi::Server),
+        )
+        .await?;
+    publish_timed_out_invocations(state, &timed_out).await?;
+    Ok(timed_out.len())
+}
+
+async fn publish_timed_out_invocations(
+    state: &AppState,
+    timed_out: &[TimedOutInvocationRecord],
+) -> AppResult<()> {
+    for timed_out_invocation in timed_out {
+        let runtime = state
+            .invocations
+            .get_or_create(timed_out_invocation.invocation_id, None)
+            .await;
+        let completed_event = InvocationEvent {
+            event_type: "invocation.completed".to_string(),
+            timestamp: Utc::now(),
+            text: None,
+            stream: None,
+            dbt_event_name: None,
+            node_unique_id: None,
+            level: None,
+            exit_code: Some(timed_out_invocation.exit_code),
+            error: Some(timed_out_invocation.error.clone()),
+        };
+        let sequence = state
+            .db
+            .append_invocation_event(timed_out_invocation.invocation_id, &completed_event)
+            .await?;
+        runtime.push_event(sequence, completed_event).await;
+        state
+            .invocations
+            .schedule_cleanup(timed_out_invocation.invocation_id);
+        info!(
+            invocation_id = %timed_out_invocation.invocation_id,
+            status = ?timed_out_invocation.status,
+            error = %timed_out_invocation.error,
+            "failed timed out invocation"
+        );
+    }
+    Ok(())
+}
+
 async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
     })
 }
 
-async fn readyz(State(state): State<AppState>) -> Result<(StatusCode, Json<ReadyResponse>), ApiError> {
+async fn readyz(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<ReadyResponse>), ApiError> {
     let database = match state.db.ping().await {
         Ok(()) => "ok",
         Err(err) => {
@@ -380,18 +436,12 @@ async fn readyz(State(state): State<AppState>) -> Result<(StatusCode, Json<Ready
 
     let (status_code, schema, status) = match state.db.require_current_schema().await {
         Ok(()) => (StatusCode::OK, "ok", "ready"),
-        Err(AppError::SchemaOutOfDate) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "out_of_date",
-            "not_ready",
-        ),
+        Err(AppError::SchemaOutOfDate) => {
+            (StatusCode::SERVICE_UNAVAILABLE, "out_of_date", "not_ready")
+        }
         Err(err) => {
             error!(error = %err, "readiness schema check failed");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "error",
-                "not_ready",
-            )
+            (StatusCode::SERVICE_UNAVAILABLE, "error", "not_ready")
         }
     };
 
@@ -635,9 +685,11 @@ async fn invocation_create(
                 .as_ref()
                 .map(|p| p.promote_base_manifest)
                 .unwrap_or(false),
-            claim_deadline_at: worker_queue
-                .starts_with("local-")
-                .then(|| Utc::now() + chrono::Duration::from_std(LOCAL_ONE_SHOT_CLAIM_TIMEOUT).expect("duration")),
+            claim_deadline_at: Some(
+                Utc::now()
+                    + chrono::Duration::from_std(claim_startup_timeout(request.execution_mode))
+                        .expect("duration"),
+            ),
         })
         .await?;
     let runtime = state
@@ -678,19 +730,22 @@ async fn invocation_claim_next(
     State(state): State<AppState>,
     Json(request): Json<InvocationClaimNextApiRequest>,
 ) -> Result<Response, ApiError> {
+    reconcile_timed_out_invocations(&state).await?;
     let Some(claimed) = state
         .db
         .claim_next_invocation(
             &request.worker_id,
             request.execution_mode,
             request.worker_queue.as_deref(),
-            INVOCATION_STALE_AFTER,
         )
         .await?
     else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
-    state.invocations.get_or_create(claimed.invocation_id, None).await;
+    state
+        .invocations
+        .get_or_create(claimed.invocation_id, None)
+        .await;
     info!(invocation_id = %claimed.invocation_id, "claimed next invocation execution");
     Ok(Json(claimed).into_response())
 }
@@ -700,7 +755,11 @@ async fn invocation_heartbeat(
     Path(id): Path<Uuid>,
     Json(request): Json<InvocationHeartbeatApiRequest>,
 ) -> Result<Json<InvocationHeartbeatResponse>, ApiError> {
-    let cancel_requested = state.db.heartbeat_invocation(id, &request.worker_id).await?;
+    reconcile_timed_out_invocations(&state).await?;
+    let cancel_requested = state
+        .db
+        .heartbeat_invocation(id, &request.worker_id, request.lease_token)
+        .await?;
     Ok(Json(InvocationHeartbeatResponse { cancel_requested }))
 }
 
@@ -718,11 +777,15 @@ async fn invocation_status(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<InvocationStatusResponse>, ApiError> {
+    reconcile_timed_out_invocations(&state).await?;
     info!(invocation_id = %id, "loaded invocation status");
     Ok(Json(state.db.get_invocation_status(id).await?))
 }
 
-async fn invocation_list(State(state): State<AppState>) -> Result<Json<InvocationsResponse>, ApiError> {
+async fn invocation_list(
+    State(state): State<AppState>,
+) -> Result<Json<InvocationsResponse>, ApiError> {
+    reconcile_timed_out_invocations(&state).await?;
     let invocations = state.db.list_invocations().await?;
     info!(count = invocations.len(), "listed invocations");
     Ok(Json(InvocationsResponse { invocations }))
@@ -743,7 +806,10 @@ async fn invocation_cleanup(
         .db
         .cleanup_terminal_invocations_older_than(cutoff)
         .await?;
-    info!(older_than_seconds = request.older_than_seconds, deleted, "cleaned up terminal invocations");
+    info!(
+        older_than_seconds = request.older_than_seconds,
+        deleted, "cleaned up terminal invocations"
+    );
     Ok(Json(InvocationCleanupResponse { deleted }))
 }
 
@@ -752,6 +818,7 @@ async fn invocation_append_events(
     Path(id): Path<Uuid>,
     Json(request): Json<InvocationEventBatchApiRequest>,
 ) -> Result<StatusCode, ApiError> {
+    reconcile_timed_out_invocations(&state).await?;
     let runtime = state.invocations.get_or_create(id, None).await;
     let recorder = InvocationRecorder {
         db: state.db.clone(),
@@ -765,7 +832,7 @@ async fn invocation_append_events(
     }
     state
         .db
-        .get_invocation_persistence(id, Some(&request.worker_id))
+        .get_invocation_persistence(id, Some(&request.worker_id), Some(request.lease_token))
         .await?;
     for event in request.events {
         recorder.record(event).await?;
@@ -779,6 +846,7 @@ async fn invocation_complete(
     Path(id): Path<Uuid>,
     Json(request): Json<InvocationCompleteApiRequest>,
 ) -> Result<StatusCode, ApiError> {
+    reconcile_timed_out_invocations(&state).await?;
     let runtime = state.invocations.get_or_create(id, None).await;
     let recorder = InvocationRecorder {
         db: state.db.clone(),
@@ -787,9 +855,11 @@ async fn invocation_complete(
     };
     state
         .db
-        .get_invocation_persistence(id, Some(&request.worker_id))
+        .get_invocation_persistence(id, Some(&request.worker_id), Some(request.lease_token))
         .await?;
-    recorder.complete(&request.worker_id, request.completion).await?;
+    recorder
+        .complete(&request.worker_id, request.lease_token, request.completion)
+        .await?;
     state.invocations.schedule_cleanup(id);
     info!(invocation_id = %id, "completed invocation via api");
     Ok(StatusCode::NO_CONTENT)
@@ -808,7 +878,10 @@ async fn invocation_events(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     let after_sequence = query.after_sequence.or(header_resume).unwrap_or(0);
-    let history = state.db.load_invocation_events_since(id, after_sequence).await?;
+    let history = state
+        .db
+        .load_invocation_events_since(id, after_sequence)
+        .await?;
     let buffered_events = history.len();
     let last_sequence = history.last().map(|item| item.0).unwrap_or(after_sequence);
     let stream = event_stream(

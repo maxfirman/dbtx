@@ -1,3 +1,10 @@
+use dbtx::api::{
+    InvocationClaimNextApiRequest, InvocationCommandApi, InvocationCompleteApiRequest,
+    InvocationCreateApiRequest, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
+    InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
+};
+use dbtx::client::DaemonClient;
+use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::fs;
@@ -393,6 +400,401 @@ async fn immutable_environment_rejects_identity_updates() {
         String::from_utf8_lossy(&update.stderr).contains("immutable"),
         "unexpected stderr: {}",
         String::from_utf8_lossy(&update.stderr)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn lease_tokens_enforce_invocation_ownership() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+
+    let created = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Local,
+            worker_queue: Some("lease-test".to_string()),
+        })
+        .await
+        .expect("create invocation");
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Local),
+            worker_id: "worker-a".to_string(),
+            worker_queue: Some("lease-test".to_string()),
+        })
+        .await
+        .expect("claim next")
+        .expect("claimed invocation");
+    let wrong_lease_token = Uuid::new_v4();
+
+    assert!(
+        client
+            .invocation_heartbeat(
+                created.invocation_id,
+                InvocationHeartbeatApiRequest {
+                    worker_id: "worker-a".to_string(),
+                    lease_token: wrong_lease_token,
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .invocation_append_events(
+                created.invocation_id,
+                InvocationEventBatchApiRequest {
+                    worker_id: "worker-a".to_string(),
+                    lease_token: wrong_lease_token,
+                    events: vec![sample_execution_event("hello")],
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .invocation_complete(
+                created.invocation_id,
+                InvocationCompleteApiRequest {
+                    worker_id: "worker-a".to_string(),
+                    lease_token: wrong_lease_token,
+                    completion: sample_execution_completion(
+                        InvocationLifecycleStatus::Succeeded,
+                        0
+                    ),
+                },
+            )
+            .await
+            .is_err()
+    );
+
+    client
+        .invocation_heartbeat(
+            created.invocation_id,
+            InvocationHeartbeatApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+            },
+        )
+        .await
+        .expect("heartbeat with valid lease token");
+    client
+        .invocation_append_events(
+            created.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                events: vec![sample_execution_event("valid line")],
+            },
+        )
+        .await
+        .expect("append events with valid lease token");
+    client
+        .invocation_complete(
+            created.invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Succeeded, 0),
+            },
+        )
+        .await
+        .expect("complete with valid lease token");
+
+    let status = client
+        .invocation_status(created.invocation_id)
+        .await
+        .expect("load invocation status");
+    assert!(matches!(
+        status.status,
+        InvocationLifecycleStatus::Succeeded
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn claimed_invocation_timeout_fails_without_reclaim() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+
+    let created = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: None,
+        })
+        .await
+        .expect("create invocation");
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queue: None,
+        })
+        .await
+        .expect("claim next")
+        .expect("claimed invocation");
+
+    sqlx::query(
+        "UPDATE invocations SET claimed_at = NOW() - INTERVAL '2 minutes', last_heartbeat_at = NOW() - INTERVAL '2 minutes' WHERE invocation_id = $1",
+    )
+    .bind(created.invocation_id)
+    .execute(db.pool())
+    .await
+    .expect("age heartbeat");
+
+    let status = client
+        .invocation_status(created.invocation_id)
+        .await
+        .expect("load invocation status");
+    assert!(matches!(status.status, InvocationLifecycleStatus::Failed));
+    assert_eq!(status.error.as_deref(), Some("worker heartbeat timed out"));
+
+    let reclaimed = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-b".to_string(),
+            worker_queue: None,
+        })
+        .await
+        .expect("claim next after timeout");
+    assert!(
+        reclaimed.is_none(),
+        "timed out invocation should not be reclaimed"
+    );
+
+    assert!(
+        client
+            .invocation_append_events(
+                created.invocation_id,
+                InvocationEventBatchApiRequest {
+                    worker_id: claim.worker_id.clone(),
+                    lease_token: claim.lease_token,
+                    events: vec![sample_execution_event("late line")],
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .invocation_complete(
+                created.invocation_id,
+                InvocationCompleteApiRequest {
+                    worker_id: claim.worker_id,
+                    lease_token: claim.lease_token,
+                    completion: sample_execution_completion(
+                        InvocationLifecycleStatus::Succeeded,
+                        0
+                    ),
+                },
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+
+    let local = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Local,
+            worker_queue: Some("local-deadline-test".to_string()),
+        })
+        .await
+        .expect("create local invocation");
+    let server = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: None,
+        })
+        .await
+        .expect("create server invocation");
+
+    let deadline_row = sqlx::query(
+        "SELECT invocation_id, claim_deadline_at FROM invocations WHERE invocation_id IN ($1, $2)",
+    )
+    .bind(local.invocation_id)
+    .bind(server.invocation_id)
+    .fetch_all(db.pool())
+    .await
+    .expect("fetch deadlines");
+    let mut local_deadline = None;
+    let mut server_deadline = None;
+    for row in deadline_row {
+        let invocation_id: Uuid = row.get("invocation_id");
+        let deadline = row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("claim_deadline_at");
+        if invocation_id == local.invocation_id {
+            local_deadline = deadline;
+        } else if invocation_id == server.invocation_id {
+            server_deadline = deadline;
+        }
+    }
+    let local_deadline = local_deadline.expect("local deadline");
+    let server_deadline = server_deadline.expect("server deadline");
+    assert!(
+        server_deadline - local_deadline >= chrono::Duration::seconds(40),
+        "expected server deadline to be materially later than local deadline"
+    );
+
+    sqlx::query("UPDATE invocations SET claim_deadline_at = NOW() - INTERVAL '1 second' WHERE invocation_id = $1")
+        .bind(local.invocation_id)
+        .execute(db.pool())
+        .await
+        .expect("expire local deadline");
+
+    let invocations = client
+        .invocation_list()
+        .await
+        .expect("list invocations")
+        .invocations;
+    let local_status = invocations
+        .iter()
+        .find(|status| status.invocation_id == local.invocation_id)
+        .expect("local invocation status");
+    let server_status = invocations
+        .iter()
+        .find(|status| status.invocation_id == server.invocation_id)
+        .expect("server invocation status");
+    assert!(matches!(
+        local_status.status,
+        InvocationLifecycleStatus::Failed
+    ));
+    assert!(matches!(
+        server_status.status,
+        InvocationLifecycleStatus::Running
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+
+    let local = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Local,
+            worker_queue: Some("local-heartbeat-test".to_string()),
+        })
+        .await
+        .expect("create local invocation");
+    let server = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: None,
+        })
+        .await
+        .expect("create server invocation");
+
+    client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Local),
+            worker_id: "worker-local".to_string(),
+            worker_queue: Some("local-heartbeat-test".to_string()),
+        })
+        .await
+        .expect("claim local invocation")
+        .expect("local claimed");
+    client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-server".to_string(),
+            worker_queue: None,
+        })
+        .await
+        .expect("claim server invocation")
+        .expect("server claimed");
+
+    sqlx::query(
+        "UPDATE invocations SET claimed_at = NOW() - INTERVAL '30 seconds', last_heartbeat_at = NOW() - INTERVAL '30 seconds' WHERE invocation_id IN ($1, $2)",
+    )
+    .bind(local.invocation_id)
+    .bind(server.invocation_id)
+    .execute(db.pool())
+    .await
+    .expect("age heartbeats");
+
+    let local_status = client
+        .invocation_status(local.invocation_id)
+        .await
+        .expect("load local status");
+    let server_status = client
+        .invocation_status(server.invocation_id)
+        .await
+        .expect("load server status");
+    assert!(matches!(
+        local_status.status,
+        InvocationLifecycleStatus::Failed
+    ));
+    assert!(matches!(
+        server_status.status,
+        InvocationLifecycleStatus::Running
+    ));
+
+    sqlx::query(
+        "UPDATE invocations SET claimed_at = NOW() - INTERVAL '2 minutes', last_heartbeat_at = NOW() - INTERVAL '2 minutes' WHERE invocation_id = $1",
+    )
+    .bind(server.invocation_id)
+    .execute(db.pool())
+    .await
+    .expect("age server heartbeat further");
+
+    let server_status = client
+        .invocation_status(server.invocation_id)
+        .await
+        .expect("reload server status");
+    assert!(matches!(
+        server_status.status,
+        InvocationLifecycleStatus::Failed
+    ));
+    assert_eq!(
+        server_status.error.as_deref(),
+        Some("worker heartbeat timed out")
     );
 }
 
@@ -830,9 +1232,57 @@ fn assert_failure(output: &std::process::Output) {
 
 async fn reset_db(pool: &PgPool) {
     sqlx::query(
-        "TRUNCATE environment_seeds, promoted_manifest_nodes, promoted_manifest_meta, current_node_state, manifest_edges, manifest_nodes, manifest_snapshots, node_executions, run_events, runs, environments, projects CASCADE",
+        "TRUNCATE invocation_events, invocations, environment_seeds, promoted_manifest_nodes, promoted_manifest_meta, current_node_state, manifest_edges, manifest_nodes, manifest_snapshots, node_executions, run_events, runs, environments, projects CASCADE",
     )
     .execute(pool)
     .await
     .expect("truncate db");
+}
+
+async fn bootstrap_project_and_env(repo: &TempProjectRepo, service_url: &str, slug: &str) {
+    assert_success(&run_dbtx_in_dir(
+        service_url,
+        repo.project_dir(),
+        &["project", "init"],
+    ));
+    assert_success(&run_dbtx_in_dir(
+        service_url,
+        repo.project_dir(),
+        &[
+            "environment",
+            "create",
+            "--slug",
+            slug,
+            "--target",
+            "dev",
+            "--kind",
+            "persistent",
+        ],
+    ));
+}
+
+fn sample_execution_event(text: &str) -> ExecutionEvent {
+    ExecutionEvent {
+        kind: ExecutionEventKind::StdoutLine,
+        occurred_at: chrono::Utc::now(),
+        text: Some(text.to_string()),
+        raw_line: Some(text.to_string()),
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        error: None,
+    }
+}
+
+fn sample_execution_completion(
+    status: InvocationLifecycleStatus,
+    exit_code: i32,
+) -> ExecutionCompletion {
+    ExecutionCompletion {
+        status,
+        exit_code,
+        error: None,
+        dbt_version: None,
+        manifest: None,
+    }
 }
