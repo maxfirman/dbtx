@@ -2,6 +2,7 @@ use dbtx::api::{
     InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationCommandApi,
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationEventBatchApiRequest,
     InvocationExecutionModeApi, InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
+    InvocationListApiRequest,
 };
 use dbtx::client::DaemonClient;
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
@@ -676,7 +677,7 @@ async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations()
         .expect("expire local deadline");
 
     let invocations = client
-        .invocation_list()
+        .invocation_list(InvocationListApiRequest::default())
         .await
         .expect("list invocations")
         .invocations;
@@ -894,6 +895,194 @@ async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finish
         InvocationCancelStateApi::Requested
     ));
     assert!(status.cancel_requested_at.is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn worker_and_queue_views_aggregate_running_invocations() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+
+    let _server_generic_1 = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: Some("generic".to_string()),
+        })
+        .await
+        .expect("create server invocation 1");
+    let _server_generic_2 = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: Some("generic".to_string()),
+        })
+        .await
+        .expect("create server invocation 2");
+    let local_isolated = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Local,
+            worker_queue: Some("isolated".to_string()),
+        })
+        .await
+        .expect("create local invocation");
+
+    let _claim_a = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queue: Some("generic".to_string()),
+        })
+        .await
+        .expect("claim generic server work")
+        .expect("claimed server work");
+    let _claim_b = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Local),
+            worker_id: "worker-b".to_string(),
+            worker_queue: Some("isolated".to_string()),
+        })
+        .await
+        .expect("claim isolated local work")
+        .expect("claimed local work");
+
+    sqlx::query(
+        "UPDATE invocations SET claimed_at = NOW() - INTERVAL '30 seconds', last_heartbeat_at = NOW() - INTERVAL '30 seconds' WHERE invocation_id = $1",
+    )
+    .bind(local_isolated.invocation_id)
+    .execute(db.pool())
+    .await
+    .expect("age local claim to stale");
+
+    let workers = client.worker_list().await.expect("worker list").workers;
+    assert_eq!(workers.len(), 2);
+    let worker_a = workers
+        .iter()
+        .find(|worker| worker.worker_id == "worker-a")
+        .expect("worker-a");
+    assert_eq!(worker_a.claimed_invocation_count, 1);
+    assert_eq!(worker_a.worker_queue, "generic");
+    let worker_b = workers
+        .iter()
+        .find(|worker| worker.worker_id == "worker-b")
+        .expect("worker-b");
+    assert_eq!(worker_b.claimed_invocation_count, 1);
+    assert_eq!(worker_b.worker_queue, "isolated");
+    assert_eq!(format!("{:?}", worker_b.health), "Stale");
+
+    let queues = client.queue_list().await.expect("queue list").queues;
+    let generic = queues
+        .iter()
+        .find(|queue| queue.worker_queue == "generic")
+        .expect("generic queue");
+    assert_eq!(generic.pending_count, 1);
+    assert_eq!(generic.claimed_count, 1);
+    assert_eq!(generic.stale_claim_count, 0);
+    assert!(generic.oldest_pending_at.is_some());
+
+    let isolated = queues
+        .iter()
+        .find(|queue| queue.worker_queue == "isolated")
+        .expect("isolated queue");
+    assert_eq!(isolated.pending_count, 0);
+    assert_eq!(isolated.claimed_count, 1);
+    assert_eq!(isolated.stale_claim_count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn invocation_list_filters_apply_to_operator_views() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
+
+    let running = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: Some("generic".to_string()),
+        })
+        .await
+        .expect("create running invocation");
+    let canceled = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            current_dir: repo.project_dir().display().to_string(),
+            environment_slug: "dev".to_string(),
+            execution_mode: InvocationExecutionModeApi::Local,
+            worker_queue: Some("special".to_string()),
+        })
+        .await
+        .expect("create canceled invocation");
+
+    client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-filter".to_string(),
+            worker_queue: Some("generic".to_string()),
+        })
+        .await
+        .expect("claim running invocation")
+        .expect("claimed");
+    client
+        .invocation_cancel(canceled.invocation_id, Default::default())
+        .await
+        .expect("cancel unclaimed invocation");
+
+    let running_only = client
+        .invocation_list(InvocationListApiRequest {
+            status: Some(InvocationLifecycleStatus::Running),
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_queue: Some("generic".to_string()),
+            claimed_by: Some("worker-filter".to_string()),
+            cancel_state: None,
+            limit: Some(10),
+        })
+        .await
+        .expect("filtered running invocation list")
+        .invocations;
+    assert_eq!(running_only.len(), 1);
+    assert_eq!(running_only[0].invocation_id, running.invocation_id);
+
+    let canceled_only = client
+        .invocation_list(InvocationListApiRequest {
+            status: None,
+            execution_mode: None,
+            worker_queue: None,
+            claimed_by: None,
+            cancel_state: Some(InvocationCancelStateApi::Completed),
+            limit: Some(10),
+        })
+        .await
+        .expect("filtered canceled invocation list")
+        .invocations;
+    assert_eq!(canceled_only.len(), 1);
+    assert_eq!(canceled_only[0].invocation_id, canceled.invocation_id);
+    assert!(matches!(
+        canceled_only[0].status,
+        InvocationLifecycleStatus::Canceled
+    ));
 }
 
 struct ScopeIds {

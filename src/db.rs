@@ -1,7 +1,7 @@
 use crate::api::{
     InvocationCancelStateApi, InvocationClaimResponse, InvocationEvent, InvocationExecutionModeApi,
-    InvocationExecutionSpecApi, InvocationLifecycleStatus, InvocationStatusResponse,
-    InvocationWorkerHealthApi,
+    InvocationExecutionSpecApi, InvocationLifecycleStatus, InvocationListApiRequest,
+    InvocationStatusResponse, InvocationWorkerHealthApi, QueueStatusResponse, WorkerStatusResponse,
 };
 use crate::config::read_dbtx_project_id;
 use crate::error::{AppError, AppResult};
@@ -190,6 +190,17 @@ pub(crate) struct InvocationCancellationRecord {
     pub(crate) status: InvocationLifecycleStatus,
     pub(crate) exit_code: i32,
     pub(crate) error: String,
+}
+
+#[derive(Debug, Clone)]
+struct InvocationReadModel {
+    execution_mode: InvocationExecutionModeApi,
+    worker_queue: String,
+    status: InvocationLifecycleStatus,
+    started_at: chrono::DateTime<Utc>,
+    claimed_at: Option<chrono::DateTime<Utc>>,
+    last_heartbeat_at: Option<chrono::DateTime<Utc>>,
+    claimed_by: Option<String>,
 }
 
 impl Db {
@@ -629,16 +640,43 @@ impl Db {
         Ok(invocation_status_from_row(&row))
     }
 
-    pub(crate) async fn list_invocations(&self) -> AppResult<Vec<InvocationStatusResponse>> {
+    pub(crate) async fn list_invocations(
+        &self,
+        filter: InvocationListApiRequest,
+    ) -> AppResult<Vec<InvocationStatusResponse>> {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
                 started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
                 cancel_requested, claimed_by
             FROM invocations
+            WHERE ($1::TEXT IS NULL OR status = $1)
+              AND ($2::TEXT IS NULL OR execution_mode = $2)
+              AND ($3::TEXT IS NULL OR worker_queue = $3)
+              AND ($4::TEXT IS NULL OR claimed_by = $4)
+              AND (
+                $5::TEXT IS NULL
+                OR ($5 = 'none' AND status <> 'canceled' AND cancel_requested = FALSE)
+                OR ($5 = 'requested' AND status = 'running' AND cancel_requested = TRUE)
+                OR ($5 = 'completed' AND status = 'canceled')
+              )
             ORDER BY started_at DESC, invocation_id DESC
+            LIMIT COALESCE($6, 100)
             "#,
         )
+        .bind(filter.status.map(invocation_status_to_db))
+        .bind(filter.execution_mode.map(|mode| match mode {
+            InvocationExecutionModeApi::Server => "server",
+            InvocationExecutionModeApi::Local => "local",
+        }))
+        .bind(filter.worker_queue)
+        .bind(filter.claimed_by)
+        .bind(filter.cancel_state.map(|state| match state {
+            InvocationCancelStateApi::None => "none",
+            InvocationCancelStateApi::Requested => "requested",
+            InvocationCancelStateApi::Completed => "completed",
+        }))
+        .bind(filter.limit)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(invocation_status_from_row).collect())
@@ -667,6 +705,121 @@ impl Db {
             ))
         })?;
         Ok(invocation_status_from_row(&row))
+    }
+
+    pub(crate) async fn list_workers(&self) -> AppResult<Vec<WorkerStatusResponse>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT execution_mode, worker_queue, claimed_by, claimed_at, last_heartbeat_at, cancel_requested, status, started_at
+            FROM invocations
+            WHERE status = 'running'
+              AND claimed_by IS NOT NULL
+            ORDER BY claimed_by ASC, execution_mode ASC, worker_queue ASC, started_at ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut grouped: BTreeMap<(String, String, String), Vec<InvocationReadModel>> =
+            BTreeMap::new();
+        for row in rows {
+            let model = invocation_read_model_from_row(&row);
+            let worker_id = model
+                .claimed_by
+                .clone()
+                .expect("claimed invocation should have worker id");
+            let mode = match model.execution_mode {
+                InvocationExecutionModeApi::Server => "server".to_string(),
+                InvocationExecutionModeApi::Local => "local".to_string(),
+            };
+            let queue = model.worker_queue.clone();
+            grouped
+                .entry((worker_id, mode, queue))
+                .or_default()
+                .push(model);
+        }
+
+        Ok(grouped
+            .into_iter()
+            .map(|((worker_id, _, worker_queue), models)| {
+                let execution_mode = models[0].execution_mode;
+                let last_heartbeat_at = models.iter().filter_map(|m| m.last_heartbeat_at).max();
+                let health = if models.iter().any(|m| {
+                    matches!(
+                        compute_worker_health_from_model(m),
+                        InvocationWorkerHealthApi::Claimed
+                    )
+                }) {
+                    InvocationWorkerHealthApi::Claimed
+                } else {
+                    InvocationWorkerHealthApi::Stale
+                };
+                WorkerStatusResponse {
+                    worker_id,
+                    execution_mode,
+                    worker_queue,
+                    claimed_invocation_count: models.len() as i64,
+                    last_heartbeat_at,
+                    health,
+                }
+            })
+            .collect())
+    }
+
+    pub(crate) async fn list_queues(&self) -> AppResult<Vec<QueueStatusResponse>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT execution_mode, worker_queue, claimed_by, claimed_at, last_heartbeat_at, cancel_requested, status, started_at
+            FROM invocations
+            WHERE status = 'running'
+            ORDER BY execution_mode ASC, worker_queue ASC, started_at ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut grouped: BTreeMap<(String, String), Vec<InvocationReadModel>> = BTreeMap::new();
+        for row in rows {
+            let model = invocation_read_model_from_row(&row);
+            let mode = match model.execution_mode {
+                InvocationExecutionModeApi::Server => "server".to_string(),
+                InvocationExecutionModeApi::Local => "local".to_string(),
+            };
+            let queue = model.worker_queue.clone();
+            grouped.entry((mode, queue)).or_default().push(model);
+        }
+
+        Ok(grouped
+            .into_iter()
+            .map(|((_, worker_queue), models)| {
+                let execution_mode = models[0].execution_mode;
+                let pending_count = models.iter().filter(|m| m.claimed_by.is_none()).count() as i64;
+                let claimed_count = models.iter().filter(|m| m.claimed_by.is_some()).count() as i64;
+                let stale_claim_count = models
+                    .iter()
+                    .filter(|m| {
+                        m.claimed_by.is_some()
+                            && matches!(
+                                compute_worker_health_from_model(m),
+                                InvocationWorkerHealthApi::Stale
+                            )
+                    })
+                    .count() as i64;
+                let oldest_pending_at = models
+                    .iter()
+                    .filter(|m| m.claimed_by.is_none())
+                    .map(|m| m.started_at)
+                    .min();
+                QueueStatusResponse {
+                    worker_queue,
+                    execution_mode,
+                    pending_count,
+                    claimed_count,
+                    stale_claim_count,
+                    oldest_pending_at,
+                }
+            })
+            .collect())
     }
 
     pub(crate) async fn claim_next_invocation(
@@ -2162,6 +2315,18 @@ fn invocation_status_from_row(row: &sqlx::postgres::PgRow) -> InvocationStatusRe
     status
 }
 
+fn invocation_read_model_from_row(row: &sqlx::postgres::PgRow) -> InvocationReadModel {
+    InvocationReadModel {
+        execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
+        worker_queue: row.get("worker_queue"),
+        status: invocation_status_from_db(&row.get::<String, _>("status")),
+        started_at: row.get("started_at"),
+        claimed_at: row.get("claimed_at"),
+        last_heartbeat_at: row.get("last_heartbeat_at"),
+        claimed_by: row.get("claimed_by"),
+    }
+}
+
 fn timed_out_invocation_from_row(row: sqlx::postgres::PgRow) -> TimedOutInvocationRecord {
     TimedOutInvocationRecord {
         invocation_id: row.get("invocation_id"),
@@ -2197,6 +2362,18 @@ fn invocation_status_to_db(status: InvocationLifecycleStatus) -> &'static str {
 }
 
 fn compute_worker_health(status: &InvocationStatusResponse) -> InvocationWorkerHealthApi {
+    compute_worker_health_from_model(&InvocationReadModel {
+        execution_mode: status.execution_mode,
+        worker_queue: status.worker_queue.clone(),
+        status: status.status.clone(),
+        started_at: status.started_at,
+        claimed_at: status.claimed_at,
+        last_heartbeat_at: status.last_heartbeat_at,
+        claimed_by: status.claimed_by.clone(),
+    })
+}
+
+fn compute_worker_health_from_model(status: &InvocationReadModel) -> InvocationWorkerHealthApi {
     if !matches!(status.status, InvocationLifecycleStatus::Running) {
         return InvocationWorkerHealthApi::Completed;
     }

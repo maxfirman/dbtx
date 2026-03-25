@@ -138,6 +138,16 @@ pub struct InvocationsResponse {
     pub invocations: Vec<InvocationStatusResponse>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InvocationListApiRequest {
+    pub status: Option<InvocationLifecycleStatus>,
+    pub execution_mode: Option<InvocationExecutionModeApi>,
+    pub worker_queue: Option<String>,
+    pub claimed_by: Option<String>,
+    pub cancel_state: Option<InvocationCancelStateApi>,
+    pub limit: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationCleanupApiRequest {
     pub older_than_seconds: i64,
@@ -241,6 +251,36 @@ pub struct InvocationHeartbeatApiRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationHeartbeatResponse {
     pub cancel_requested: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerStatusResponse {
+    pub worker_id: String,
+    pub execution_mode: InvocationExecutionModeApi,
+    pub worker_queue: String,
+    pub claimed_invocation_count: i64,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub health: InvocationWorkerHealthApi,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkersResponse {
+    pub workers: Vec<WorkerStatusResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueStatusResponse {
+    pub worker_queue: String,
+    pub execution_mode: InvocationExecutionModeApi,
+    pub pending_count: i64,
+    pub claimed_count: i64,
+    pub stale_claim_count: i64,
+    pub oldest_pending_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuesResponse {
+    pub queues: Vec<QueueStatusResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

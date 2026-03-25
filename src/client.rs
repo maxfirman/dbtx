@@ -4,9 +4,10 @@ use crate::api::{
     InvocationClaimResponse, InvocationCleanupApiRequest, InvocationCleanupResponse,
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
     InvocationEvent, InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest,
-    InvocationHeartbeatResponse, InvocationStatusResponse, InvocationsResponse, MigrateResponse,
-    ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest,
-    ProjectsResponse,
+    InvocationHeartbeatResponse, InvocationListApiRequest, InvocationStatusResponse,
+    InvocationsResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
+    ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse, QueuesResponse,
+    WorkersResponse,
 };
 use crate::error::{AppError, AppResult};
 use futures_util::StreamExt;
@@ -140,8 +141,20 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn invocation_list(&self) -> AppResult<InvocationsResponse> {
-        self.send(self.http.get(self.url("/v1/invocations"))).await
+    pub async fn invocation_list(
+        &self,
+        request: InvocationListApiRequest,
+    ) -> AppResult<InvocationsResponse> {
+        self.send(self.http.get(self.url("/v1/invocations")).query(&request))
+            .await
+    }
+
+    pub async fn worker_list(&self) -> AppResult<WorkersResponse> {
+        self.send(self.http.get(self.url("/v1/workers"))).await
+    }
+
+    pub async fn queue_list(&self) -> AppResult<QueuesResponse> {
+        self.send(self.http.get(self.url("/v1/queues"))).await
     }
 
     pub async fn invocation_cleanup(

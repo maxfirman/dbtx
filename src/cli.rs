@@ -20,6 +20,10 @@ pub enum Command {
     Environment(EnvironmentCommand),
     #[command(subcommand)]
     Invocation(InvocationCommand),
+    #[command(subcommand)]
+    Worker(WorkerCommand),
+    #[command(subcommand)]
+    Queue(QueueCommand),
     #[command(
         about = "Build dbt resources and persist execution state",
         trailing_var_arg = true,
@@ -179,7 +183,20 @@ pub enum EnvironmentCommand {
 #[derive(Debug, Subcommand)]
 pub enum InvocationCommand {
     #[command(about = "List active and recent invocations")]
-    List,
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        execution_mode: Option<String>,
+        #[arg(long)]
+        worker_queue: Option<String>,
+        #[arg(long)]
+        claimed_by: Option<String>,
+        #[arg(long)]
+        cancel_state: Option<String>,
+        #[arg(long)]
+        limit: Option<i64>,
+    },
     #[command(about = "Show one invocation")]
     Show {
         #[arg(long)]
@@ -199,10 +216,23 @@ pub enum InvocationCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum WorkerCommand {
+    #[command(about = "List active workers derived from current invocation ownership")]
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QueueCommand {
+    #[command(about = "List execution queues and backlog state")]
+    List,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, EnvironmentCommand, InvocationCommand, ProjectCommand, StateCommand,
+        Cli, Command, EnvironmentCommand, InvocationCommand, ProjectCommand, QueueCommand,
+        StateCommand, WorkerCommand,
     };
     use clap::Parser;
 
@@ -316,6 +346,63 @@ mod tests {
                 assert!(wait);
             }
             _ => panic!("expected invocation cancel command"),
+        }
+    }
+
+    #[test]
+    fn invocation_list_filters_parse() {
+        let cli = Cli::parse_from([
+            "dbtx",
+            "invocation",
+            "list",
+            "--status",
+            "running",
+            "--execution-mode",
+            "local",
+            "--worker-queue",
+            "generic",
+            "--claimed-by",
+            "worker-1",
+            "--cancel-state",
+            "requested",
+            "--limit",
+            "25",
+        ]);
+        match cli.command {
+            Command::Invocation(InvocationCommand::List {
+                status,
+                execution_mode,
+                worker_queue,
+                claimed_by,
+                cancel_state,
+                limit,
+            }) => {
+                assert_eq!(status.as_deref(), Some("running"));
+                assert_eq!(execution_mode.as_deref(), Some("local"));
+                assert_eq!(worker_queue.as_deref(), Some("generic"));
+                assert_eq!(claimed_by.as_deref(), Some("worker-1"));
+                assert_eq!(cancel_state.as_deref(), Some("requested"));
+                assert_eq!(limit, Some(25));
+            }
+            _ => panic!("expected invocation list command"),
+        }
+    }
+
+    #[test]
+    fn worker_list_parses() {
+        let cli = Cli::parse_from(["dbtx", "worker", "list"]);
+        match cli.command {
+            Command::Worker(WorkerCommand::List) => {}
+            _ => panic!("expected worker list command"),
+        }
+    }
+
+    #[test]
+    fn queue_list_parses() {
+        let cli = Cli::parse_from(["dbtx", "queue", "list"]);
+        match cli.command {
+            Command::Queue(QueueCommand::List) => {}
+            _ => panic!("expected queue list command"),
         }
     }
 

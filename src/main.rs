@@ -1,9 +1,12 @@
 use clap::Parser;
 use dbtx::api;
-use dbtx::api::InvocationExecutionModeApi;
+use dbtx::api::{
+    InvocationCancelStateApi, InvocationExecutionModeApi, InvocationLifecycleStatus,
+    InvocationListApiRequest, QueueStatusResponse, WorkerStatusResponse,
+};
 use dbtx::cli::{
     Cli, Command, EnvironmentCommand, InvocationCommand as InvocationCliCommand, ProjectCommand,
-    StateCommand,
+    QueueCommand, StateCommand, WorkerCommand,
 };
 use dbtx::client;
 use dbtx::config::{self, resolve_service_url};
@@ -43,6 +46,12 @@ async fn run() -> AppResult<()> {
         }
         Command::Invocation(invocation_command) => {
             handle_invocation_command(invocation_command, cli.service_url).await?
+        }
+        Command::Worker(worker_command) => {
+            handle_worker_command(worker_command, cli.service_url).await?
+        }
+        Command::Queue(queue_command) => {
+            handle_queue_command(queue_command, cli.service_url).await?
         }
         Command::Build { args } => {
             handle_persisting_command(InvocationCommand::Build, args, cli.service_url).await?
@@ -354,8 +363,26 @@ async fn handle_invocation_command(
     let current_dir = std::env::current_dir()?;
     let client = daemon_client(&current_dir, service_url_override)?;
     match command {
-        InvocationCliCommand::List => {
-            for invocation in client.invocation_list().await?.invocations {
+        InvocationCliCommand::List {
+            status,
+            execution_mode,
+            worker_queue,
+            claimed_by,
+            cancel_state,
+            limit,
+        } => {
+            for invocation in client
+                .invocation_list(InvocationListApiRequest {
+                    status: parse_invocation_status_filter(status.as_deref())?,
+                    execution_mode: parse_execution_mode_filter(execution_mode.as_deref())?,
+                    worker_queue,
+                    claimed_by,
+                    cancel_state: parse_cancel_state_filter(cancel_state.as_deref())?,
+                    limit,
+                })
+                .await?
+                .invocations
+            {
                 print_invocation(&invocation);
             }
         }
@@ -403,6 +430,38 @@ async fn handle_invocation_command(
                 })
                 .await?;
             println!("deleted {} invocation(s)", response.deleted);
+        }
+    }
+    Ok(())
+}
+
+async fn handle_worker_command(
+    command: WorkerCommand,
+    service_url_override: Option<String>,
+) -> AppResult<()> {
+    let current_dir = std::env::current_dir()?;
+    let client = daemon_client(&current_dir, service_url_override)?;
+    match command {
+        WorkerCommand::List => {
+            for worker in client.worker_list().await?.workers {
+                print_worker(&worker);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_queue_command(
+    command: QueueCommand,
+    service_url_override: Option<String>,
+) -> AppResult<()> {
+    let current_dir = std::env::current_dir()?;
+    let client = daemon_client(&current_dir, service_url_override)?;
+    match command {
+        QueueCommand::List => {
+            for queue in client.queue_list().await?.queues {
+                print_queue(&queue);
+            }
         }
     }
     Ok(())
@@ -665,6 +724,79 @@ fn print_invocation(invocation: &api::InvocationStatusResponse) {
         invocation.cancel_requested,
         invocation.error.as_deref().unwrap_or(""),
     );
+}
+
+fn print_worker(worker: &WorkerStatusResponse) {
+    println!(
+        "worker id={} mode={:?} worker_queue={} claimed_invocation_count={} last_heartbeat_at={} health={:?}",
+        worker.worker_id,
+        worker.execution_mode,
+        worker.worker_queue,
+        worker.claimed_invocation_count,
+        worker
+            .last_heartbeat_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_default(),
+        worker.health,
+    );
+}
+
+fn print_queue(queue: &QueueStatusResponse) {
+    println!(
+        "queue worker_queue={} mode={:?} pending_count={} claimed_count={} stale_claim_count={} oldest_pending_at={}",
+        queue.worker_queue,
+        queue.execution_mode,
+        queue.pending_count,
+        queue.claimed_count,
+        queue.stale_claim_count,
+        queue
+            .oldest_pending_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_default(),
+    );
+}
+
+fn parse_invocation_status_filter(
+    value: Option<&str>,
+) -> AppResult<Option<InvocationLifecycleStatus>> {
+    match value {
+        None => Ok(None),
+        Some("running") => Ok(Some(InvocationLifecycleStatus::Running)),
+        Some("succeeded") => Ok(Some(InvocationLifecycleStatus::Succeeded)),
+        Some("failed") => Ok(Some(InvocationLifecycleStatus::Failed)),
+        Some("canceled") => Ok(Some(InvocationLifecycleStatus::Canceled)),
+        Some(other) => Err(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid invocation status filter: {other}"),
+        ))),
+    }
+}
+
+fn parse_execution_mode_filter(
+    value: Option<&str>,
+) -> AppResult<Option<InvocationExecutionModeApi>> {
+    match value {
+        None => Ok(None),
+        Some("server") => Ok(Some(InvocationExecutionModeApi::Server)),
+        Some("local") => Ok(Some(InvocationExecutionModeApi::Local)),
+        Some(other) => Err(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid execution mode filter: {other}"),
+        ))),
+    }
+}
+
+fn parse_cancel_state_filter(value: Option<&str>) -> AppResult<Option<InvocationCancelStateApi>> {
+    match value {
+        None => Ok(None),
+        Some("none") => Ok(Some(InvocationCancelStateApi::None)),
+        Some("requested") => Ok(Some(InvocationCancelStateApi::Requested)),
+        Some("completed") => Ok(Some(InvocationCancelStateApi::Completed)),
+        Some(other) => Err(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid cancel state filter: {other}"),
+        ))),
+    }
 }
 
 #[cfg(test)]

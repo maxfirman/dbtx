@@ -19,6 +19,8 @@ Phase 1 supports:
 - `dbtx invocation list`
 - `dbtx invocation show --invocation-id ...`
 - `dbtx invocation cancel --invocation-id ...`
+- `dbtx worker list`
+- `dbtx queue list`
 
 ## Configuration
 
@@ -90,6 +92,18 @@ Inspect active invocations:
 
 ```bash
 DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- invocation list
+```
+
+Inspect active workers:
+
+```bash
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- worker list
+```
+
+Inspect queue backlog:
+
+```bash
+DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run -- queue list
 ```
 
 Request cancellation for an invocation:

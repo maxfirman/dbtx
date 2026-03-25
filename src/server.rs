@@ -5,9 +5,10 @@ use crate::api::{
     InvocationCommandApi, InvocationCompleteApiRequest, InvocationCreateApiRequest,
     InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
     InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
-    InvocationLifecycleStatus, InvocationStatusResponse, InvocationsResponse, MigrateResponse,
-    ProjectInitApiRequest, ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest,
-    ProjectsResponse, ReadyResponse,
+    InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
+    InvocationsResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
+    ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse, QueuesResponse,
+    ReadyResponse, WorkersResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{
@@ -313,6 +314,8 @@ pub fn router(state: AppState) -> Router {
             "/v1/invocations",
             get(invocation_list).post(invocation_create),
         )
+        .route("/v1/workers", get(worker_list))
+        .route("/v1/queues", get(queue_list))
         .route("/v1/invocations/cleanup", post(invocation_cleanup))
         .route("/v1/invocations/claim-next", post(invocation_claim_next))
         .route("/v1/invocations/{id}", get(invocation_status))
@@ -809,11 +812,24 @@ async fn invocation_status(
 
 async fn invocation_list(
     State(state): State<AppState>,
+    Query(filter): Query<InvocationListApiRequest>,
 ) -> Result<Json<InvocationsResponse>, ApiError> {
     reconcile_timed_out_invocations(&state).await?;
-    let invocations = state.db.list_invocations().await?;
+    let invocations = state.db.list_invocations(filter).await?;
     info!(count = invocations.len(), "listed invocations");
     Ok(Json(InvocationsResponse { invocations }))
+}
+
+async fn worker_list(State(state): State<AppState>) -> Result<Json<WorkersResponse>, ApiError> {
+    let workers = state.db.list_workers().await?;
+    info!(count = workers.len(), "listed workers");
+    Ok(Json(WorkersResponse { workers }))
+}
+
+async fn queue_list(State(state): State<AppState>) -> Result<Json<QueuesResponse>, ApiError> {
+    let queues = state.db.list_queues().await?;
+    info!(count = queues.len(), "listed queues");
+    Ok(Json(QueuesResponse { queues }))
 }
 
 async fn invocation_cleanup(
