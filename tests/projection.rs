@@ -6,7 +6,7 @@ use dbtx::api::{
 };
 use dbtx::client::DaemonClient;
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
-use dbtx::services::infer_local_project_defaults;
+use dbtx::services::{infer_local_project_defaults, infer_remote_project_defaults};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::fs;
@@ -51,7 +51,7 @@ async fn project_and_environment_cli_round_trip() {
 
     let output = run_dbtx_in_dir(db.service_url(), repo.project_dir(), &["project", "init"]);
     assert_success(&output);
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), false);
 
     let output = run_dbtx_in_dir(
         db.service_url(),
@@ -137,7 +137,7 @@ async fn environment_seed_from_copies_active_state_without_runs() {
         repo.project_dir(),
         &["project", "init"],
     ));
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), false);
     assert_success(&run_dbtx_in_dir(
         db.service_url(),
         repo.project_dir(),
@@ -284,7 +284,7 @@ async fn remote_project_environment_requires_commit_sha_and_records_version_hist
         repo.project_dir(),
         &["project", "init", "--mode", "remote"],
     ));
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     let missing_sha = run_dbtx_in_dir(
         db.service_url(),
@@ -343,7 +343,7 @@ async fn remote_project_environment_allows_commit_updates() {
         repo.project_dir(),
         &["project", "init", "--mode", "remote"],
     ));
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     assert_success(&run_dbtx_in_dir(
         db.service_url(),
@@ -389,6 +389,34 @@ async fn remote_project_environment_allows_commit_updates() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn project_update_preserves_existing_remote_mode_without_flag() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &["project", "init", "--mode", "remote"],
+    ));
+
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &["project", "update"],
+    ));
+
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let mode: String = sqlx::query_scalar("SELECT mode FROM projects WHERE project_id = $1")
+        .bind(&project_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("project mode");
+    assert_eq!(mode, "remote");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn remote_invocation_requires_remote_project_mode() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -400,7 +428,7 @@ async fn remote_invocation_requires_remote_project_mode() {
         repo.project_dir(),
         &["project", "init"],
     ));
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), false);
     assert_success(&run_dbtx_in_dir(
         db.service_url(),
         repo.project_dir(),
@@ -433,7 +461,7 @@ async fn remote_invocation_requires_commit_pinned_immutable_environment() {
         repo.project_dir(),
         &["project", "init"],
     ));
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), false);
     assert_success(&run_dbtx_in_dir(
         db.service_url(),
         repo.project_dir(),
@@ -584,7 +612,7 @@ async fn claimed_invocation_timeout_fails_without_reclaim() {
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     let created = client
         .invocation_create(remote_invocation_request(
@@ -673,7 +701,7 @@ async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations()
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     let local = client
         .invocation_create(local_invocation_request(
@@ -758,7 +786,7 @@ async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     let local = client
         .invocation_create(local_invocation_request(
@@ -902,7 +930,7 @@ async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finish
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     let created = client
         .invocation_create(remote_invocation_request(
@@ -950,7 +978,7 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     let _server_generic_1 = client
         .invocation_create(remote_invocation_request(
@@ -1051,7 +1079,7 @@ async fn invocation_list_filters_apply_to_operator_views() {
     let client = DaemonClient::new(db.service_url().to_string());
 
     bootstrap_project_and_env(&repo, db.service_url(), "dev").await;
-    let project_id = read_project_id_from_dbt_project(repo.project_dir());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     let running = client
         .invocation_create(remote_invocation_request(
@@ -1508,10 +1536,16 @@ impl TempProjectRepo {
     }
 }
 
-fn read_project_id_from_dbt_project(project_dir: &Path) -> String {
-    infer_local_project_defaults(project_dir, None, None, None)
-        .expect("infer local project")
-        .project_id
+fn read_project_id_from_dbt_project(project_dir: &Path, remote: bool) -> String {
+    if remote {
+        infer_remote_project_defaults(project_dir, None, None, None)
+            .expect("infer remote project")
+            .project_id
+    } else {
+        infer_local_project_defaults(project_dir, None, None, None)
+            .expect("infer local project")
+            .project_id
+    }
 }
 
 fn git(args: &[&str], cwd: &Path) {

@@ -704,7 +704,7 @@ async fn invocation_create(
                 .into_iter()
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect(),
-            project_dir: request.current_dir.clone().unwrap_or_default(),
+            project_dir: spec.project_dir.display().to_string(),
             profiles_yml: spec.profiles_yml,
             state_manifest: spec.state_manifest,
         },

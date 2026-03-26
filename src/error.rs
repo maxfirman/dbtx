@@ -64,12 +64,16 @@ pub enum AppError {
     RemoteExecutionRequiresProjectId,
     #[error("remote execution requires an environment slug")]
     RemoteExecutionRequiresEnvironmentSlug,
+    #[error("remote project registration requires a git repository")]
+    RemoteProjectRequiresGitRepo,
     #[error("project '{0}' has mode '{1}' but remote execution requires mode 'remote'")]
     RemoteExecutionRequiresRemoteProject(String, String),
     #[error("project '{0}' is missing git_repo_url required for remote execution")]
     RemoteExecutionRequiresGitRepoUrl(String),
     #[error("project '{0}' is missing project_root required for remote execution")]
     RemoteExecutionRequiresProjectRoot(String),
+    #[error("invalid remote project_root '{0}': must be relative and must not traverse parents")]
+    InvalidRemoteProjectRoot(String),
     #[error(
         "environment '{1}' for project '{0}' is missing git_commit_sha required for remote execution"
     )]

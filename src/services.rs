@@ -13,6 +13,7 @@ use crate::profile::LocalTargetProfile;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uuid::Uuid;
@@ -67,6 +68,7 @@ pub struct InvocationResult {
 pub struct LocalExecutionSpec {
     pub command: InvocationCommand,
     pub args: Vec<OsString>,
+    pub project_dir: PathBuf,
     pub profiles_yml: String,
     pub state_manifest: Option<Value>,
 }
@@ -177,16 +179,19 @@ impl<'a> ProjectService<'a> {
 
     pub async fn init(&self, request: ProjectInitRequest) -> AppResult<ProjectRecord> {
         self.db.require_current_schema().await?;
-        let inferred = infer_local_project_defaults(
-            &request.current_dir,
-            request.git_repo_url.as_deref(),
-            request.project_root.as_deref(),
-            request.default_branch.as_deref(),
-        )?;
+        let inferred = self
+            .infer_project_defaults(
+                &request.current_dir,
+                request.mode.as_deref(),
+                request.git_repo_url.as_deref(),
+                request.project_root.as_deref(),
+                request.default_branch.as_deref(),
+            )
+            .await?;
         let input = CreateProjectInput {
             project_id: inferred.project_id,
             project_name: inferred.project_name,
-            mode: request.mode.unwrap_or(inferred.mode),
+            mode: inferred.mode,
             git_repo_url: inferred.git_repo_url,
             default_branch: inferred.default_branch,
             project_root: inferred.project_root,
@@ -208,17 +213,20 @@ impl<'a> ProjectService<'a> {
 
     pub async fn update(&self, request: ProjectUpdateRequest) -> AppResult<ProjectRecord> {
         self.db.require_current_schema().await?;
-        let inferred = infer_local_project_defaults(
-            &request.current_dir,
-            request.git_repo_url.as_deref(),
-            request.project_root.as_deref(),
-            request.default_branch.as_deref(),
-        )?;
+        let inferred = self
+            .infer_project_defaults(
+                &request.current_dir,
+                request.mode.as_deref(),
+                request.git_repo_url.as_deref(),
+                request.project_root.as_deref(),
+                request.default_branch.as_deref(),
+            )
+            .await?;
         self.db
             .update_project(CreateProjectInput {
                 project_id: inferred.project_id,
                 project_name: inferred.project_name,
-                mode: request.mode.unwrap_or(inferred.mode),
+                mode: inferred.mode,
                 git_repo_url: inferred.git_repo_url,
                 default_branch: inferred.default_branch,
                 project_root: inferred.project_root,
@@ -239,9 +247,40 @@ impl<'a> ProjectService<'a> {
         self.db.require_current_schema().await?;
         let project_id = match project {
             Some(project_id) => project_id,
-            None => infer_local_project_defaults(current_dir, None, None, None)?.project_id,
+            None => self.infer_project_defaults(current_dir, None, None, None, None).await?.project_id,
         };
         self.db.get_project_by_project_id(&project_id).await
+    }
+
+    async fn infer_project_defaults(
+        &self,
+        current_dir: &Path,
+        explicit_mode: Option<&str>,
+        git_repo_url: Option<&str>,
+        project_root: Option<&str>,
+        default_branch: Option<&str>,
+    ) -> AppResult<InferredProjectInput> {
+        let local = infer_local_project_defaults(current_dir, git_repo_url, project_root, default_branch)?;
+        let remote = infer_remote_project_defaults(current_dir, git_repo_url, project_root, default_branch).ok();
+
+        let chosen_mode = match explicit_mode {
+            Some(mode) => mode.to_string(),
+            None => {
+                if let Some(remote_input) = remote.as_ref()
+                    && self.db.get_project_by_project_id(&remote_input.project_id).await.is_ok()
+                {
+                    "remote".to_string()
+                } else {
+                    "local".to_string()
+                }
+            }
+        };
+
+        match chosen_mode.as_str() {
+            "local" => Ok(local),
+            "remote" => remote.ok_or(AppError::RemoteProjectRequiresGitRepo),
+            other => Err(AppError::InvalidProjectMode(other.to_string())),
+        }
     }
 }
 
@@ -346,7 +385,18 @@ impl<'a> EnvironmentService<'a> {
     ) -> AppResult<ProjectRecord> {
         match project.or_else(|| std::env::var("DBTX_PROJECT_ID").ok()) {
             Some(project_id) => self.db.get_project_by_project_id(&project_id).await,
-            None => self.load_or_create_inferred_project(current_dir).await,
+            None => {
+                let local = infer_local_project_defaults(current_dir, None, None, None)?;
+                if let Ok(project) = self.db.get_project_by_project_id(&local.project_id).await {
+                    return Ok(project);
+                }
+                if let Ok(remote) = infer_remote_project_defaults(current_dir, None, None, None)
+                    && let Ok(project) = self.db.get_project_by_project_id(&remote.project_id).await
+                {
+                    return Ok(project);
+                }
+                self.load_or_create_inferred_project(current_dir).await
+            }
         }
     }
 
@@ -518,6 +568,7 @@ impl<'a> InvocationService<'a> {
             spec: PreparedExecutionSpec::Local(LocalExecutionSpec {
                 command: request.command,
                 args: dbt_args,
+                project_dir: ctx.project_dir.clone(),
                 profiles_yml,
                 state_manifest,
             }),
@@ -962,6 +1013,41 @@ pub fn infer_local_project_defaults(
     })
 }
 
+pub fn infer_remote_project_defaults(
+    current_dir: &Path,
+    git_repo_url: Option<&str>,
+    project_root: Option<&str>,
+    default_branch: Option<&str>,
+) -> AppResult<InferredProjectInput> {
+    let project_name = read_dbt_project_name_from_root(current_dir)?;
+    let canonical_project_dir = current_dir.canonicalize()?;
+    let git_state = read_git_state(current_dir);
+    let repo_url = git_repo_url
+        .map(ToString::to_string)
+        .or(git_state.repo_url)
+        .ok_or(AppError::RemoteProjectRequiresGitRepo)?;
+    let repo_root = crate::db::git_repo_root(current_dir).map_err(|_| AppError::RemoteProjectRequiresGitRepo)?;
+    let inferred_project_root = project_root
+        .map(ToString::to_string)
+        .unwrap_or_else(|| relative_project_root(&repo_root, &canonical_project_dir));
+    validate_remote_project_root(&inferred_project_root)?;
+    let project_id = format!(
+        "prj_remote_{}",
+        short_hash(&format!(
+            "{repo_url}\n{inferred_project_root}\n{project_name}"
+        ))
+    );
+
+    Ok(InferredProjectInput {
+        project_id,
+        project_name,
+        mode: "remote".to_string(),
+        git_repo_url: Some(repo_url),
+        default_branch: default_branch.map(ToString::to_string),
+        project_root: Some(inferred_project_root),
+    })
+}
+
 pub fn read_dbt_project_name_from_root(project_root: &Path) -> AppResult<String> {
     let yaml = read_dbt_project_yaml(project_root)?;
     yaml.get("name")
@@ -990,6 +1076,17 @@ fn read_dbt_project_yaml(project_root: &Path) -> AppResult<serde_yaml::Value> {
     }
     let content = std::fs::read_to_string(path)?;
     Ok(serde_yaml::from_str(&content)?)
+}
+
+pub fn validate_remote_project_root(project_root: &str) -> AppResult<()> {
+    let path = Path::new(project_root);
+    if path.is_absolute() {
+        return Err(AppError::InvalidRemoteProjectRoot(project_root.to_string()));
+    }
+    if path.components().any(|component| matches!(component, Component::ParentDir)) {
+        return Err(AppError::InvalidRemoteProjectRoot(project_root.to_string()));
+    }
+    Ok(())
 }
 
 fn local_machine_scope() -> AppResult<String> {

@@ -803,7 +803,8 @@ fn parse_cancel_state_filter(value: Option<&str>) -> AppResult<Option<Invocation
 mod tests {
     use dbtx::error::AppError;
     use dbtx::services::{
-        infer_local_project_defaults, read_dbt_project_name_from_root, relative_project_root,
+        infer_local_project_defaults, infer_remote_project_defaults, read_dbt_project_name_from_root,
+        relative_project_root, validate_remote_project_root,
     };
     use std::process::Command;
     use tempfile::TempDir;
@@ -858,6 +859,54 @@ mod tests {
     fn relative_project_root_uses_dot_for_repo_root() {
         let temp = TempDir::new().expect("temp dir");
         assert_eq!(relative_project_root(temp.path(), temp.path()), ".");
+    }
+
+    #[test]
+    fn infers_remote_project_defaults_stably_from_repo_metadata() {
+        let temp_a = TempDir::new().expect("temp dir");
+        let temp_b = TempDir::new().expect("temp dir");
+        let project_root_a = temp_a.path().join("analytics");
+        let project_root_b = temp_b.path().join("analytics");
+        std::fs::create_dir_all(&project_root_a).expect("project root a");
+        std::fs::create_dir_all(&project_root_b).expect("project root b");
+        std::fs::write(project_root_a.join("dbt_project.yml"), "name: jaffle_shop_project\n")
+            .expect("dbt project a");
+        std::fs::write(project_root_b.join("dbt_project.yml"), "name: jaffle_shop_project\n")
+            .expect("dbt project b");
+
+        run_git_cmd(["init"], temp_a.path());
+        run_git_cmd(["init"], temp_b.path());
+        run_git_cmd(
+            ["remote", "add", "origin", "git@github.com:example/repo.git"],
+            temp_a.path(),
+        );
+        run_git_cmd(
+            ["remote", "add", "origin", "git@github.com:example/repo.git"],
+            temp_b.path(),
+        );
+
+        let inferred_a =
+            infer_remote_project_defaults(&project_root_a, None, None, None).expect("remote a");
+        let inferred_b =
+            infer_remote_project_defaults(&project_root_b, None, None, None).expect("remote b");
+
+        assert_eq!(inferred_a.project_id, inferred_b.project_id);
+        assert_eq!(inferred_a.project_root.as_deref(), Some("analytics"));
+        assert_eq!(inferred_b.project_root.as_deref(), Some("analytics"));
+    }
+
+    #[test]
+    fn rejects_invalid_remote_project_root() {
+        assert!(matches!(
+            validate_remote_project_root("/tmp/analytics"),
+            Err(AppError::InvalidRemoteProjectRoot(_))
+        ));
+        assert!(matches!(
+            validate_remote_project_root("../analytics"),
+            Err(AppError::InvalidRemoteProjectRoot(_))
+        ));
+        assert!(validate_remote_project_root(".").is_ok());
+        assert!(validate_remote_project_root("analytics").is_ok());
     }
 
     fn run_git_cmd<const N: usize>(args: [&str; N], cwd: &std::path::Path) {

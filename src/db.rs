@@ -250,7 +250,7 @@ impl Db {
     }
 
     pub async fn create_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
-        validate_project_mode(&input.mode)?;
+        validate_project_input(&input.mode, input.project_root.as_deref())?;
         let row = sqlx::query(
             r#"
             INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root)
@@ -270,7 +270,7 @@ impl Db {
     }
 
     pub async fn update_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
-        validate_project_mode(&input.mode)?;
+        validate_project_input(&input.mode, input.project_root.as_deref())?;
         let row = sqlx::query(
             r#"
             UPDATE projects
@@ -296,7 +296,7 @@ impl Db {
     }
 
     pub async fn upsert_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
-        validate_project_mode(&input.mode)?;
+        validate_project_input(&input.mode, input.project_root.as_deref())?;
         let row = sqlx::query(
             r#"
             INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root)
@@ -326,7 +326,7 @@ impl Db {
         existing_project_id: &str,
         input: CreateProjectInput,
     ) -> AppResult<ProjectRecord> {
-        validate_project_mode(&input.mode)?;
+        validate_project_input(&input.mode, input.project_root.as_deref())?;
         let mut tx = self.pool.begin().await?;
         let existing_row = sqlx::query("SELECT id FROM projects WHERE project_id = $1")
             .bind(existing_project_id)
@@ -2311,6 +2311,29 @@ fn validate_project_mode(mode: &str) -> AppResult<()> {
     }
 }
 
+fn validate_project_input(mode: &str, project_root: Option<&str>) -> AppResult<()> {
+    validate_project_mode(mode)?;
+    if mode == "remote" {
+        let project_root = project_root
+            .ok_or_else(|| AppError::InvalidRemoteProjectRoot(String::new()))?;
+        validate_remote_project_root_value(project_root)?;
+    }
+    Ok(())
+}
+
+fn validate_remote_project_root_value(project_root: &str) -> AppResult<()> {
+    let path = Path::new(project_root);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        Err(AppError::InvalidRemoteProjectRoot(project_root.to_string()))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_environment_git_metadata(
     project: &ProjectRecord,
     environment_slug: &str,
@@ -2516,7 +2539,7 @@ fn read_dbt_project_yaml(project_dir: &Path) -> AppResult<serde_yaml::Value> {
     Ok(serde_yaml::from_str(&content)?)
 }
 
-fn git_repo_root(current_dir: &Path) -> AppResult<std::path::PathBuf> {
+pub(crate) fn git_repo_root(current_dir: &Path) -> AppResult<std::path::PathBuf> {
     let output = run_git(["rev-parse", "--show-toplevel"], current_dir)?;
     Ok(output.into())
 }

@@ -5,7 +5,7 @@ use dbtx::api::{
     InvocationLifecycleStatus,
 };
 use dbtx::client::DaemonClient;
-use dbtx::services::infer_local_project_defaults;
+use dbtx::services::{infer_local_project_defaults, infer_remote_project_defaults};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -242,6 +242,37 @@ async fn dbtx_run_persists_real_jaffle_state() {
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
+async fn dbtx_run_respects_project_dir_when_called_outside_project_root() {
+    let _guard = integration_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+
+    let project = RealProject::new();
+    project.seed();
+    project.init_dbtx_project(db.service_url());
+    let outside_dir = TempDir::new().expect("outside dir");
+
+    let output = run_dbtx_in_cwd(
+        db.service_url(),
+        outside_dir.path(),
+        ENVIRONMENT_SLUG,
+        &[
+            "run",
+            "--project-dir",
+            project.path_str(),
+            "--profiles-dir",
+            project.path_str(),
+            "--select",
+            "stg_customers",
+        ],
+    );
+    assert_success(&output);
+}
+
+#[tokio::test]
+#[ignore = "requires local dbt fusion, duckdb, and docker"]
 async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
     let _guard = integration_lock()
         .lock()
@@ -274,7 +305,7 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
         ],
     ));
     sqlx::query("UPDATE environments SET profile_config = jsonb_set(profile_config, '{path}', to_jsonb($2::text)) WHERE slug = 'remote' AND project_id = (SELECT id FROM projects WHERE project_id = $1)")
-        .bind(project.project_id())
+        .bind(project.remote_project_id())
         .bind(
             project
                 .path()
@@ -286,7 +317,7 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
         .await
         .expect("update remote duckdb path");
     sqlx::query("UPDATE projects SET git_repo_url = $2, project_root = '.' WHERE project_id = $1")
-        .bind(project.project_id())
+        .bind(project.remote_project_id())
         .bind(project.path_str())
         .execute(db.pool())
         .await
@@ -298,7 +329,7 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
             command: InvocationCommandApi::Run,
             args: vec!["--select".to_string(), "stg_customers".to_string()],
             current_dir: None,
-            project_id: Some(project.project_id()),
+            project_id: Some(project.remote_project_id()),
             environment_slug: Some("remote".to_string()),
             execution_mode: InvocationExecutionModeApi::Server,
             worker_queue: None,
@@ -349,7 +380,7 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
     );
     assert_eq!(
         run_row.get::<Option<String>, _>("project_ref").as_deref(),
-        Some(project.project_id().as_str())
+        Some(project.remote_project_id().as_str())
     );
 
     let repo_hash = short_hash(project.path_str());
@@ -1083,6 +1114,12 @@ impl RealProject {
             .project_id
     }
 
+    fn remote_project_id(&self) -> String {
+        infer_remote_project_defaults(self.path(), None, None, None)
+            .expect("infer remote project")
+            .project_id
+    }
+
     fn head_sha(&self) -> String {
         let output = Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -1280,11 +1317,20 @@ fn run_dbtx_with_environment_slug(
     environment_slug: &str,
     args: &[&str],
 ) -> Output {
+    run_dbtx_in_cwd(service_url, project.path(), environment_slug, args)
+}
+
+fn run_dbtx_in_cwd(
+    service_url: &str,
+    cwd: &Path,
+    environment_slug: &str,
+    args: &[&str],
+) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx"));
     command.args(strip_profiles_dir_args(args));
     command.env("DBTX_SERVICE_URL", service_url);
     command.env("DBTX_ENVIRONMENT_SLUG", environment_slug);
-    command.current_dir(project.path());
+    command.current_dir(cwd);
     command.output().expect("run dbtx")
 }
 

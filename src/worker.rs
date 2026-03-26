@@ -8,7 +8,7 @@ use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -295,6 +295,7 @@ async fn materialize_execution_project_dir(
             ..
         } => {
             let worktree_root = ensure_git_worktree(repo_url, commit_sha).await?;
+            validate_remote_project_root(project_root)?;
             let project_dir = if project_root == "." || project_root.is_empty() {
                 worktree_root
             } else {
@@ -310,15 +311,30 @@ async fn materialize_execution_project_dir(
 
 async fn ensure_git_worktree(repo_url: &str, commit_sha: &str) -> AppResult<PathBuf> {
     let cache_root = git_cache_root()?;
+    ensure_git_worktree_in(&cache_root, repo_url, commit_sha).await
+}
+
+async fn ensure_git_worktree_in(
+    cache_root: &Path,
+    repo_url: &str,
+    commit_sha: &str,
+) -> AppResult<PathBuf> {
     let repo_hash = short_hash(repo_url);
     let mirror_dir = cache_root.join("mirrors").join(format!("{repo_hash}.git"));
     let worktree_dir = cache_root
         .join("worktrees")
-        .join(repo_hash)
+        .join(&repo_hash)
         .join(commit_sha);
+    let usage_file = cache_root
+        .join("usage")
+        .join(&repo_hash)
+        .join(format!("{commit_sha}.touch"));
 
     tokio::fs::create_dir_all(mirror_dir.parent().expect("mirror parent")).await?;
     tokio::fs::create_dir_all(worktree_dir.parent().expect("worktree parent")).await?;
+    tokio::fs::create_dir_all(usage_file.parent().expect("usage parent")).await?;
+
+    let _repo_lock = acquire_repo_lock(cache_root, &repo_hash).await?;
 
     if !mirror_dir.exists() {
         info!(repo_url = %repo_url, mirror = %mirror_dir.display(), "creating git mirror cache");
@@ -370,6 +386,9 @@ async fn ensure_git_worktree(repo_url: &str, commit_sha: &str) -> AppResult<Path
             "reusing git worktree"
         );
     }
+
+    tokio::fs::write(&usage_file, b"").await?;
+    prune_git_cache(cache_root, &repo_hash, commit_sha, &mirror_dir).await?;
 
     Ok(worktree_dir)
 }
@@ -428,6 +447,111 @@ fn short_hash(input: &str) -> String {
     format!("{digest:x}").chars().take(20).collect()
 }
 
+fn validate_remote_project_root(project_root: &str) -> AppResult<()> {
+    let path = Path::new(project_root);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        Err(AppError::InvalidRemoteProjectRoot(project_root.to_string()))
+    } else {
+        Ok(())
+    }
+}
+
+struct RepoLock {
+    path: PathBuf,
+}
+
+impl Drop for RepoLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+async fn acquire_repo_lock(cache_root: &Path, repo_hash: &str) -> AppResult<RepoLock> {
+    let lock_dir = cache_root.join("locks");
+    tokio::fs::create_dir_all(&lock_dir).await?;
+    let lock_path = lock_dir.join(format!("{repo_hash}.lock"));
+    let started = std::time::Instant::now();
+    loop {
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .await
+        {
+            Ok(_) => return Ok(RepoLock { path: lock_path }),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Ok(metadata) = tokio::fs::metadata(&lock_path).await
+                    && let Ok(modified) = metadata.modified()
+                    && modified
+                        .elapsed()
+                        .unwrap_or_default()
+                        > std::time::Duration::from_secs(300)
+                {
+                    let _ = tokio::fs::remove_file(&lock_path).await;
+                    continue;
+                }
+                if started.elapsed() > std::time::Duration::from_secs(30) {
+                    return Err(AppError::Io(std::io::Error::other(format!(
+                        "timed out acquiring git cache lock for {repo_hash}"
+                    ))));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(err) => return Err(AppError::Io(err)),
+        }
+    }
+}
+
+async fn prune_git_cache(
+    cache_root: &Path,
+    repo_hash: &str,
+    current_commit_sha: &str,
+    mirror_dir: &Path,
+) -> AppResult<()> {
+    let ttl_hours = std::env::var("DBTX_GIT_CACHE_TTL_HOURS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(24 * 7);
+    let ttl = std::time::Duration::from_secs(ttl_hours.saturating_mul(3600));
+    let usage_root = cache_root.join("usage").join(repo_hash);
+    let worktree_root = cache_root.join("worktrees").join(repo_hash);
+    let mut removed_any = false;
+
+    let Ok(mut entries) = tokio::fs::read_dir(&usage_root).await else {
+        return Ok(());
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if stem == current_commit_sha {
+            continue;
+        }
+        let metadata = entry.metadata().await?;
+        let modified = metadata.modified().unwrap_or(std::time::SystemTime::now());
+        if modified.elapsed().unwrap_or_default() <= ttl {
+            continue;
+        }
+        let worktree_dir = worktree_root.join(stem);
+        if worktree_dir.exists() {
+            let _ = tokio::fs::remove_dir_all(&worktree_dir).await;
+            removed_any = true;
+        }
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    if removed_any {
+        let _ = run_git_with_git_dir(mirror_dir, ["worktree", "prune"]).await;
+    }
+
+    Ok(())
+}
+
 fn persists_state(command: InvocationCommandApi) -> bool {
     !matches!(command, InvocationCommandApi::Ls)
 }
@@ -458,4 +582,67 @@ fn write_state_dir(state_manifest: Option<&serde_json::Value>) -> AppResult<Opti
         serde_json::to_vec(state_manifest)?,
     )?;
     Ok(Some(temp_dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_git_worktree_in, validate_remote_project_root};
+    use std::path::Path;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    #[test]
+    fn rejects_invalid_remote_project_roots() {
+        assert!(validate_remote_project_root(".").is_ok());
+        assert!(validate_remote_project_root("analytics").is_ok());
+        assert!(validate_remote_project_root("../analytics").is_err());
+        assert!(validate_remote_project_root("/tmp/analytics").is_err());
+    }
+
+    #[tokio::test]
+    async fn ensure_git_worktree_is_safe_under_concurrency() {
+        let repo = TempDir::new().expect("repo dir");
+        let cache = TempDir::new().expect("cache dir");
+        std::fs::write(repo.path().join("dbt_project.yml"), "name: proj\n").expect("dbt project");
+        run_git(["init"], repo.path());
+        run_git(["config", "user.email", "test@example.com"], repo.path());
+        run_git(["config", "user.name", "Test User"], repo.path());
+        run_git(["add", "dbt_project.yml"], repo.path());
+        run_git(["commit", "-m", "init"], repo.path());
+        let commit_sha = git_output(["rev-parse", "HEAD"], repo.path());
+
+        let (first, second) = tokio::join!(
+            ensure_git_worktree_in(cache.path(), repo.path().to_str().expect("repo str"), &commit_sha),
+            ensure_git_worktree_in(cache.path(), repo.path().to_str().expect("repo str"), &commit_sha)
+        );
+        let first = first.expect("first worktree");
+        let second = second.expect("second worktree");
+
+        assert_eq!(first, second);
+        assert!(first.join("dbt_project.yml").is_file());
+    }
+
+    fn run_git<const N: usize>(args: [&str; N], cwd: &Path) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn git_output<const N: usize>(args: [&str; N], cwd: &Path) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git output");
+        assert!(output.status.success(), "git failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
 }
