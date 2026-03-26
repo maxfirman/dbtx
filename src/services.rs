@@ -32,6 +32,7 @@ pub enum InvocationCommand {
     Ls,
     Test,
     Seed,
+    Release,
 }
 
 impl InvocationCommand {
@@ -42,11 +43,12 @@ impl InvocationCommand {
             Self::Ls => "ls",
             Self::Test => "test",
             Self::Seed => "seed",
+            Self::Release => "release",
         }
     }
 
     pub fn persists_state(self) -> bool {
-        !matches!(self, Self::Ls)
+        !matches!(self, Self::Ls | Self::Release)
     }
 }
 
@@ -86,9 +88,18 @@ pub struct RemoteExecutionSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReleaseValidationSpec {
+    pub repo_url: String,
+    pub git_ref: Option<String>,
+    pub git_commit_sha: Option<String>,
+    pub git_branch: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub enum PreparedExecutionSpec {
     Local(LocalExecutionSpec),
     Remote(RemoteExecutionSpec),
+    ReleaseValidation(ReleaseValidationSpec),
 }
 
 #[derive(Debug, Clone)]
@@ -165,7 +176,8 @@ pub struct EnvironmentReleaseRequest {
     pub project: String,
     pub slug: String,
     pub git_branch: Option<String>,
-    pub git_commit_sha: String,
+    pub git_commit_sha: Option<String>,
+    pub git_ref: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +186,13 @@ pub struct EnvironmentRollbackRequest {
     pub project: String,
     pub slug: String,
     pub version_id: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ReleaseTargetRequest {
+    git_branch: Option<String>,
+    git_commit_sha: Option<String>,
+    git_ref: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -396,12 +415,20 @@ impl<'a> EnvironmentService<'a> {
                 project.mode,
             ));
         }
+        let target = validate_release_target_request(ReleaseTargetRequest {
+            git_branch: request.git_branch,
+            git_commit_sha: request.git_commit_sha,
+            git_ref: request.git_ref,
+        })?;
         self.db
             .release_environment(EnvironmentReleaseInput {
                 project: project.project_id,
                 slug: request.slug,
-                git_branch: request.git_branch,
-                git_commit_sha: request.git_commit_sha,
+                git_branch: target.git_branch,
+                git_commit_sha: target
+                    .git_commit_sha
+                    .or(target.git_ref)
+                    .expect("validated release target"),
             })
             .await
     }
@@ -790,6 +817,44 @@ impl<'a> InvocationService<'a> {
                 state_manifest,
             }),
             persistence,
+            worker_queue: environment.worker_queue.clone(),
+            project_id: project.id,
+            environment_id: environment.id,
+        })
+    }
+
+    pub async fn prepare_release_validation(
+        &self,
+        args: Vec<OsString>,
+        project_id: &str,
+        environment_slug: &str,
+    ) -> AppResult<LocalExecutionPrepared> {
+        self.db.require_current_schema().await?;
+        let project = self.db.get_project_by_project_id(project_id).await?;
+        let environment = self
+            .db
+            .get_environment(project_id, environment_slug)
+            .await?;
+
+        if project.mode != "remote" {
+            return Err(AppError::RemoteExecutionRequiresRemoteProject(
+                project.project_id.clone(),
+                project.mode.clone(),
+            ));
+        }
+        let repo_url = project.git_repo_url.clone().ok_or_else(|| {
+            AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone())
+        })?;
+        let target = parse_release_target_args(&args)?;
+
+        Ok(LocalExecutionPrepared {
+            spec: PreparedExecutionSpec::ReleaseValidation(ReleaseValidationSpec {
+                repo_url,
+                git_ref: target.git_ref,
+                git_commit_sha: target.git_commit_sha,
+                git_branch: target.git_branch,
+            }),
+            persistence: None,
             worker_queue: environment.worker_queue.clone(),
             project_id: project.id,
             environment_id: environment.id,
@@ -1194,6 +1259,72 @@ pub fn validate_remote_project_root(project_root: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_release_target_request(
+    request: ReleaseTargetRequest,
+) -> AppResult<ReleaseTargetRequest> {
+    if request.git_commit_sha.is_some() == request.git_ref.is_some() {
+        return Err(AppError::InvalidReleaseTarget(
+            "provide exactly one of --git-commit-sha or --git-ref".to_string(),
+        ));
+    }
+    if let Some(git_commit_sha) = request.git_commit_sha.as_deref()
+        && !is_valid_release_commit_sha(git_commit_sha)
+    {
+        return Err(AppError::InvalidReleaseTarget(format!(
+            "invalid git commit sha '{git_commit_sha}': expected 7 to 64 hexadecimal characters"
+        )));
+    }
+    Ok(request)
+}
+
+fn is_valid_release_commit_sha(value: &str) -> bool {
+    let trimmed = value.trim();
+    (7..=64).contains(&trimmed.len()) && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn parse_release_target_args(args: &[OsString]) -> AppResult<ReleaseTargetRequest> {
+    let mut git_branch = None;
+    let mut git_commit_sha = None;
+    let mut git_ref = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].to_string_lossy().as_ref() {
+            "--git-branch" => {
+                idx += 1;
+                let value = args.get(idx).ok_or_else(|| {
+                    AppError::InvalidReleaseTarget("--git-branch requires a value".to_string())
+                })?;
+                git_branch = Some(value.to_string_lossy().into_owned());
+            }
+            "--git-commit-sha" => {
+                idx += 1;
+                let value = args.get(idx).ok_or_else(|| {
+                    AppError::InvalidReleaseTarget("--git-commit-sha requires a value".to_string())
+                })?;
+                git_commit_sha = Some(value.to_string_lossy().into_owned());
+            }
+            "--git-ref" => {
+                idx += 1;
+                let value = args.get(idx).ok_or_else(|| {
+                    AppError::InvalidReleaseTarget("--git-ref requires a value".to_string())
+                })?;
+                git_ref = Some(value.to_string_lossy().into_owned());
+            }
+            other => {
+                return Err(AppError::InvalidReleaseTarget(format!(
+                    "unsupported release argument '{other}'"
+                )));
+            }
+        }
+        idx += 1;
+    }
+    validate_release_target_request(ReleaseTargetRequest {
+        git_branch,
+        git_commit_sha,
+        git_ref,
+    })
+}
+
 fn local_machine_scope() -> AppResult<String> {
     if let Ok(value) = std::env::var("DBTX_LOCAL_MACHINE_ID")
         && !value.trim().is_empty()
@@ -1231,4 +1362,58 @@ fn local_machine_scope() -> AppResult<String> {
 fn short_hash(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     format!("{digest:x}").chars().take(20).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_valid_release_commit_sha, parse_release_target_args};
+    use std::ffi::OsString;
+
+    #[test]
+    fn release_commit_sha_requires_hex_shape() {
+        assert!(is_valid_release_commit_sha("deadbeef"));
+        assert!(is_valid_release_commit_sha(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!is_valid_release_commit_sha("abc123"));
+        assert!(!is_valid_release_commit_sha("main"));
+        assert!(!is_valid_release_commit_sha("dead beef"));
+    }
+
+    #[test]
+    fn release_target_args_reject_malformed_commit_sha() {
+        let args = vec![
+            OsString::from("--git-commit-sha"),
+            OsString::from("not-a-sha"),
+        ];
+        let error = parse_release_target_args(&args).expect_err("expected malformed sha error");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid git commit sha 'not-a-sha'")
+        );
+    }
+
+    #[test]
+    fn release_target_args_rejects_missing_and_duplicate_target() {
+        let error = parse_release_target_args(&[]).expect_err("expected missing target error");
+        assert!(
+            error
+                .to_string()
+                .contains("provide exactly one of --git-commit-sha or --git-ref")
+        );
+
+        let args = vec![
+            OsString::from("--git-commit-sha"),
+            OsString::from("deadbeef"),
+            OsString::from("--git-ref"),
+            OsString::from("main"),
+        ];
+        let error = parse_release_target_args(&args).expect_err("expected duplicate target error");
+        assert!(
+            error
+                .to_string()
+                .contains("provide exactly one of --git-commit-sha or --git-ref")
+        );
+    }
 }

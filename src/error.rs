@@ -107,6 +107,8 @@ pub enum AppError {
     InvalidProjectMode(String),
     #[error("invalid environment status '{0}'")]
     InvalidEnvironmentStatus(String),
+    #[error("invalid release target: {0}")]
+    InvalidReleaseTarget(String),
     #[error("environment '{1}' for remote project '{0}' requires --git-commit-sha")]
     RemoteProjectEnvironmentRequiresSha(String, String),
     #[error(

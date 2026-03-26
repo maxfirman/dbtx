@@ -930,6 +930,7 @@ async fn environment_release(
             slug: request.slug,
             git_branch: request.git_branch,
             git_commit_sha: request.git_commit_sha,
+            git_ref: request.git_ref,
         })
         .await?;
     info!(
@@ -1040,6 +1041,11 @@ async fn invocation_create(
     };
     let prepared = match request.execution_mode {
         crate::api::InvocationExecutionModeApi::Local => {
+            if matches!(request.command, InvocationCommandApi::Release) {
+                return Err(ApiError(AppError::UnsupportedLocalExecution(
+                    "release".to_string(),
+                )));
+            }
             let current_dir =
                 request
                     .current_dir
@@ -1070,15 +1076,28 @@ async fn invocation_create(
                 .environment_slug
                 .as_deref()
                 .ok_or(AppError::RemoteExecutionRequiresEnvironmentSlug)?;
-            service
-                .prepare_remote_execution(
-                    invocation_id,
-                    map_invocation_command(request.command),
-                    request.args.iter().cloned().map(Into::into).collect(),
-                    project_id,
-                    environment_slug,
-                )
-                .await?
+            match request.command {
+                InvocationCommandApi::Release => {
+                    service
+                        .prepare_release_validation(
+                            request.args.iter().cloned().map(Into::into).collect(),
+                            project_id,
+                            environment_slug,
+                        )
+                        .await?
+                }
+                _ => {
+                    service
+                        .prepare_remote_execution(
+                            invocation_id,
+                            map_invocation_command(request.command),
+                            request.args.iter().cloned().map(Into::into).collect(),
+                            project_id,
+                            environment_slug,
+                        )
+                        .await?
+                }
+            }
         }
     };
     let execution_spec = match prepared.spec {
@@ -1106,6 +1125,14 @@ async fn invocation_create(
             profiles_yml: spec.profiles_yml,
             state_manifest: spec.state_manifest,
         },
+        PreparedExecutionSpec::ReleaseValidation(spec) => {
+            InvocationExecutionSpecApi::ReleaseValidation {
+                repo_url: spec.repo_url,
+                git_ref: spec.git_ref,
+                git_commit_sha: spec.git_commit_sha,
+                git_branch: spec.git_branch,
+            }
+        }
     };
     let worker_queue = request
         .worker_queue
@@ -1550,6 +1577,7 @@ fn map_invocation_command(command: InvocationCommandApi) -> InvocationCommand {
         InvocationCommandApi::Ls => InvocationCommand::Ls,
         InvocationCommandApi::Test => InvocationCommand::Test,
         InvocationCommandApi::Seed => InvocationCommand::Seed,
+        InvocationCommandApi::Release => InvocationCommand::Release,
     }
 }
 
@@ -1577,6 +1605,7 @@ impl IntoResponse for ApiError {
             | AppError::UserProfilesDirNotAllowed
             | AppError::InvalidProjectMode(_)
             | AppError::InvalidEnvironmentStatus(_)
+            | AppError::InvalidReleaseTarget(_)
             | AppError::RemoteProjectEnvironmentRequiresSha(_, _)
             | AppError::InvalidRemoteProjectCommitSha(_, _, _)
             | AppError::InvalidProfileConfig(_)

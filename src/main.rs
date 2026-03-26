@@ -356,22 +356,60 @@ async fn handle_environment_command(
             slug,
             git_branch,
             git_commit_sha,
+            git_ref,
         } => {
-            let environment = client
-                .environment_release(
+            print_release_start(
+                &project,
+                &slug,
+                git_ref.as_deref(),
+                git_commit_sha.as_deref(),
+            );
+            if git_commit_sha.is_none() == git_ref.is_none() {
+                return Err(AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "provide exactly one of --git-commit-sha or --git-ref",
+                )));
+            }
+            let release_args = build_release_validation_args(
+                git_branch.clone(),
+                git_commit_sha.clone(),
+                git_ref.clone(),
+            );
+            let response = client
+                .invocation_create(api::InvocationCreateApiRequest {
+                    command: api::InvocationCommandApi::Release,
+                    args: release_args,
+                    current_dir: None,
+                    project_id: Some(project.clone()),
+                    environment_slug: Some(slug.clone()),
+                    execution_mode: InvocationExecutionModeApi::Server,
+                    worker_queue: None,
+                })
+                .await?;
+            client
+                .stream_invocation_events(response.invocation_id, render_release_event)
+                .await?;
+            let status = wait_for_invocation_completion(&client, response.invocation_id).await?;
+            if !matches!(status.status, api::InvocationLifecycleStatus::Succeeded) {
+                print_release_failure(
                     &project,
                     &slug,
-                    api::EnvironmentReleaseApiRequest {
-                        current_dir: current_dir.display().to_string(),
-                        project: project.clone(),
-                        slug: slug.clone(),
-                        git_branch,
-                        git_commit_sha,
-                    },
-                )
+                    status
+                        .error
+                        .as_deref()
+                        .unwrap_or("release validation failed"),
+                );
+                return Err(AppError::Io(std::io::Error::other(
+                    status
+                        .error
+                        .unwrap_or_else(|| "release validation failed".to_string()),
+                )));
+            }
+            let environment = client
+                .environment_show_by_id(&project, &slug)
                 .await?
                 .environment;
-            print_environment(&environment);
+            print_release_success(&project, &slug, environment.git_commit_sha.as_deref());
         }
         EnvironmentCommand::History { project, slug } => {
             for version in client.environment_history(&project, &slug).await?.versions {
@@ -577,6 +615,105 @@ fn render_invocation_event(event: api::InvocationEvent) {
     }
 }
 
+fn render_release_event(event: api::InvocationEvent) {
+    let use_color = should_use_color();
+    match event.event_type.as_str() {
+        "invocation.started" => {
+            println!(
+                "{}",
+                style(
+                    "  Preparing release validation…",
+                    &[CliStyle::Dim],
+                    use_color
+                )
+            );
+        }
+        "invocation.completed" => {}
+        _ => {
+            if let Some(text) = event.text {
+                let text = text.trim();
+                if text.is_empty() {
+                    return;
+                }
+                let bullet = style("  •", &[CliStyle::Cyan, CliStyle::Bold], use_color);
+                let body = match event.stream.as_deref() {
+                    Some("stderr") => style(text, &[CliStyle::Yellow], use_color),
+                    _ => style(text, &[], use_color),
+                };
+                println!("{bullet} {body}");
+            }
+        }
+    }
+}
+
+fn print_release_start(
+    project: &str,
+    slug: &str,
+    git_ref: Option<&str>,
+    git_commit_sha: Option<&str>,
+) {
+    let use_color = should_use_color();
+    println!(
+        "{}",
+        style("dbtx release", &[CliStyle::Cyan, CliStyle::Bold], use_color)
+    );
+    let target = git_ref
+        .map(|value| format!("ref {}", style(value, &[CliStyle::Bold], use_color)))
+        .or_else(|| {
+            git_commit_sha
+                .map(|value| format!("commit {}", style(value, &[CliStyle::Bold], use_color)))
+        })
+        .unwrap_or_else(|| "unknown target".to_string());
+    println!(
+        "  {} {}  {} {}",
+        style("Project", &[CliStyle::Dim], use_color),
+        style(project, &[CliStyle::Bold], use_color),
+        style("Environment", &[CliStyle::Dim], use_color),
+        style(slug, &[CliStyle::Bold], use_color),
+    );
+    println!(
+        "  {} {target}",
+        style("Target", &[CliStyle::Dim], use_color)
+    );
+}
+
+fn print_release_success(project: &str, slug: &str, git_commit_sha: Option<&str>) {
+    let use_color = should_use_color();
+    let resolved = git_commit_sha.unwrap_or("");
+    println!(
+        "{} {} {} {} {} {}",
+        style("✅", &[], use_color),
+        style(
+            "Release succeeded.",
+            &[CliStyle::Green, CliStyle::Bold],
+            use_color
+        ),
+        style(project, &[CliStyle::Bold], use_color),
+        style("/", &[CliStyle::Dim], use_color),
+        style(slug, &[CliStyle::Bold], use_color),
+        style(
+            &format!("-> {resolved}"),
+            &[CliStyle::Green, CliStyle::Bold],
+            use_color
+        ),
+    );
+}
+
+fn print_release_failure(project: &str, slug: &str, error: &str) {
+    let use_color = should_use_color();
+    eprintln!(
+        "{} {} {} {}",
+        style("❌", &[], use_color),
+        style(
+            "Release failed.",
+            &[CliStyle::Yellow, CliStyle::Bold],
+            use_color
+        ),
+        style(&format!("{project}/{slug}"), &[CliStyle::Bold], use_color),
+        style(error, &[CliStyle::Yellow], use_color),
+    );
+}
+
 async fn wait_for_invocation_completion(
     client: &client::DaemonClient,
     invocation_id: uuid::Uuid,
@@ -672,6 +809,7 @@ async fn create_invocation(
                 InvocationCommand::Ls => api::InvocationCommandApi::Ls,
                 InvocationCommand::Test => api::InvocationCommandApi::Test,
                 InvocationCommand::Seed => api::InvocationCommandApi::Seed,
+                InvocationCommand::Release => api::InvocationCommandApi::Release,
             },
             args: args
                 .into_iter()
@@ -684,6 +822,27 @@ async fn create_invocation(
             worker_queue,
         })
         .await
+}
+
+fn build_release_validation_args(
+    git_branch: Option<String>,
+    git_commit_sha: Option<String>,
+    git_ref: Option<String>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(git_branch) = git_branch {
+        args.push("--git-branch".to_string());
+        args.push(git_branch);
+    }
+    if let Some(git_commit_sha) = git_commit_sha {
+        args.push("--git-commit-sha".to_string());
+        args.push(git_commit_sha);
+    }
+    if let Some(git_ref) = git_ref {
+        args.push("--git-ref".to_string());
+        args.push(git_ref);
+    }
+    args
 }
 
 fn print_project(project: &ProjectRecord) {
