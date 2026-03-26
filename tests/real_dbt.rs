@@ -46,11 +46,7 @@ async fn dbtx_environment_uses_stored_target_name_when_slug_differs() {
     )
     .expect("write marker model");
 
-    assert_success(&run_dbtx(
-        db.service_url(),
-        &project,
-        &["project", "init"],
-    ));
+    assert_success(&run_dbtx(db.service_url(), &project, &["project", "init"]));
     assert_success(&run_dbtx(
         db.service_url(),
         &project,
@@ -1320,12 +1316,7 @@ fn run_dbtx_with_environment_slug(
     run_dbtx_in_cwd(service_url, project.path(), environment_slug, args)
 }
 
-fn run_dbtx_in_cwd(
-    service_url: &str,
-    cwd: &Path,
-    environment_slug: &str,
-    args: &[&str],
-) -> Output {
+fn run_dbtx_in_cwd(service_url: &str, cwd: &Path, environment_slug: &str, args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx"));
     command.args(strip_profiles_dir_args(args));
     command.env("DBTX_SERVICE_URL", service_url);

@@ -868,8 +868,8 @@ fn parse_cancel_state_filter(value: Option<&str>) -> AppResult<Option<Invocation
 mod tests {
     use dbtx::error::AppError;
     use dbtx::services::{
-        infer_local_project_defaults, infer_remote_project_defaults, read_dbt_project_name_from_root,
-        relative_project_root, validate_remote_project_root,
+        infer_local_project_defaults, infer_remote_project_defaults,
+        read_dbt_project_name_from_root, relative_project_root, validate_remote_project_root,
     };
     use std::process::Command;
     use tempfile::TempDir;
@@ -934,10 +934,16 @@ mod tests {
         let project_root_b = temp_b.path().join("analytics");
         std::fs::create_dir_all(&project_root_a).expect("project root a");
         std::fs::create_dir_all(&project_root_b).expect("project root b");
-        std::fs::write(project_root_a.join("dbt_project.yml"), "name: jaffle_shop_project\n")
-            .expect("dbt project a");
-        std::fs::write(project_root_b.join("dbt_project.yml"), "name: jaffle_shop_project\n")
-            .expect("dbt project b");
+        std::fs::write(
+            project_root_a.join("dbt_project.yml"),
+            "name: jaffle_shop_project\n",
+        )
+        .expect("dbt project a");
+        std::fs::write(
+            project_root_b.join("dbt_project.yml"),
+            "name: jaffle_shop_project\n",
+        )
+        .expect("dbt project b");
 
         run_git_cmd(["init"], temp_a.path());
         run_git_cmd(["init"], temp_b.path());

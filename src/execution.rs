@@ -2,6 +2,7 @@ use crate::api::{InvocationExecutionModeApi, InvocationLifecycleStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use utoipa::ToSchema;
 
 pub const LOCAL_CLAIM_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 pub const SERVER_CLAIM_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -22,21 +23,21 @@ pub fn heartbeat_stale_timeout(mode: InvocationExecutionModeApi) -> Duration {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     Server,
     Local,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub enum ExecutionEventKind {
     StdoutLine,
     StderrLine,
     DbtLog,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ExecutionEvent {
     pub kind: ExecutionEventKind,
     pub occurred_at: DateTime<Utc>,
@@ -48,7 +49,7 @@ pub struct ExecutionEvent {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ExecutionCompletion {
     pub status: InvocationLifecycleStatus,
     pub exit_code: i32,

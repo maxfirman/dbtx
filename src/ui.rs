@@ -6,11 +6,11 @@ use crate::db::{EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
 use crate::error::{AppError, AppResult};
 use crate::server::AppState;
 use askama::Template;
+use axum::Router;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -52,9 +52,7 @@ impl IntoResponse for UiError {
         let (status, title) = match &self.0 {
             AppError::ProjectIdNotFound(_)
             | AppError::EnvironmentNotFound(_, _)
-            | AppError::EnvironmentVersionNotFound(_, _, _) => {
-                (StatusCode::NOT_FOUND, "Not Found")
-            }
+            | AppError::EnvironmentVersionNotFound(_, _, _) => (StatusCode::NOT_FOUND, "Not Found"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "Server Error"),
         };
         let body = render_template(&ErrorTemplate {
@@ -156,7 +154,10 @@ async fn invocations_index(
             limit: query.limit.or(Some(100)),
         })
         .await?;
-    let rows = invocations.iter().map(invocation_summary_view).collect::<Vec<_>>();
+    let rows = invocations
+        .iter()
+        .map(invocation_summary_view)
+        .collect::<Vec<_>>();
     if is_htmx(&headers) {
         return render_template(&InvocationTableTemplate { invocations: rows });
     }
@@ -184,7 +185,10 @@ async fn invocations_index(
                 .map(cancel_state_value)
                 .unwrap_or_default()
                 .to_string(),
-            limit: query.limit.map(|value| value.to_string()).unwrap_or_default(),
+            limit: query
+                .limit
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
         },
         invocations: rows,
     })
@@ -265,8 +269,15 @@ async fn environment_detail(
         .await?
         .into_iter()
         .find(|environment| environment.slug == slug)
-        .ok_or_else(|| UiError(AppError::EnvironmentNotFound(project.project_id.clone(), slug.clone())))?;
-    let history = db.list_environment_versions(&project.project_id, &slug).await?;
+        .ok_or_else(|| {
+            UiError(AppError::EnvironmentNotFound(
+                project.project_id.clone(),
+                slug.clone(),
+            ))
+        })?;
+    let history = db
+        .list_environment_versions(&project.project_id, &slug)
+        .await?;
     let panel = EnvironmentPanelTemplate {
         project: project_summary_view(&project),
         environment: environment_detail_view(&environment),
@@ -318,13 +329,9 @@ async fn environment_release(
     .await?;
 
     if is_htmx(&headers) {
-        return environment_detail(
-            State(state),
-            htmx_headers(),
-            Path((project_id, slug)),
-        )
-        .await
-        .map(IntoResponse::into_response);
+        return environment_detail(State(state), htmx_headers(), Path((project_id, slug)))
+            .await
+            .map(IntoResponse::into_response);
     }
 
     Ok(Redirect::to(&format!("/ui/projects/{project_id}/environments/{slug}")).into_response())
@@ -354,13 +361,9 @@ async fn environment_rollback(
         .await?;
 
     if is_htmx(&headers) {
-        return environment_detail(
-            State(state),
-            htmx_headers(),
-            Path((project_id, slug)),
-        )
-        .await
-        .map(IntoResponse::into_response);
+        return environment_detail(State(state), htmx_headers(), Path((project_id, slug)))
+            .await
+            .map(IntoResponse::into_response);
     }
 
     Ok(Redirect::to(&format!("/ui/projects/{project_id}/environments/{slug}")).into_response())

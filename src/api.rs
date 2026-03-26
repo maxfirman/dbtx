@@ -2,51 +2,52 @@ use crate::db::{AppliedMigration, EnvironmentRecord, EnvironmentVersionRecord, P
 use crate::execution::{ExecutionCompletion, ExecutionEvent};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MigrateResponse {
     pub applied: Vec<AppliedMigration>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct HealthResponse {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReadyResponse {
     pub status: String,
     pub database: String,
     pub schema: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProjectResponse {
     pub project: ProjectRecord,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProjectsResponse {
     pub projects: Vec<ProjectRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentResponse {
     pub environment: EnvironmentRecord,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentsResponse {
     pub environments: Vec<EnvironmentRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentVersionsResponse {
     pub versions: Vec<EnvironmentVersionRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProjectInitApiRequest {
     pub current_dir: String,
     pub mode: Option<String>,
@@ -56,7 +57,7 @@ pub struct ProjectInitApiRequest {
     pub force: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProjectUpdateApiRequest {
     pub current_dir: String,
     pub mode: Option<String>,
@@ -65,13 +66,13 @@ pub struct ProjectUpdateApiRequest {
     pub default_branch: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProjectShowApiRequest {
     pub current_dir: String,
     pub project: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentCreateApiRequest {
     pub current_dir: String,
     pub project: Option<String>,
@@ -86,7 +87,7 @@ pub struct EnvironmentCreateApiRequest {
     pub schema_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentUpdateApiRequest {
     pub current_dir: String,
     pub project: String,
@@ -102,7 +103,7 @@ pub struct EnvironmentUpdateApiRequest {
     pub threads: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentReleaseApiRequest {
     pub current_dir: String,
     pub project: String,
@@ -111,7 +112,7 @@ pub struct EnvironmentReleaseApiRequest {
     pub git_commit_sha: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentRollbackApiRequest {
     pub current_dir: String,
     pub project: String,
@@ -119,7 +120,7 @@ pub struct EnvironmentRollbackApiRequest {
     pub version_id: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationCreateApiRequest {
     pub command: InvocationCommandApi,
     pub args: Vec<String>,
@@ -130,7 +131,7 @@ pub struct InvocationCreateApiRequest {
     pub worker_queue: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationCommandApi {
     Build,
@@ -140,26 +141,26 @@ pub enum InvocationCommandApi {
     Seed,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationExecutionModeApi {
     Server,
     Local,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationCreateResponse {
     pub invocation_id: Uuid,
     pub execution_mode: InvocationExecutionModeApi,
     pub worker_queue: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationsResponse {
     pub invocations: Vec<InvocationStatusResponse>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
 pub struct InvocationListApiRequest {
     pub status: Option<InvocationLifecycleStatus>,
     pub execution_mode: Option<InvocationExecutionModeApi>,
@@ -169,17 +170,17 @@ pub struct InvocationListApiRequest {
     pub limit: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationCleanupApiRequest {
     pub older_than_seconds: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationCleanupResponse {
     pub deleted: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InvocationExecutionSpecApi {
     Local {
@@ -200,7 +201,7 @@ pub enum InvocationExecutionSpecApi {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationClaimResponse {
     pub invocation_id: Uuid,
     pub worker_id: String,
@@ -209,28 +210,28 @@ pub struct InvocationClaimResponse {
     pub execution_spec: InvocationExecutionSpecApi,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationClaimNextApiRequest {
     pub execution_mode: Option<InvocationExecutionModeApi>,
     pub worker_id: String,
     pub worker_queue: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationEventBatchApiRequest {
     pub worker_id: String,
     pub lease_token: Uuid,
     pub events: Vec<ExecutionEvent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationCompleteApiRequest {
     pub worker_id: String,
     pub lease_token: Uuid,
     pub completion: ExecutionCompletion,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationStatusResponse {
     pub invocation_id: Uuid,
     pub execution_mode: InvocationExecutionModeApi,
@@ -249,7 +250,7 @@ pub struct InvocationStatusResponse {
     pub claimed_by: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationWorkerHealthApi {
     Unclaimed,
@@ -258,7 +259,7 @@ pub enum InvocationWorkerHealthApi {
     Completed,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationCancelStateApi {
     None,
@@ -266,7 +267,7 @@ pub enum InvocationCancelStateApi {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationLifecycleStatus {
     Running,
@@ -275,18 +276,18 @@ pub enum InvocationLifecycleStatus {
     Canceled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationHeartbeatApiRequest {
     pub worker_id: String,
     pub lease_token: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationHeartbeatResponse {
     pub cancel_requested: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WorkerStatusResponse {
     pub worker_id: String,
     pub execution_mode: InvocationExecutionModeApi,
@@ -296,12 +297,12 @@ pub struct WorkerStatusResponse {
     pub health: InvocationWorkerHealthApi,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WorkersResponse {
     pub workers: Vec<WorkerStatusResponse>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct QueueStatusResponse {
     pub worker_queue: String,
     pub execution_mode: InvocationExecutionModeApi,
@@ -311,15 +312,15 @@ pub struct QueueStatusResponse {
     pub oldest_pending_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct QueuesResponse {
     pub queues: Vec<QueueStatusResponse>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
 pub struct InvocationCancelApiRequest {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InvocationEvent {
     pub event_type: String,
     pub timestamp: DateTime<Utc>,
@@ -330,4 +331,9 @@ pub struct InvocationEvent {
     pub level: Option<String>,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ApiErrorResponse {
+    pub error: String,
 }

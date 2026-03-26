@@ -56,7 +56,14 @@ async fn project_and_environment_cli_round_trip() {
     let output = run_dbtx_in_dir(
         db.service_url(),
         repo.project_dir(),
-        &["environment", "create", "--slug", "staging", "--target", "dev"],
+        &[
+            "environment",
+            "create",
+            "--slug",
+            "staging",
+            "--target",
+            "dev",
+        ],
     );
     assert_success(&output);
 
@@ -98,9 +105,9 @@ async fn project_and_environment_cli_round_trip() {
 
     let environment_row =
         sqlx::query("SELECT slug, target_name, status FROM environments WHERE slug = 'staging'")
-    .fetch_one(db.pool())
-    .await
-    .expect("environment row");
+            .fetch_one(db.pool())
+            .await
+            .expect("environment row");
     assert_eq!(environment_row.get::<String, _>("slug"), "staging");
     assert_eq!(environment_row.get::<String, _>("target_name"), "dev");
     assert_eq!(environment_row.get::<String, _>("status"), "active");
@@ -378,12 +385,11 @@ async fn remote_project_environment_allows_commit_updates() {
     );
     assert_success(&update);
 
-    let commit_sha: Option<String> = sqlx::query_scalar(
-        "SELECT git_commit_sha FROM environments WHERE slug = 'ci-main'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("environment commit sha");
+    let commit_sha: Option<String> =
+        sqlx::query_scalar("SELECT git_commit_sha FROM environments WHERE slug = 'ci-main'")
+            .fetch_one(db.pool())
+            .await
+            .expect("environment commit sha");
     assert_eq!(commit_sha.as_deref(), Some("def456"));
 }
 
@@ -457,12 +463,11 @@ async fn remote_environment_release_and_rollback_record_forward_history() {
         ],
     ));
 
-    let commit_sha: Option<String> = sqlx::query_scalar(
-        "SELECT git_commit_sha FROM environments WHERE slug = 'ci-main'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("environment commit sha");
+    let commit_sha: Option<String> =
+        sqlx::query_scalar("SELECT git_commit_sha FROM environments WHERE slug = 'ci-main'")
+            .fetch_one(db.pool())
+            .await
+            .expect("environment commit sha");
     assert_eq!(commit_sha.as_deref(), Some("abc123"));
 
     let reasons: Vec<String> = sqlx::query_scalar(
@@ -519,7 +524,14 @@ async fn remote_invocation_requires_remote_project_mode() {
     assert_success(&run_dbtx_in_dir(
         db.service_url(),
         repo.project_dir(),
-        &["environment", "create", "--slug", "remote", "--target", "dev"],
+        &[
+            "environment",
+            "create",
+            "--slug",
+            "remote",
+            "--target",
+            "dev",
+        ],
     ));
 
     assert!(
@@ -573,7 +585,6 @@ async fn remote_invocation_requires_commit_pinned_immutable_environment() {
             .await
             .is_err()
     );
-
 }
 
 #[tokio::test]

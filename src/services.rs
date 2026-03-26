@@ -2,9 +2,9 @@ use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
     CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, EnvironmentReleaseInput,
     EnvironmentVersionRecord, GitState, LocalEnvironmentUpsertInput, ProjectRecord,
-    RunFinalization, RunStart, UpdateEnvironmentInput,
-    append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
-    read_dbt_project_name, read_git_state, spawn_dbt_child,
+    RunFinalization, RunStart, UpdateEnvironmentInput, append_invocation_id, append_profiles_dir,
+    append_state_dir, build_generated_profiles, read_dbt_project_name, read_git_state,
+    spawn_dbt_child,
 };
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
@@ -265,7 +265,11 @@ impl<'a> ProjectService<'a> {
         self.db.require_current_schema().await?;
         let project_id = match project {
             Some(project_id) => project_id,
-            None => self.infer_project_defaults(current_dir, None, None, None, None).await?.project_id,
+            None => {
+                self.infer_project_defaults(current_dir, None, None, None, None)
+                    .await?
+                    .project_id
+            }
         };
         self.db.get_project_by_project_id(&project_id).await
     }
@@ -278,14 +282,21 @@ impl<'a> ProjectService<'a> {
         project_root: Option<&str>,
         default_branch: Option<&str>,
     ) -> AppResult<InferredProjectInput> {
-        let local = infer_local_project_defaults(current_dir, git_repo_url, project_root, default_branch)?;
-        let remote = infer_remote_project_defaults(current_dir, git_repo_url, project_root, default_branch).ok();
+        let local =
+            infer_local_project_defaults(current_dir, git_repo_url, project_root, default_branch)?;
+        let remote =
+            infer_remote_project_defaults(current_dir, git_repo_url, project_root, default_branch)
+                .ok();
 
         let chosen_mode = match explicit_mode {
             Some(mode) => mode.to_string(),
             None => {
                 if let Some(remote_input) = remote.as_ref()
-                    && self.db.get_project_by_project_id(&remote_input.project_id).await.is_ok()
+                    && self
+                        .db
+                        .get_project_by_project_id(&remote_input.project_id)
+                        .await
+                        .is_ok()
                 {
                     "remote".to_string()
                 } else {
@@ -405,7 +416,9 @@ impl<'a> EnvironmentService<'a> {
         let project = self
             .resolve_project_identifier(Some(project), current_dir)
             .await?;
-        self.db.list_environment_versions(&project.project_id, &slug).await
+        self.db
+            .list_environment_versions(&project.project_id, &slug)
+            .await
     }
 
     pub async fn rollback(
@@ -474,9 +487,16 @@ impl<'a> EnvironmentService<'a> {
         }
     }
 
-    async fn load_or_create_inferred_project(&self, project_dir: &Path) -> AppResult<ProjectRecord> {
+    async fn load_or_create_inferred_project(
+        &self,
+        project_dir: &Path,
+    ) -> AppResult<ProjectRecord> {
         let project_input = infer_local_project_defaults(project_dir, None, None, None)?;
-        match self.db.get_project_by_project_id(&project_input.project_id).await {
+        match self
+            .db
+            .get_project_by_project_id(&project_input.project_id)
+            .await
+        {
             Ok(project) => Ok(project),
             Err(AppError::ProjectIdNotFound(_)) => {
                 self.db
@@ -800,9 +820,16 @@ impl<'a> InvocationService<'a> {
         Ok((project, environment))
     }
 
-    async fn load_or_create_inferred_project(&self, project_dir: &Path) -> AppResult<ProjectRecord> {
+    async fn load_or_create_inferred_project(
+        &self,
+        project_dir: &Path,
+    ) -> AppResult<ProjectRecord> {
         let project_input = infer_local_project_defaults(project_dir, None, None, None)?;
-        match self.db.get_project_by_project_id(&project_input.project_id).await {
+        match self
+            .db
+            .get_project_by_project_id(&project_input.project_id)
+            .await
+        {
             Ok(project) => Ok(project),
             Err(AppError::ProjectIdNotFound(_)) => {
                 self.db
@@ -1100,7 +1127,8 @@ pub fn infer_remote_project_defaults(
         .map(ToString::to_string)
         .or(git_state.repo_url)
         .ok_or(AppError::RemoteProjectRequiresGitRepo)?;
-    let repo_root = crate::db::git_repo_root(current_dir).map_err(|_| AppError::RemoteProjectRequiresGitRepo)?;
+    let repo_root = crate::db::git_repo_root(current_dir)
+        .map_err(|_| AppError::RemoteProjectRequiresGitRepo)?;
     let inferred_project_root = project_root
         .map(ToString::to_string)
         .unwrap_or_else(|| relative_project_root(&repo_root, &canonical_project_dir));
@@ -1157,7 +1185,10 @@ pub fn validate_remote_project_root(project_root: &str) -> AppResult<()> {
     if path.is_absolute() {
         return Err(AppError::InvalidRemoteProjectRoot(project_root.to_string()));
     }
-    if path.components().any(|component| matches!(component, Component::ParentDir)) {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
         return Err(AppError::InvalidRemoteProjectRoot(project_root.to_string()));
     }
     Ok(())

@@ -110,6 +110,10 @@ pub enum AppError {
     #[error("environment '{1}' for remote project '{0}' requires --git-commit-sha")]
     RemoteProjectEnvironmentRequiresSha(String, String),
     #[error(
+        "environment '{1}' for remote project '{0}' has invalid git_commit_sha '{2}': expected a commit SHA"
+    )]
+    InvalidRemoteProjectCommitSha(String, String, String),
+    #[error(
         "registered project metadata does not match the current repo state for project id '{0}'. Run `dbtx project update` to sync the database, or `dbtx project init --force` to re-initialize the project."
     )]
     ProjectValidationFailed(String),

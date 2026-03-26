@@ -22,11 +22,12 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AppliedMigration {
     pub version: i64,
     pub description: String,
@@ -37,7 +38,7 @@ pub struct Db {
     pool: PgPool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProjectRecord {
     pub id: i64,
     pub project_id: String,
@@ -49,7 +50,7 @@ pub struct ProjectRecord {
     pub metadata: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentRecord {
     pub id: i64,
     pub project_id: i64,
@@ -73,7 +74,7 @@ pub struct EnvironmentRecord {
     pub metadata: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentVersionRecord {
     pub id: i64,
     pub environment_id: i64,
@@ -699,7 +700,10 @@ impl Db {
         .bind(environment.id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(environment_version_record_from_row).collect())
+        Ok(rows
+            .iter()
+            .map(environment_version_record_from_row)
+            .collect())
     }
 
     pub async fn rollback_environment_to_version(
@@ -724,7 +728,13 @@ impl Db {
         .bind(existing.id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| AppError::EnvironmentVersionNotFound(project.project_id.clone(), slug.to_string(), version_id))?;
+        .ok_or_else(|| {
+            AppError::EnvironmentVersionNotFound(
+                project.project_id.clone(),
+                slug.to_string(),
+                version_id,
+            )
+        })?;
         let version = environment_version_record_from_row(&version);
         validate_environment_git_metadata(
             &project,
@@ -2438,8 +2448,8 @@ fn validate_project_mode(mode: &str) -> AppResult<()> {
 fn validate_project_input(mode: &str, project_root: Option<&str>) -> AppResult<()> {
     validate_project_mode(mode)?;
     if mode == "remote" {
-        let project_root = project_root
-            .ok_or_else(|| AppError::InvalidRemoteProjectRoot(String::new()))?;
+        let project_root =
+            project_root.ok_or_else(|| AppError::InvalidRemoteProjectRoot(String::new()))?;
         validate_remote_project_root_value(project_root)?;
     }
     Ok(())
@@ -2464,14 +2474,29 @@ fn validate_environment_git_metadata(
     git_commit_sha: Option<&str>,
 ) -> AppResult<()> {
     validate_project_mode(&project.mode)?;
-    if project.mode == "remote" && git_commit_sha.is_none() {
-        Err(AppError::RemoteProjectEnvironmentRequiresSha(
+    if project.mode != "remote" {
+        return Ok(());
+    }
+    let git_commit_sha = git_commit_sha.ok_or_else(|| {
+        AppError::RemoteProjectEnvironmentRequiresSha(
             project.project_id.clone(),
             environment_slug.to_string(),
-        ))
-    } else {
+        )
+    })?;
+    if is_valid_git_commit_sha(git_commit_sha) {
         Ok(())
+    } else {
+        Err(AppError::InvalidRemoteProjectCommitSha(
+            project.project_id.clone(),
+            environment_slug.to_string(),
+            git_commit_sha.to_string(),
+        ))
     }
+}
+
+fn is_valid_git_commit_sha(value: &str) -> bool {
+    let trimmed = value.trim();
+    (7..=64).contains(&trimmed.len()) && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_environment_status(status: &str) -> AppResult<()> {
@@ -2738,4 +2763,60 @@ fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
         return Err(AppError::GitRepoNotFound);
     }
     Ok(stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProjectRecord, is_valid_git_commit_sha, validate_environment_git_metadata};
+    use crate::error::AppError;
+    use serde_json::json;
+
+    fn remote_project() -> ProjectRecord {
+        ProjectRecord {
+            id: 1,
+            project_id: "prj_remote_example".to_string(),
+            project_name: "example".to_string(),
+            mode: "remote".to_string(),
+            git_repo_url: Some("git@github.com:example/repo.git".to_string()),
+            default_branch: Some("main".to_string()),
+            project_root: Some(".".to_string()),
+            metadata: json!({}),
+        }
+    }
+
+    #[test]
+    fn accepts_commit_like_sha_values() {
+        assert!(is_valid_git_commit_sha("deadbeef"));
+        assert!(is_valid_git_commit_sha(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(is_valid_git_commit_sha(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+    }
+
+    #[test]
+    fn rejects_non_commit_like_sha_values() {
+        assert!(!is_valid_git_commit_sha(""));
+        assert!(!is_valid_git_commit_sha("abc123"));
+        assert!(!is_valid_git_commit_sha("prj_remote_dd74eb7ac24320658c98"));
+        assert!(!is_valid_git_commit_sha("main"));
+        assert!(!is_valid_git_commit_sha("dead beef"));
+    }
+
+    #[test]
+    fn remote_environment_requires_commit_like_sha() {
+        let project = remote_project();
+        let error = validate_environment_git_metadata(
+            &project,
+            "dev",
+            Some("prj_remote_dd74eb7ac24320658c98"),
+        )
+        .expect_err("expected invalid commit sha");
+        assert!(matches!(
+            error,
+            AppError::InvalidRemoteProjectCommitSha(project_id, slug, _)
+                if project_id == "prj_remote_example" && slug == "dev"
+        ));
+    }
 }

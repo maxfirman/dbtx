@@ -1,19 +1,21 @@
 use crate::api::{
-    EnvironmentCreateApiRequest, EnvironmentReleaseApiRequest, EnvironmentResponse,
-    EnvironmentRollbackApiRequest, EnvironmentUpdateApiRequest, EnvironmentVersionsResponse,
-    EnvironmentsResponse, HealthResponse, InvocationCancelApiRequest,
-    InvocationClaimNextApiRequest, InvocationCleanupApiRequest, InvocationCleanupResponse,
-    InvocationCommandApi, InvocationCompleteApiRequest, InvocationCreateApiRequest,
-    InvocationCreateResponse, InvocationEvent, InvocationEventBatchApiRequest,
+    ApiErrorResponse, EnvironmentCreateApiRequest, EnvironmentReleaseApiRequest,
+    EnvironmentResponse, EnvironmentRollbackApiRequest, EnvironmentUpdateApiRequest,
+    EnvironmentVersionsResponse, EnvironmentsResponse, HealthResponse, InvocationCancelApiRequest,
+    InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationClaimResponse,
+    InvocationCleanupApiRequest, InvocationCleanupResponse, InvocationCommandApi,
+    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
+    InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
     InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
     InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
-    InvocationsResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
-    ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse, QueuesResponse,
-    ReadyResponse, WorkersResponse,
+    InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse, ProjectInitApiRequest,
+    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
+    QueueStatusResponse, QueuesResponse, ReadyResponse, WorkerStatusResponse, WorkersResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{
-    CreateInvocationInput, Db, InvocationCancellationRecord, InvocationPersistenceRecord,
+    AppliedMigration, CreateInvocationInput, Db, EnvironmentRecord, EnvironmentVersionRecord,
+    InvocationCancellationRecord, InvocationPersistenceRecord, ProjectRecord,
     TimedOutInvocationRecord,
 };
 use crate::error::{AppError, AppResult};
@@ -33,7 +35,7 @@ use async_stream::stream;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -47,6 +49,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio::time::{Duration, sleep};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, info_span};
+use utoipa::OpenApi;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -299,6 +302,8 @@ impl InvocationRecorder {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(crate::ui::router())
+        .route("/openapi.json", get(openapi_json))
+        .route("/docs", get(swagger_docs))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/state/migrate", post(migrate))
@@ -359,10 +364,129 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
+async fn swagger_docs() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>dbtx API Docs</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({
+        url: '/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis],
+      });
+    </script>
+  </body>
+</html>"#,
+    )
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 struct InvocationEventsQuery {
     after_sequence: Option<u64>,
 }
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        migrate,
+        project_init,
+        projects_list,
+        project_show,
+        project_get,
+        project_update,
+        environment_create,
+        environment_list,
+        environment_get,
+        environment_update,
+        environment_release,
+        environment_history,
+        environment_rollback,
+        invocation_create,
+        invocation_list,
+        worker_list,
+        queue_list,
+        invocation_cleanup,
+        invocation_claim_next,
+        invocation_status,
+        invocation_heartbeat,
+        invocation_cancel,
+        invocation_append_events,
+        invocation_complete,
+        invocation_events
+    ),
+    components(
+        schemas(
+            ApiErrorResponse,
+            MigrateResponse,
+            ProjectResponse,
+            ProjectsResponse,
+            ProjectInitApiRequest,
+            ProjectUpdateApiRequest,
+            ProjectShowApiRequest,
+            EnvironmentResponse,
+            EnvironmentsResponse,
+            EnvironmentVersionsResponse,
+            EnvironmentCreateApiRequest,
+            EnvironmentUpdateApiRequest,
+            EnvironmentReleaseApiRequest,
+            EnvironmentRollbackApiRequest,
+            InvocationCreateApiRequest,
+            InvocationCreateResponse,
+            InvocationsResponse,
+            InvocationListApiRequest,
+            InvocationCleanupApiRequest,
+            InvocationCleanupResponse,
+            InvocationClaimNextApiRequest,
+            InvocationClaimResponse,
+            InvocationHeartbeatApiRequest,
+            InvocationHeartbeatResponse,
+            InvocationCancelApiRequest,
+            InvocationStatusResponse,
+            InvocationEventBatchApiRequest,
+            InvocationCompleteApiRequest,
+            InvocationEvent,
+            InvocationCommandApi,
+            InvocationExecutionModeApi,
+            InvocationExecutionSpecApi,
+            InvocationLifecycleStatus,
+            InvocationWorkerHealthApi,
+            InvocationCancelStateApi,
+            WorkersResponse,
+            WorkerStatusResponse,
+            QueuesResponse,
+            QueueStatusResponse,
+            AppliedMigration,
+            ProjectRecord,
+            EnvironmentRecord,
+            EnvironmentVersionRecord,
+            ExecutionEvent,
+            ExecutionEventKind,
+            ExecutionCompletion
+        )
+    ),
+    tags(
+        (name = "state", description = "Database and schema operations"),
+        (name = "projects", description = "Project management"),
+        (name = "environments", description = "Environment management and releases"),
+        (name = "invocations", description = "Invocation lifecycle and event streaming"),
+        (name = "workers", description = "Worker and queue operational views")
+    )
+)]
+struct ApiDoc;
 
 pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
     let addr: SocketAddr = listen.parse().map_err(|err| {
@@ -492,12 +616,33 @@ async fn readyz(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/state/migrate",
+    tag = "state",
+    responses(
+        (status = 200, description = "Applied migrations", body = MigrateResponse),
+        (status = 500, description = "Migration failed", body = ApiErrorResponse)
+    )
+)]
 async fn migrate(State(state): State<AppState>) -> Result<Json<MigrateResponse>, ApiError> {
     let applied = state.db.migrate().await?;
     info!(applied = applied.len(), "applied database migrations");
     Ok(Json(MigrateResponse { applied }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/projects:init",
+    tag = "projects",
+    request_body = ProjectInitApiRequest,
+    responses(
+        (status = 200, description = "Initialized project", body = ProjectResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 409, description = "Project already configured", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn project_init(
     State(state): State<AppState>,
     Json(request): Json<ProjectInitApiRequest>,
@@ -517,6 +662,21 @@ async fn project_init(
     Ok(Json(ProjectResponse { project }))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/v1/projects/{project_id}",
+    tag = "projects",
+    params(
+        ("project_id" = String, Path, description = "Project identifier")
+    ),
+    request_body = ProjectUpdateApiRequest,
+    responses(
+        (status = 200, description = "Updated project", body = ProjectResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Project not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn project_update(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -537,6 +697,15 @@ async fn project_update(
     Ok(Json(ProjectResponse { project }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/projects",
+    tag = "projects",
+    responses(
+        (status = 200, description = "Projects", body = ProjectsResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn projects_list(State(state): State<AppState>) -> Result<Json<ProjectsResponse>, ApiError> {
     let service = ProjectService::new(&state.db);
     let projects = service.list().await?;
@@ -544,6 +713,19 @@ async fn projects_list(State(state): State<AppState>) -> Result<Json<ProjectsRes
     Ok(Json(ProjectsResponse { projects }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}",
+    tag = "projects",
+    params(
+        ("project_id" = String, Path, description = "Project identifier")
+    ),
+    responses(
+        (status = 200, description = "Project", body = ProjectResponse),
+        (status = 404, description = "Project not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn project_get(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -553,6 +735,18 @@ async fn project_get(
     Ok(Json(ProjectResponse { project }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/projects/show",
+    tag = "projects",
+    request_body = ProjectShowApiRequest,
+    responses(
+        (status = 200, description = "Resolved project", body = ProjectResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Project not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn project_show(
     State(state): State<AppState>,
     Json(request): Json<ProjectShowApiRequest>,
@@ -565,6 +759,19 @@ async fn project_show(
     Ok(Json(ProjectResponse { project }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/environments",
+    tag = "environments",
+    request_body = EnvironmentCreateApiRequest,
+    responses(
+        (status = 200, description = "Created environment", body = EnvironmentResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Project not found", body = ApiErrorResponse),
+        (status = 409, description = "Environment already exists", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn environment_create(
     State(state): State<AppState>,
     Json(request): Json<EnvironmentCreateApiRequest>,
@@ -594,6 +801,22 @@ async fn environment_create(
     Ok(Json(EnvironmentResponse { environment }))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/v1/projects/{project_id}/environments/{slug}",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    request_body = EnvironmentUpdateApiRequest,
+    responses(
+        (status = 200, description = "Updated environment", body = EnvironmentResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn environment_update(
     State(state): State<AppState>,
     Path((_project_id, _slug)): Path<(String, String)>,
@@ -625,6 +848,19 @@ async fn environment_update(
     Ok(Json(EnvironmentResponse { environment }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/environments",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier")
+    ),
+    responses(
+        (status = 200, description = "Environments", body = EnvironmentsResponse),
+        (status = 404, description = "Project not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn environment_list(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -635,6 +871,20 @@ async fn environment_list(
     Ok(Json(EnvironmentsResponse { environments }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/environments/{slug}",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    responses(
+        (status = 200, description = "Environment", body = EnvironmentResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn environment_get(
     State(state): State<AppState>,
     Path((project_id, slug)): Path<(String, String)>,
@@ -651,6 +901,22 @@ async fn environment_get(
     Ok(Json(EnvironmentResponse { environment }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/environments/{slug}/release",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    request_body = EnvironmentReleaseApiRequest,
+    responses(
+        (status = 200, description = "Released environment", body = EnvironmentResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn environment_release(
     State(state): State<AppState>,
     Path((_project_id, _slug)): Path<(String, String)>,
@@ -675,6 +941,20 @@ async fn environment_release(
     Ok(Json(EnvironmentResponse { environment }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/environments/{slug}/history",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    responses(
+        (status = 200, description = "Environment version history", body = EnvironmentVersionsResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn environment_history(
     State(state): State<AppState>,
     Path((project_id, slug)): Path<(String, String)>,
@@ -686,6 +966,22 @@ async fn environment_history(
     Ok(Json(EnvironmentVersionsResponse { versions }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/environments/{slug}/rollback",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    request_body = EnvironmentRollbackApiRequest,
+    responses(
+        (status = 200, description = "Rolled back environment", body = EnvironmentResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Environment or version not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn environment_rollback(
     State(state): State<AppState>,
     Path((_project_id, _slug)): Path<(String, String)>,
@@ -709,6 +1005,18 @@ async fn environment_rollback(
     Ok(Json(EnvironmentResponse { environment }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invocations",
+    tag = "invocations",
+    request_body = InvocationCreateApiRequest,
+    responses(
+        (status = 200, description = "Created invocation", body = InvocationCreateResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Project or environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_create(
     State(state): State<AppState>,
     Json(request): Json<InvocationCreateApiRequest>,
@@ -865,6 +1173,18 @@ async fn invocation_create(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invocations/claim-next",
+    tag = "invocations",
+    request_body = InvocationClaimNextApiRequest,
+    responses(
+        (status = 200, description = "Claimed invocation", body = InvocationClaimResponse),
+        (status = 204, description = "No work available"),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_claim_next(
     State(state): State<AppState>,
     Json(request): Json<InvocationClaimNextApiRequest>,
@@ -889,6 +1209,21 @@ async fn invocation_claim_next(
     Ok(Json(claimed).into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invocations/{id}/heartbeat",
+    tag = "invocations",
+    params(
+        ("id" = Uuid, Path, description = "Invocation identifier")
+    ),
+    request_body = InvocationHeartbeatApiRequest,
+    responses(
+        (status = 200, description = "Heartbeat accepted", body = InvocationHeartbeatResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Invocation not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_heartbeat(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -902,6 +1237,20 @@ async fn invocation_heartbeat(
     Ok(Json(InvocationHeartbeatResponse { cancel_requested }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invocations/{id}/cancel",
+    tag = "invocations",
+    params(
+        ("id" = Uuid, Path, description = "Invocation identifier")
+    ),
+    request_body = InvocationCancelApiRequest,
+    responses(
+        (status = 204, description = "Cancel requested"),
+        (status = 404, description = "Invocation not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_cancel(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -923,6 +1272,19 @@ async fn invocation_cancel(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/invocations/{id}",
+    tag = "invocations",
+    params(
+        ("id" = Uuid, Path, description = "Invocation identifier")
+    ),
+    responses(
+        (status = 200, description = "Invocation status", body = InvocationStatusResponse),
+        (status = 404, description = "Invocation not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_status(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -932,6 +1294,23 @@ async fn invocation_status(
     Ok(Json(state.db.get_invocation_status(id).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/invocations",
+    tag = "invocations",
+    params(
+        ("status" = Option<InvocationLifecycleStatus>, Query, description = "Filter by lifecycle status"),
+        ("execution_mode" = Option<InvocationExecutionModeApi>, Query, description = "Filter by execution mode"),
+        ("worker_queue" = Option<String>, Query, description = "Filter by worker queue"),
+        ("claimed_by" = Option<String>, Query, description = "Filter by worker id"),
+        ("cancel_state" = Option<InvocationCancelStateApi>, Query, description = "Filter by cancel state"),
+        ("limit" = Option<i64>, Query, description = "Limit result count")
+    ),
+    responses(
+        (status = 200, description = "Invocations", body = InvocationsResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_list(
     State(state): State<AppState>,
     Query(filter): Query<InvocationListApiRequest>,
@@ -942,18 +1321,47 @@ async fn invocation_list(
     Ok(Json(InvocationsResponse { invocations }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/workers",
+    tag = "workers",
+    responses(
+        (status = 200, description = "Worker operational view", body = WorkersResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn worker_list(State(state): State<AppState>) -> Result<Json<WorkersResponse>, ApiError> {
     let workers = state.db.list_workers().await?;
     info!(count = workers.len(), "listed workers");
     Ok(Json(WorkersResponse { workers }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/queues",
+    tag = "workers",
+    responses(
+        (status = 200, description = "Queue operational view", body = QueuesResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn queue_list(State(state): State<AppState>) -> Result<Json<QueuesResponse>, ApiError> {
     let queues = state.db.list_queues().await?;
     info!(count = queues.len(), "listed queues");
     Ok(Json(QueuesResponse { queues }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invocations/cleanup",
+    tag = "invocations",
+    request_body = InvocationCleanupApiRequest,
+    responses(
+        (status = 200, description = "Deleted old terminal invocations", body = InvocationCleanupResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_cleanup(
     State(state): State<AppState>,
     Json(request): Json<InvocationCleanupApiRequest>,
@@ -976,6 +1384,21 @@ async fn invocation_cleanup(
     Ok(Json(InvocationCleanupResponse { deleted }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invocations/{id}/events",
+    tag = "invocations",
+    params(
+        ("id" = Uuid, Path, description = "Invocation identifier")
+    ),
+    request_body = InvocationEventBatchApiRequest,
+    responses(
+        (status = 204, description = "Events appended"),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Invocation not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_append_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -1004,6 +1427,21 @@ async fn invocation_append_events(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invocations/{id}/complete",
+    tag = "invocations",
+    params(
+        ("id" = Uuid, Path, description = "Invocation identifier")
+    ),
+    request_body = InvocationCompleteApiRequest,
+    responses(
+        (status = 204, description = "Invocation completed"),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 404, description = "Invocation not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_complete(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -1028,6 +1466,20 @@ async fn invocation_complete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/invocations/{id}/events",
+    tag = "invocations",
+    params(
+        ("id" = Uuid, Path, description = "Invocation identifier"),
+        ("after_sequence" = Option<u64>, Query, description = "Replay events strictly after this sequence number")
+    ),
+    responses(
+        (status = 200, description = "Invocation event stream", content_type = "text/event-stream", body = String),
+        (status = 404, description = "Invocation not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
 async fn invocation_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -1126,6 +1578,7 @@ impl IntoResponse for ApiError {
             | AppError::InvalidProjectMode(_)
             | AppError::InvalidEnvironmentStatus(_)
             | AppError::RemoteProjectEnvironmentRequiresSha(_, _)
+            | AppError::InvalidRemoteProjectCommitSha(_, _, _)
             | AppError::InvalidProfileConfig(_)
             | AppError::InvalidProfileSecret(_)
             | AppError::MissingSecretKey
@@ -1141,7 +1594,9 @@ impl IntoResponse for ApiError {
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let body = serde_json::json!({ "error": self.0.to_string() });
+        let body = ApiErrorResponse {
+            error: self.0.to_string(),
+        };
         (status, Json(body)).into_response()
     }
 }

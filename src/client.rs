@@ -131,7 +131,9 @@ impl DaemonClient {
     ) -> AppResult<EnvironmentResponse> {
         self.send(
             self.http
-                .post(self.url(&format!("/v1/projects/{project_id}/environments/{slug}/release")))
+                .post(self.url(&format!(
+                    "/v1/projects/{project_id}/environments/{slug}/release"
+                )))
                 .json(&request),
         )
         .await
@@ -142,10 +144,9 @@ impl DaemonClient {
         project_id: &str,
         slug: &str,
     ) -> AppResult<EnvironmentVersionsResponse> {
-        self.send(
-            self.http
-                .get(self.url(&format!("/v1/projects/{project_id}/environments/{slug}/history"))),
-        )
+        self.send(self.http.get(self.url(&format!(
+            "/v1/projects/{project_id}/environments/{slug}/history"
+        ))))
         .await
     }
 
@@ -157,7 +158,9 @@ impl DaemonClient {
     ) -> AppResult<EnvironmentResponse> {
         self.send(
             self.http
-                .post(self.url(&format!("/v1/projects/{project_id}/environments/{slug}/rollback")))
+                .post(self.url(&format!(
+                    "/v1/projects/{project_id}/environments/{slug}/rollback"
+                )))
                 .json(&request),
         )
         .await

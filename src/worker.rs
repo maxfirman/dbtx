@@ -1,7 +1,7 @@
 use crate::api::{
     InvocationClaimResponse, InvocationCommandApi, InvocationCompleteApiRequest,
-    InvocationEventBatchApiRequest, InvocationExecutionSpecApi, InvocationHeartbeatApiRequest,
-    InvocationLifecycleStatus,
+    InvocationEventBatchApiRequest, InvocationExecutionModeApi, InvocationExecutionSpecApi,
+    InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
 };
 use crate::client::DaemonClient;
 use crate::error::{AppError, AppResult};
@@ -28,9 +28,16 @@ pub async fn execute_claimed_invocation(
         ))));
     }
 
-    let spec = claim.execution_spec;
+    let spec = claim.execution_spec.clone();
     let command_name = spec.command();
-    let project_dir = materialize_execution_project_dir(&spec).await?;
+    let pretty_terminal_output = claim.execution_mode == InvocationExecutionModeApi::Local;
+    let project_dir = match materialize_execution_project_dir(&spec).await {
+        Ok(project_dir) => project_dir,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
     info!(
         invocation_id = %claim.invocation_id,
         worker_id = %claim.worker_id,
@@ -38,8 +45,20 @@ pub async fn execute_claimed_invocation(
         project_dir = %project_dir.display(),
         "starting claimed invocation execution"
     );
-    let profiles_dir = write_profiles_dir(spec.profiles_yml())?;
-    let state_dir = write_state_dir(spec.state_manifest())?;
+    let profiles_dir = match write_profiles_dir(spec.profiles_yml()) {
+        Ok(profiles_dir) => profiles_dir,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+    let state_dir = match write_state_dir(spec.state_manifest()) {
+        Ok(state_dir) => state_dir,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
 
     let mut dbt_args: Vec<OsString> = spec.args().iter().cloned().map(Into::into).collect();
     if let Some(state_dir) = state_dir.as_ref() {
@@ -50,14 +69,23 @@ pub async fn execute_claimed_invocation(
     dbt_args.push(profiles_dir.path().as_os_str().to_os_string());
 
     let command = map_command(command_name);
-    let mut child =
-        TokioCommand::new(std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string()))
-            .arg(command)
-            .args(&dbt_args)
-            .current_dir(&project_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
+    let mut child = match TokioCommand::new(
+        std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string()),
+    )
+    .arg(command)
+    .args(&dbt_args)
+    .current_dir(&project_dir)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            let error = AppError::Io(err);
+            report_setup_failure(client, &claim, &error.to_string()).await?;
+            return Err(error);
+        }
+    };
 
     let stdout = child
         .stdout
@@ -96,9 +124,12 @@ pub async fn execute_claimed_invocation(
                             .and_then(serde_json::Value::as_str)
                             .map(ToString::to_string);
                     }
-                    if let Some(rendered) = event.render_text_line() {
-                        println!("{rendered}");
-                    }
+                    emit_dbt_log_output(
+                        pretty_terminal_output,
+                        claim.invocation_id,
+                        &claim.worker_id,
+                        &event,
+                    );
                     client
                         .invocation_append_events(
                             claim.invocation_id,
@@ -124,7 +155,13 @@ pub async fn execute_claimed_invocation(
                         )
                         .await?;
                 } else {
-                    println!("{line}");
+                    emit_stream_output(
+                        pretty_terminal_output,
+                        claim.invocation_id,
+                        &claim.worker_id,
+                        "stdout",
+                        &line,
+                    );
                     client
                         .invocation_append_events(
                             claim.invocation_id,
@@ -173,7 +210,13 @@ pub async fn execute_claimed_invocation(
     for line in stderr_handle.await.map_err(|err| {
         AppError::Io(std::io::Error::other(format!("stderr task failed: {err}")))
     })?? {
-        eprintln!("{line}");
+        emit_stream_output(
+            pretty_terminal_output,
+            claim.invocation_id,
+            &claim.worker_id,
+            "stderr",
+            &line,
+        );
         client
             .invocation_append_events(
                 claim.invocation_id,
@@ -253,6 +296,83 @@ pub async fn execute_claimed_invocation(
     } else {
         Err(AppError::DbtFailed(exit_code))
     }
+}
+
+async fn report_setup_failure(
+    client: &DaemonClient,
+    claim: &InvocationClaimResponse,
+    error_message: &str,
+) -> AppResult<()> {
+    client
+        .invocation_complete(
+            claim.invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                completion: crate::execution::ExecutionCompletion {
+                    status: InvocationLifecycleStatus::Failed,
+                    exit_code: 1,
+                    error: Some(error_message.to_string()),
+                    dbt_version: None,
+                    manifest: None,
+                },
+            },
+        )
+        .await
+}
+
+fn emit_dbt_log_output(
+    pretty_terminal_output: bool,
+    invocation_id: uuid::Uuid,
+    worker_id: &str,
+    event: &LogEvent,
+) {
+    let rendered = event.render_text_line();
+    if pretty_terminal_output {
+        if let Some(rendered) = rendered {
+            println!("{rendered}");
+        }
+        return;
+    }
+    info!(
+        invocation_id = %invocation_id,
+        worker_id = %worker_id,
+        event_type = "dbt.log",
+        dbt_event_name = %event.info.name,
+        level = %event.info.level,
+        node_unique_id = event
+            .data
+            .get("node_info")
+            .and_then(|value| value.get("unique_id"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(""),
+        text = rendered.as_deref().unwrap_or(""),
+        "worker invocation event"
+    );
+}
+
+fn emit_stream_output(
+    pretty_terminal_output: bool,
+    invocation_id: uuid::Uuid,
+    worker_id: &str,
+    stream: &'static str,
+    line: &str,
+) {
+    if pretty_terminal_output {
+        match stream {
+            "stderr" => eprintln!("{line}"),
+            _ => println!("{line}"),
+        }
+        return;
+    }
+    info!(
+        invocation_id = %invocation_id,
+        worker_id = %worker_id,
+        event_type = if stream == "stderr" { "stderr.line" } else { "stdout.line" },
+        stream = %stream,
+        text = %line,
+        "worker invocation event"
+    );
 }
 
 impl InvocationExecutionSpecApi {
@@ -354,11 +474,7 @@ async fn ensure_git_worktree_in(
         run_git_with_git_dir(&mirror_dir, ["fetch", "--prune", "origin"]).await?;
     }
 
-    run_git_with_git_dir(
-        &mirror_dir,
-        ["cat-file", "-e", &format!("{commit_sha}^{{commit}}")],
-    )
-    .await?;
+    ensure_commit_exists_in_mirror(repo_url, &mirror_dir, commit_sha).await?;
 
     if !worktree_dir.exists() {
         info!(
@@ -425,6 +541,29 @@ async fn run_git_with_git_dir<const N: usize>(
     }
 }
 
+async fn ensure_commit_exists_in_mirror(
+    repo_url: &str,
+    git_dir: &std::path::Path,
+    commit_sha: &str,
+) -> AppResult<()> {
+    let mut command = TokioCommand::new("git");
+    command.env("GIT_DIR", git_dir);
+    command.args(["cat-file", "-e", &format!("{commit_sha}^{{commit}}")]);
+    let output = command.output().await?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.contains("Not a valid object name") {
+        return Err(AppError::Io(std::io::Error::other(format!(
+            "git failed: commit {commit_sha} is not available from remote repository {repo_url}; has it been pushed?"
+        ))));
+    }
+    Err(AppError::Io(std::io::Error::other(format!(
+        "git failed: {stderr}"
+    ))))
+}
+
 async fn run_git<const N: usize>(cwd: Option<&std::path::Path>, args: [&str; N]) -> AppResult<()> {
     let mut command = TokioCommand::new("git");
     command.args(args);
@@ -486,10 +625,7 @@ async fn acquire_repo_lock(cache_root: &Path, repo_hash: &str) -> AppResult<Repo
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 if let Ok(metadata) = tokio::fs::metadata(&lock_path).await
                     && let Ok(modified) = metadata.modified()
-                    && modified
-                        .elapsed()
-                        .unwrap_or_default()
-                        > std::time::Duration::from_secs(300)
+                    && modified.elapsed().unwrap_or_default() > std::time::Duration::from_secs(300)
                 {
                     let _ = tokio::fs::remove_file(&lock_path).await;
                     continue;
@@ -612,8 +748,16 @@ mod tests {
         let commit_sha = git_output(["rev-parse", "HEAD"], repo.path());
 
         let (first, second) = tokio::join!(
-            ensure_git_worktree_in(cache.path(), repo.path().to_str().expect("repo str"), &commit_sha),
-            ensure_git_worktree_in(cache.path(), repo.path().to_str().expect("repo str"), &commit_sha)
+            ensure_git_worktree_in(
+                cache.path(),
+                repo.path().to_str().expect("repo str"),
+                &commit_sha
+            ),
+            ensure_git_worktree_in(
+                cache.path(),
+                repo.path().to_str().expect("repo str"),
+                &commit_sha
+            )
         );
         let first = first.expect("first worktree");
         let second = second.expect("second worktree");
