@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-8">
+  <div class="flex items-center justify-between gap-4">
+    <div>
+      <a href="/ui/invocations" class="text-sm text-slate-500 hover:text-slate-900">← Back to invocations</a>
+      <h1 class="mt-2 text-3xl font-semibold tracking-tight">Invocation {{ invocation.invocation_id }}</h1>
+    </div>
+    {% if invocation.status == "running" %}
+    <form method="post" action="/ui/invocations/{{ invocation.invocation_id }}/cancel">
+      <button class="rounded-lg border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100">Cancel</button>
+    </form>
+    {% endif %}
+  </div>
+
+  <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-sm text-slate-500">Status</div>
+      <div class="mt-2"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ invocation.status_class }}">{{ invocation.status }}</span></div>
+    </div>
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-sm text-slate-500">Mode / Queue</div>
+      <div class="mt-2 text-sm font-medium">{{ invocation.execution_mode }} · {{ invocation.worker_queue }}</div>
+    </div>
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-sm text-slate-500">Worker</div>
+      <div class="mt-2 text-sm font-medium">{{ invocation.claimed_by }}</div>
+      <div class="mt-1 text-xs text-slate-500">{{ invocation.worker_health }}</div>
+    </div>
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-sm text-slate-500">Cancel State</div>
+      <div class="mt-2 text-sm font-medium">{{ invocation.cancel_state }}</div>
+    </div>
+  </div>
+
+  <div class="grid gap-8 lg:grid-cols-[0.9fr,1.1fr]">
+    <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 class="font-semibold">Metadata</h2>
+      <dl class="mt-4 space-y-3 text-sm">
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Started</dt><dd>{{ invocation.started_at }}</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Claimed At</dt><dd>{{ invocation.claimed_at }}</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Last Heartbeat</dt><dd>{{ invocation.last_heartbeat_at }}</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Completed</dt><dd>{{ invocation.completed_at }}</dd></div>
+      </dl>
+      {% if invocation.error.len() > 0 %}
+      <div class="mt-6 rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{{ invocation.error }}</div>
+      {% endif %}
+    </section>
+
+    <section class="rounded-xl border border-slate-200 bg-white shadow-sm" x-data="invocationLogs('{{ sse_url }}')">
+      <div class="border-b border-slate-200 px-5 py-4">
+        <h2 class="font-semibold">Logs</h2>
+      </div>
+      <pre x-ref="log" class="max-h-[34rem] overflow-auto whitespace-pre-wrap px-5 py-4 text-xs leading-6 text-slate-800">{% for line in initial_log_lines %}{{ line }}
+{% endfor %}</pre>
+    </section>
+  </div>
+</div>
+{% endblock %}

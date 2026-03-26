@@ -1,0 +1,90 @@
+<div class="space-y-8">
+  <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-sm text-slate-500">Status</div>
+      <div class="mt-2"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ environment.status_class }}">{{ environment.status }}</span></div>
+    </div>
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-sm text-slate-500">Target</div>
+      <div class="mt-2 text-sm font-medium">{{ environment.profile_name }} / {{ environment.target_name }}</div>
+    </div>
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-sm text-slate-500">Adapter / Schema</div>
+      <div class="mt-2 text-sm font-medium">{{ environment.adapter_type }} · {{ environment.schema_name }}</div>
+    </div>
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-sm text-slate-500">Worker Queue</div>
+      <div class="mt-2 text-sm font-medium">{{ environment.worker_queue }}</div>
+    </div>
+  </div>
+
+  <div class="grid gap-8 lg:grid-cols-[0.95fr,1.05fr]">
+    <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 class="font-semibold">Desired State</h2>
+      <dl class="mt-4 space-y-3 text-sm">
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Project</dt><dd>{{ project.project_id }}</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Mode</dt><dd>{{ project.mode }}</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Git Branch</dt><dd>{{ environment.git_branch }}</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Git Commit</dt><dd class="font-mono text-xs">{{ environment.git_commit_sha }}</dd></div>
+      </dl>
+
+      {% if is_remote %}
+      <form class="mt-6 space-y-4"
+            hx-post="/ui/projects/{{ project.project_id }}/environments/{{ environment.slug }}/release"
+            hx-target="#environment-panel"
+            hx-swap="outerHTML">
+        <div>
+          <label class="mb-1 block text-sm text-slate-600">Branch</label>
+          <input name="git_branch" value="{{ environment.git_branch }}" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+        </div>
+        <div>
+          <label class="mb-1 block text-sm text-slate-600">Desired Commit</label>
+          <input name="git_commit_sha" value="{{ environment.git_commit_sha }}" class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm">
+        </div>
+        <button class="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700">Release Commit</button>
+      </form>
+      {% endif %}
+    </section>
+
+    <section class="rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div class="border-b border-slate-200 px-5 py-4">
+        <h2 class="font-semibold">Version History</h2>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-slate-200 text-sm">
+          <thead class="bg-slate-50 text-left text-slate-500">
+            <tr>
+              <th class="px-5 py-3 font-medium">Version</th>
+              <th class="px-5 py-3 font-medium">Recorded</th>
+              <th class="px-5 py-3 font-medium">Reason</th>
+              <th class="px-5 py-3 font-medium">Branch</th>
+              <th class="px-5 py-3 font-medium">Commit</th>
+              <th class="px-5 py-3 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 bg-white">
+            {% for version in versions %}
+            <tr>
+              <td class="px-5 py-3 font-medium">{{ version.id }}</td>
+              <td class="px-5 py-3 text-slate-600">{{ version.recorded_at }}</td>
+              <td class="px-5 py-3 text-slate-600">{{ version.reason }}</td>
+              <td class="px-5 py-3 text-slate-600">{{ version.git_branch }}</td>
+              <td class="px-5 py-3 font-mono text-xs text-slate-600">{{ version.git_commit_sha }}</td>
+              <td class="px-5 py-3 text-right">
+                {% if is_remote %}
+                <form hx-post="/ui/projects/{{ project.project_id }}/environments/{{ environment.slug }}/rollback"
+                      hx-target="#environment-panel"
+                      hx-swap="outerHTML">
+                  <input type="hidden" name="version_id" value="{{ version.id }}">
+                  <button class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">Rollback</button>
+                </form>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</div>

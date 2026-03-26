@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-8">
+  <div>
+    <h1 class="text-3xl font-semibold tracking-tight">Queues</h1>
+    <p class="mt-2 text-sm text-slate-600">Execution routing and backlog state.</p>
+  </div>
+
+  <section class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+    <table class="min-w-full divide-y divide-slate-200 text-sm">
+      <thead class="bg-slate-50 text-left text-slate-500">
+        <tr>
+          <th class="px-5 py-3 font-medium">Queue</th>
+          <th class="px-5 py-3 font-medium">Mode</th>
+          <th class="px-5 py-3 font-medium">Pending</th>
+          <th class="px-5 py-3 font-medium">Claimed</th>
+          <th class="px-5 py-3 font-medium">Stale Claims</th>
+          <th class="px-5 py-3 font-medium">Oldest Pending</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100 bg-white">
+        {% for queue in queues %}
+        <tr>
+          <td class="px-5 py-3 font-medium">{{ queue.worker_queue }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ queue.execution_mode }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ queue.pending_count }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ queue.claimed_count }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ queue.stale_claim_count }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ queue.oldest_pending_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+{% endblock %}

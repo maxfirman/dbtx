@@ -1,0 +1,30 @@
+<table class="min-w-full divide-y divide-slate-200 text-sm">
+  <thead class="bg-slate-50 text-left text-slate-500">
+    <tr>
+      <th class="px-4 py-3 font-medium">Invocation</th>
+      <th class="px-4 py-3 font-medium">Status</th>
+      <th class="px-4 py-3 font-medium">Mode</th>
+      <th class="px-4 py-3 font-medium">Queue</th>
+      <th class="px-4 py-3 font-medium">Claimed By</th>
+      <th class="px-4 py-3 font-medium">Started</th>
+      <th class="px-4 py-3 font-medium">Completed</th>
+    </tr>
+  </thead>
+  <tbody class="divide-y divide-slate-100 bg-white">
+    {% for invocation in invocations %}
+    <tr>
+      <td class="px-4 py-3">
+        <a href="{{ invocation.detail_url }}" class="font-medium text-slate-900 hover:text-slate-600">{{ invocation.invocation_id }}</a>
+      </td>
+      <td class="px-4 py-3">
+        <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ invocation.status_class }}">{{ invocation.status }}</span>
+      </td>
+      <td class="px-4 py-3 text-slate-600">{{ invocation.execution_mode }}</td>
+      <td class="px-4 py-3 text-slate-600">{{ invocation.worker_queue }}</td>
+      <td class="px-4 py-3 text-slate-600">{{ invocation.claimed_by }}</td>
+      <td class="px-4 py-3 text-slate-600">{{ invocation.started_at }}</td>
+      <td class="px-4 py-3 text-slate-600">{{ invocation.completed_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

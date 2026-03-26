@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-8">
+  <div>
+    <h1 class="text-3xl font-semibold tracking-tight">Workers</h1>
+    <p class="mt-2 text-sm text-slate-600">Derived worker view from active invocation ownership.</p>
+  </div>
+
+  <section class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+    <table class="min-w-full divide-y divide-slate-200 text-sm">
+      <thead class="bg-slate-50 text-left text-slate-500">
+        <tr>
+          <th class="px-5 py-3 font-medium">Worker</th>
+          <th class="px-5 py-3 font-medium">Mode</th>
+          <th class="px-5 py-3 font-medium">Queue</th>
+          <th class="px-5 py-3 font-medium">Claims</th>
+          <th class="px-5 py-3 font-medium">Last Heartbeat</th>
+          <th class="px-5 py-3 font-medium">Health</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100 bg-white">
+        {% for worker in workers %}
+        <tr>
+          <td class="px-5 py-3 font-medium">{{ worker.worker_id }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ worker.execution_mode }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ worker.worker_queue }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ worker.claimed_invocation_count }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ worker.last_heartbeat_at }}</td>
+          <td class="px-5 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ worker.health_class }}">{{ worker.health }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+{% endblock %}

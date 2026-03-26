@@ -64,6 +64,10 @@ impl AppState {
             invocations: InvocationManager::default(),
         }
     }
+
+    pub(crate) fn db(&self) -> &Db {
+        &self.db
+    }
 }
 
 #[derive(Clone, Default)]
@@ -294,6 +298,7 @@ impl InvocationRecorder {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .merge(crate::ui::router())
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/state/migrate", post(migrate))

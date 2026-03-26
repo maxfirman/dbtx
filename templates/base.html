@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} · dbtx</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.14.9/dist/cdn.min.js"></script>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-900">
+  <div class="min-h-screen">
+    <header class="border-b border-slate-200 bg-white">
+      <div class="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
+        <a href="/" class="text-lg font-semibold tracking-tight text-slate-900">dbtx</a>
+        <nav class="flex items-center gap-4 text-sm text-slate-600">
+          <a class="hover:text-slate-900" href="/">Dashboard</a>
+          <a class="hover:text-slate-900" href="/ui/projects">Projects</a>
+          <a class="hover:text-slate-900" href="/ui/invocations">Invocations</a>
+          <a class="hover:text-slate-900" href="/ui/workers">Workers</a>
+          <a class="hover:text-slate-900" href="/ui/queues">Queues</a>
+        </nav>
+      </div>
+    </header>
+    <main class="mx-auto max-w-7xl px-6 py-8">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <script>
+    document.addEventListener('alpine:init', () => {
+      Alpine.data('invocationLogs', (url) => ({
+        source: null,
+        init() {
+          if (!url) return;
+          this.source = new EventSource(url);
+          this.source.onmessage = (event) => {
+            const payload = JSON.parse(event.data);
+            const line = this.renderLine(payload);
+            if (!line) return;
+            const target = this.$refs.log;
+            target.textContent = target.textContent ? `${target.textContent}\n${line}` : line;
+            target.scrollTop = target.scrollHeight;
+          };
+        },
+        renderLine(payload) {
+          if (!payload.text) return null;
+          return payload.text.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
+        }
+      }));
+    });
+  </script>
+</body>
+</html>

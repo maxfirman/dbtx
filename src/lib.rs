@@ -10,4 +10,5 @@ pub mod manifest;
 pub mod profile;
 pub mod server;
 pub mod services;
+pub mod ui;
 pub mod worker;
