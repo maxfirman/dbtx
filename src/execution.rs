@@ -56,4 +56,5 @@ pub struct ExecutionCompletion {
     pub error: Option<String>,
     pub dbt_version: Option<String>,
     pub manifest: Option<serde_json::Value>,
+    pub result: Option<serde_json::Value>,
 }

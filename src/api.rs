@@ -109,7 +109,8 @@ pub struct EnvironmentReleaseApiRequest {
     pub project: String,
     pub slug: String,
     pub git_branch: Option<String>,
-    pub git_commit_sha: String,
+    pub git_commit_sha: Option<String>,
+    pub git_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -139,6 +140,7 @@ pub enum InvocationCommandApi {
     Ls,
     Test,
     Seed,
+    Release,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -198,6 +200,12 @@ pub enum InvocationExecutionSpecApi {
         project_root: String,
         profiles_yml: String,
         state_manifest: Option<serde_json::Value>,
+    },
+    ReleaseValidation {
+        repo_url: String,
+        git_ref: Option<String>,
+        git_commit_sha: Option<String>,
+        git_branch: Option<String>,
     },
 }
 

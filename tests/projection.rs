@@ -1791,5 +1791,6 @@ fn sample_execution_completion(
         error: None,
         dbt_version: None,
         manifest: None,
+        result: None,
     }
 }

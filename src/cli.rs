@@ -183,7 +183,9 @@ pub enum EnvironmentCommand {
         #[arg(long)]
         git_branch: Option<String>,
         #[arg(long)]
-        git_commit_sha: String,
+        git_commit_sha: Option<String>,
+        #[arg(long)]
+        git_ref: Option<String>,
     },
     #[command(about = "Show environment version history")]
     History {
@@ -391,11 +393,13 @@ mod tests {
                 slug,
                 git_branch,
                 git_commit_sha,
+                git_ref,
             }) => {
                 assert_eq!(project, "proj");
                 assert_eq!(slug, "prod");
                 assert_eq!(git_branch, None);
-                assert_eq!(git_commit_sha, "abc123");
+                assert_eq!(git_commit_sha.as_deref(), Some("abc123"));
+                assert_eq!(git_ref, None);
             }
             _ => panic!("expected environment release command"),
         }

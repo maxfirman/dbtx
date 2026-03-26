@@ -6,6 +6,7 @@ use crate::api::{
 use crate::client::DaemonClient;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
@@ -29,6 +30,9 @@ pub async fn execute_claimed_invocation(
     }
 
     let spec = claim.execution_spec.clone();
+    if matches!(spec, InvocationExecutionSpecApi::ReleaseValidation { .. }) {
+        return execute_release_validation(client, claim, &spec).await;
+    }
     let command_name = spec.command();
     let pretty_terminal_output = claim.execution_mode == InvocationExecutionModeApi::Local;
     let project_dir = match materialize_execution_project_dir(&spec).await {
@@ -276,6 +280,7 @@ pub async fn execute_claimed_invocation(
                     },
                     dbt_version,
                     manifest,
+                    result: None,
                 },
             },
         )
@@ -315,6 +320,7 @@ async fn report_setup_failure(
                     error: Some(error_message.to_string()),
                     dbt_version: None,
                     manifest: None,
+                    result: None,
                 },
             },
         )
@@ -379,18 +385,21 @@ impl InvocationExecutionSpecApi {
     fn command(&self) -> InvocationCommandApi {
         match self {
             Self::Local { command, .. } | Self::Remote { command, .. } => *command,
+            Self::ReleaseValidation { .. } => InvocationCommandApi::Release,
         }
     }
 
     fn args(&self) -> &[String] {
         match self {
             Self::Local { args, .. } | Self::Remote { args, .. } => args,
+            Self::ReleaseValidation { .. } => &[],
         }
     }
 
     fn profiles_yml(&self) -> &str {
         match self {
             Self::Local { profiles_yml, .. } | Self::Remote { profiles_yml, .. } => profiles_yml,
+            Self::ReleaseValidation { .. } => "",
         }
     }
 
@@ -399,8 +408,122 @@ impl InvocationExecutionSpecApi {
             Self::Local { state_manifest, .. } | Self::Remote { state_manifest, .. } => {
                 state_manifest.as_ref()
             }
+            Self::ReleaseValidation { .. } => None,
         }
     }
+}
+
+async fn execute_release_validation(
+    client: &DaemonClient,
+    claim: InvocationClaimResponse,
+    spec: &InvocationExecutionSpecApi,
+) -> AppResult<()> {
+    let InvocationExecutionSpecApi::ReleaseValidation {
+        repo_url,
+        git_ref,
+        git_commit_sha,
+        git_branch,
+    } = spec
+    else {
+        unreachable!("release validation requires release spec");
+    };
+
+    send_worker_event(
+        client,
+        &claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Validating release target against {repo_url}"),
+    )
+    .await?;
+    if let Some(git_ref) = git_ref {
+        send_worker_event(
+            client,
+            &claim,
+            crate::execution::ExecutionEventKind::StdoutLine,
+            format!("Resolving git ref {git_ref}"),
+        )
+        .await?;
+    } else if let Some(git_commit_sha) = git_commit_sha {
+        send_worker_event(
+            client,
+            &claim,
+            crate::execution::ExecutionEventKind::StdoutLine,
+            format!("Checking commit {git_commit_sha}"),
+        )
+        .await?;
+    }
+    let resolved_commit_sha =
+        match resolve_remote_git_target(repo_url, git_ref.as_deref(), git_commit_sha.as_deref())
+            .await
+        {
+            Ok(resolved_commit_sha) => resolved_commit_sha,
+            Err(err) => {
+                report_setup_failure(client, &claim, &err.to_string()).await?;
+                return Err(err);
+            }
+        };
+    send_worker_event(
+        client,
+        &claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Resolved release target to commit {resolved_commit_sha}"),
+    )
+    .await?;
+    client
+        .invocation_complete(
+            claim.invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                completion: crate::execution::ExecutionCompletion {
+                    status: InvocationLifecycleStatus::Succeeded,
+                    exit_code: 0,
+                    error: None,
+                    dbt_version: None,
+                    manifest: None,
+                    result: Some(json!({
+                        "resolved_commit_sha": resolved_commit_sha,
+                        "git_branch": git_branch,
+                    })),
+                },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn send_worker_event(
+    client: &DaemonClient,
+    claim: &InvocationClaimResponse,
+    kind: crate::execution::ExecutionEventKind,
+    text: String,
+) -> AppResult<()> {
+    emit_stream_output(
+        claim.execution_mode == InvocationExecutionModeApi::Local,
+        claim.invocation_id,
+        &claim.worker_id,
+        "stdout",
+        &text,
+    );
+    client
+        .invocation_append_events(
+            claim.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                events: vec![crate::execution::ExecutionEvent {
+                    kind,
+                    occurred_at: chrono::Utc::now(),
+                    text: Some(text),
+                    raw_line: None,
+                    dbt_event_name: None,
+                    node_unique_id: None,
+                    level: None,
+                    error: None,
+                }],
+            },
+        )
+        .await
 }
 
 async fn materialize_execution_project_dir(
@@ -426,12 +549,68 @@ async fn materialize_execution_project_dir(
             }
             Ok(project_dir)
         }
+        InvocationExecutionSpecApi::ReleaseValidation { .. } => {
+            Err(AppError::UnsupportedLocalExecution("release".to_string()))
+        }
     }
 }
 
 async fn ensure_git_worktree(repo_url: &str, commit_sha: &str) -> AppResult<PathBuf> {
     let cache_root = git_cache_root()?;
     ensure_git_worktree_in(&cache_root, repo_url, commit_sha).await
+}
+
+async fn resolve_remote_git_target(
+    repo_url: &str,
+    git_ref: Option<&str>,
+    git_commit_sha: Option<&str>,
+) -> AppResult<String> {
+    let cache_root = git_cache_root()?;
+    let repo_hash = short_hash(repo_url);
+    let mirror_dir = cache_root.join("mirrors").join(format!("{repo_hash}.git"));
+    tokio::fs::create_dir_all(mirror_dir.parent().expect("mirror parent")).await?;
+    let _repo_lock = acquire_repo_lock(&cache_root, &repo_hash).await?;
+    ensure_git_mirror(repo_url, &mirror_dir).await?;
+
+    match (git_ref, git_commit_sha) {
+        (Some(git_ref), None) => resolve_git_ref(&mirror_dir, git_ref, repo_url).await,
+        (None, Some(git_commit_sha)) => {
+            ensure_commit_exists_in_mirror(repo_url, &mirror_dir, git_commit_sha).await?;
+            Ok(git_commit_sha.to_string())
+        }
+        _ => Err(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "provide exactly one of git_ref or git_commit_sha",
+        ))),
+    }
+}
+
+async fn resolve_git_ref(git_dir: &Path, git_ref: &str, repo_url: &str) -> AppResult<String> {
+    for candidate in [
+        git_ref.to_string(),
+        format!("refs/heads/{git_ref}"),
+        format!("refs/tags/{git_ref}"),
+    ] {
+        if let Ok(resolved) = rev_parse_commit(git_dir, &candidate).await {
+            return Ok(resolved);
+        }
+    }
+    Err(AppError::Io(std::io::Error::other(format!(
+        "git failed: ref {git_ref} is not available from remote repository {repo_url}"
+    ))))
+}
+
+async fn rev_parse_commit(git_dir: &Path, reference: &str) -> AppResult<String> {
+    let mut command = TokioCommand::new("git");
+    command.env("GIT_DIR", git_dir);
+    command.args(["rev-parse", "--verify", &format!("{reference}^{{commit}}")]);
+    let output = command.output().await?;
+    if !output.status.success() {
+        return Err(AppError::Io(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 async fn ensure_git_worktree_in(
@@ -456,23 +635,7 @@ async fn ensure_git_worktree_in(
 
     let _repo_lock = acquire_repo_lock(cache_root, &repo_hash).await?;
 
-    if !mirror_dir.exists() {
-        info!(repo_url = %repo_url, mirror = %mirror_dir.display(), "creating git mirror cache");
-        run_git(
-            None,
-            [
-                "clone",
-                "--mirror",
-                repo_url,
-                mirror_dir.to_string_lossy().as_ref(),
-            ],
-        )
-        .await?;
-    } else {
-        info!(repo_url = %repo_url, mirror = %mirror_dir.display(), "refreshing git mirror cache");
-        run_git_with_git_dir(&mirror_dir, ["remote", "set-url", "origin", repo_url]).await?;
-        run_git_with_git_dir(&mirror_dir, ["fetch", "--prune", "origin"]).await?;
-    }
+    ensure_git_mirror(repo_url, &mirror_dir).await?;
 
     ensure_commit_exists_in_mirror(repo_url, &mirror_dir, commit_sha).await?;
 
@@ -507,6 +670,27 @@ async fn ensure_git_worktree_in(
     prune_git_cache(cache_root, &repo_hash, commit_sha, &mirror_dir).await?;
 
     Ok(worktree_dir)
+}
+
+async fn ensure_git_mirror(repo_url: &str, mirror_dir: &Path) -> AppResult<()> {
+    if !mirror_dir.exists() {
+        info!(repo_url = %repo_url, mirror = %mirror_dir.display(), "creating git mirror cache");
+        run_git(
+            None,
+            [
+                "clone",
+                "--mirror",
+                repo_url,
+                mirror_dir.to_string_lossy().as_ref(),
+            ],
+        )
+        .await?;
+    } else {
+        info!(repo_url = %repo_url, mirror = %mirror_dir.display(), "refreshing git mirror cache");
+        run_git_with_git_dir(mirror_dir, ["remote", "set-url", "origin", repo_url]).await?;
+        run_git_with_git_dir(mirror_dir, ["fetch", "--prune", "origin"]).await?;
+    }
+    Ok(())
 }
 
 fn git_cache_root() -> AppResult<PathBuf> {
@@ -689,7 +873,10 @@ async fn prune_git_cache(
 }
 
 fn persists_state(command: InvocationCommandApi) -> bool {
-    !matches!(command, InvocationCommandApi::Ls)
+    !matches!(
+        command,
+        InvocationCommandApi::Ls | InvocationCommandApi::Release
+    )
 }
 
 fn map_command(command: InvocationCommandApi) -> &'static str {
@@ -699,6 +886,7 @@ fn map_command(command: InvocationCommandApi) -> &'static str {
         InvocationCommandApi::Ls => "ls",
         InvocationCommandApi::Test => "test",
         InvocationCommandApi::Seed => "seed",
+        InvocationCommandApi::Release => "release",
     }
 }
 
@@ -722,7 +910,7 @@ fn write_state_dir(state_manifest: Option<&serde_json::Value>) -> AppResult<Opti
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_git_worktree_in, validate_remote_project_root};
+    use super::{ensure_git_worktree_in, resolve_remote_git_target, validate_remote_project_root};
     use std::path::Path;
     use std::process::Command;
     use tempfile::TempDir;
@@ -764,6 +952,54 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(first.join("dbt_project.yml").is_file());
+    }
+
+    #[tokio::test]
+    async fn resolve_remote_git_target_fails_for_missing_ref() {
+        let repo = TempDir::new().expect("repo dir");
+        run_git(["init"], repo.path());
+        run_git(["config", "user.email", "test@example.com"], repo.path());
+        run_git(["config", "user.name", "Test User"], repo.path());
+        std::fs::write(repo.path().join("README.md"), "hello").expect("readme");
+        run_git(["add", "README.md"], repo.path());
+        run_git(["commit", "-m", "init"], repo.path());
+
+        let error = resolve_remote_git_target(
+            repo.path().to_str().expect("repo str"),
+            Some("missing-branch"),
+            None,
+        )
+        .await
+        .expect_err("expected missing ref error");
+        assert!(
+            error
+                .to_string()
+                .contains("ref missing-branch is not available from remote repository")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_remote_git_target_fails_for_missing_commit() {
+        let repo = TempDir::new().expect("repo dir");
+        run_git(["init"], repo.path());
+        run_git(["config", "user.email", "test@example.com"], repo.path());
+        run_git(["config", "user.name", "Test User"], repo.path());
+        std::fs::write(repo.path().join("README.md"), "hello").expect("readme");
+        run_git(["add", "README.md"], repo.path());
+        run_git(["commit", "-m", "init"], repo.path());
+
+        let error = resolve_remote_git_target(
+            repo.path().to_str().expect("repo str"),
+            None,
+            Some("deadbeef"),
+        )
+        .await
+        .expect_err("expected missing commit error");
+        assert!(
+            error
+                .to_string()
+                .contains("commit deadbeef is not available from remote repository")
+        );
     }
 
     fn run_git<const N: usize>(args: [&str; N], cwd: &Path) {

@@ -1360,6 +1360,18 @@ impl Db {
             .await?;
         }
 
+        if persistence.command == "release"
+            && matches!(completion.status, InvocationLifecycleStatus::Succeeded)
+        {
+            self.apply_release_completion_in_tx(
+                &mut tx,
+                persistence.project_id,
+                persistence.environment_id,
+                completion.result.as_ref(),
+            )
+            .await?;
+        }
+
         sqlx::query(
             r#"
             UPDATE invocations
@@ -1383,6 +1395,49 @@ impl Db {
         .await?;
 
         tx.commit().await?;
+        Ok(())
+    }
+
+    async fn apply_release_completion_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        project_id: i64,
+        environment_id: i64,
+        result: Option<&Value>,
+    ) -> AppResult<()> {
+        let result = result.ok_or_else(|| {
+            AppError::Io(std::io::Error::other(
+                "release validation completed without resolved commit metadata",
+            ))
+        })?;
+        let resolved_commit_sha = result
+            .get("resolved_commit_sha")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AppError::Io(std::io::Error::other(
+                    "release validation missing resolved_commit_sha",
+                ))
+            })?;
+        let git_branch = result.get("git_branch").and_then(Value::as_str);
+
+        sqlx::query(
+            r#"
+            UPDATE environments
+            SET git_branch = $3,
+                git_commit_sha = $4
+            WHERE id = $1 AND project_id = $2
+            "#,
+        )
+        .bind(environment_id)
+        .bind(project_id)
+        .bind(git_branch)
+        .bind(resolved_commit_sha)
+        .execute(&mut **tx)
+        .await?;
+
+        let environment = self.get_environment_by_id_in_tx(tx, environment_id).await?;
+        self.record_environment_version_in_tx(tx, &environment, "released")
+            .await?;
         Ok(())
     }
 
@@ -1639,6 +1694,19 @@ impl Db {
         environment: &EnvironmentRecord,
         reason: &str,
     ) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        self.record_environment_version_in_tx(&mut tx, environment, reason)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn record_environment_version_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        environment: &EnvironmentRecord,
+        reason: &str,
+    ) -> AppResult<()> {
         sqlx::query(
             r#"
             INSERT INTO environment_versions (
@@ -1659,7 +1727,7 @@ impl Db {
             "target_name": environment.target_name,
             "environment_metadata": environment.metadata,
         })))
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
         Ok(())
     }
