@@ -620,6 +620,10 @@ impl Db {
 
         validate_environment_git_metadata(&project, &existing.slug, Some(&input.git_commit_sha))?;
 
+        if existing.git_commit_sha.as_deref() == Some(input.git_commit_sha.as_str()) {
+            return Ok(existing);
+        }
+
         sqlx::query(
             r#"
             UPDATE environments
@@ -1419,6 +1423,11 @@ impl Db {
                 ))
             })?;
         let git_branch = result.get("git_branch").and_then(Value::as_str);
+
+        let existing = self.get_environment_by_id_in_tx(tx, environment_id).await?;
+        if existing.git_commit_sha.as_deref() == Some(resolved_commit_sha) {
+            return Ok(());
+        }
 
         sqlx::query(
             r#"

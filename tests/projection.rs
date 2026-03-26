@@ -441,6 +441,23 @@ async fn remote_environment_release_and_rollback_record_forward_history() {
         ],
     ));
 
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "release",
+            "--project",
+            &project_id,
+            "--slug",
+            "ci-main",
+            "--git-branch",
+            "main",
+            "--git-commit-sha",
+            "def456",
+        ],
+    ));
+
     let created_version_id: i64 = sqlx::query_scalar(
         "SELECT ev.id FROM environment_versions ev JOIN environments e ON e.id = ev.environment_id WHERE e.slug = 'ci-main' AND ev.reason = 'created' ORDER BY ev.id DESC LIMIT 1",
     )

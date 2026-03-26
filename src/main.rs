@@ -360,6 +360,11 @@ async fn handle_environment_command(
             git_commit_sha,
             git_ref,
         } => {
+            let current_environment = client
+                .environment_show_by_id(&project, &slug)
+                .await?
+                .environment;
+            let current_commit_sha = current_environment.git_commit_sha.clone();
             print_release_start(
                 &project,
                 &slug,
@@ -371,6 +376,12 @@ async fn handle_environment_command(
                     std::io::ErrorKind::InvalidInput,
                     "provide exactly one of --git-commit-sha or --git-ref",
                 )));
+            }
+            if let Some(candidate_sha) = git_commit_sha.as_deref()
+                && current_commit_sha.as_deref() == Some(candidate_sha)
+            {
+                print_release_already_released(&project, &slug, candidate_sha);
+                return Ok(());
             }
             let release_args = build_release_validation_args(
                 git_branch.clone(),
@@ -407,7 +418,15 @@ async fn handle_environment_command(
                 .environment_show_by_id(&project, &slug)
                 .await?
                 .environment;
-            print_release_success(&project, &slug, environment.git_commit_sha.as_deref());
+            if current_commit_sha == environment.git_commit_sha {
+                print_release_already_released(
+                    &project,
+                    &slug,
+                    environment.git_commit_sha.as_deref().unwrap_or(""),
+                );
+            } else {
+                print_release_success(&project, &slug, environment.git_commit_sha.as_deref());
+            }
         }
         EnvironmentCommand::History { project, slug } => {
             for version in client.environment_history(&project, &slug).await?.versions {
@@ -692,6 +711,27 @@ fn print_release_success(project: &str, slug: &str, git_commit_sha: Option<&str>
         style(
             &format!("-> {resolved}"),
             &[CliStyle::Green, CliStyle::Bold],
+            use_color
+        ),
+    );
+}
+
+fn print_release_already_released(project: &str, slug: &str, git_commit_sha: &str) {
+    let use_color = should_use_color();
+    println!(
+        "{} {} {} {} {} {}",
+        style("✅", &[], use_color),
+        style(
+            "Version already released.",
+            &[CliStyle::Cyan, CliStyle::Bold],
+            use_color
+        ),
+        style(project, &[CliStyle::Bold], use_color),
+        style("/", &[CliStyle::Dim], use_color),
+        style(slug, &[CliStyle::Bold], use_color),
+        style(
+            &format!("-> {git_commit_sha}"),
+            &[CliStyle::Cyan, CliStyle::Bold],
             use_color
         ),
     );
