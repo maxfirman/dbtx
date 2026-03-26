@@ -46,7 +46,11 @@ async fn dbtx_environment_uses_stored_target_name_when_slug_differs() {
     )
     .expect("write marker model");
 
-    assert_success(&run_dbtx(db.service_url(), &project, &["project", "init"]));
+    assert_success(&run_dbtx(
+        db.service_url(),
+        &project,
+        &["project", "init"],
+    ));
     assert_success(&run_dbtx(
         db.service_url(),
         &project,
@@ -248,7 +252,11 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
     let project = RealProject::new();
     project.seed();
 
-    assert_success(&run_dbtx(db.service_url(), &project, &["project", "init"]));
+    assert_success(&run_dbtx(
+        db.service_url(),
+        &project,
+        &["project", "init", "--mode", "remote"],
+    ));
     assert_success(&run_dbtx(
         db.service_url(),
         &project,
@@ -259,9 +267,6 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
             "remote",
             "--target",
             "dev",
-            "--kind",
-            "commit",
-            "--immutable",
             "--git-branch",
             "main",
             "--git-commit-sha",
@@ -913,8 +918,6 @@ async fn seeded_environment_starts_with_empty_state_modified() {
             &project_id,
             "--slug",
             "pr-123",
-            "--kind",
-            "ephemeral",
             "--baseline",
             "staging",
             "--pr-number",

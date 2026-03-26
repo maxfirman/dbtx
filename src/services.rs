@@ -3,7 +3,7 @@ use crate::db::{
     CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, GitState,
     LocalEnvironmentUpsertInput, ProjectRecord, RunFinalization, RunStart, UpdateEnvironmentInput,
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
-    read_dbt_project_name, read_git_state, spawn_dbt_child, validate_environment_git_state,
+    read_dbt_project_name, read_git_state, spawn_dbt_child,
 };
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
@@ -109,6 +109,7 @@ pub struct LocalExecutionPersistence {
 #[derive(Debug, Clone)]
 pub struct ProjectInitRequest {
     pub current_dir: PathBuf,
+    pub mode: Option<String>,
     pub git_repo_url: Option<String>,
     pub project_root: Option<String>,
     pub default_branch: Option<String>,
@@ -118,6 +119,7 @@ pub struct ProjectInitRequest {
 #[derive(Debug, Clone)]
 pub struct ProjectUpdateRequest {
     pub current_dir: PathBuf,
+    pub mode: Option<String>,
     pub git_repo_url: Option<String>,
     pub project_root: Option<String>,
     pub default_branch: Option<String>,
@@ -129,12 +131,10 @@ pub struct EnvironmentCreateRequest {
     pub project: Option<String>,
     pub slug: Option<String>,
     pub target: Option<String>,
-    pub kind: String,
     pub baseline: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
     pub pr_number: Option<i32>,
-    pub immutable: bool,
     pub status: String,
     pub worker_queue: Option<String>,
     pub schema_name: Option<String>,
@@ -145,12 +145,10 @@ pub struct EnvironmentUpdateRequest {
     pub current_dir: PathBuf,
     pub project: String,
     pub slug: String,
-    pub kind: Option<String>,
     pub baseline: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
     pub pr_number: Option<i32>,
-    pub immutable: bool,
     pub status: Option<String>,
     pub adapter_type: Option<String>,
     pub worker_queue: Option<String>,
@@ -162,6 +160,7 @@ pub struct EnvironmentUpdateRequest {
 pub struct InferredProjectInput {
     pub project_id: String,
     pub project_name: String,
+    pub mode: String,
     pub git_repo_url: Option<String>,
     pub default_branch: Option<String>,
     pub project_root: Option<String>,
@@ -187,6 +186,7 @@ impl<'a> ProjectService<'a> {
         let input = CreateProjectInput {
             project_id: inferred.project_id,
             project_name: inferred.project_name,
+            mode: request.mode.unwrap_or(inferred.mode),
             git_repo_url: inferred.git_repo_url,
             default_branch: inferred.default_branch,
             project_root: inferred.project_root,
@@ -218,6 +218,7 @@ impl<'a> ProjectService<'a> {
             .update_project(CreateProjectInput {
                 project_id: inferred.project_id,
                 project_name: inferred.project_name,
+                mode: request.mode.unwrap_or(inferred.mode),
                 git_repo_url: inferred.git_repo_url,
                 default_branch: inferred.default_branch,
                 project_root: inferred.project_root,
@@ -272,12 +273,10 @@ impl<'a> EnvironmentService<'a> {
                 slug,
                 profile_name: local_profile.profile_name,
                 target_name: local_profile.target_name,
-                kind: request.kind,
                 baseline_slug: request.baseline,
                 git_branch: request.git_branch,
                 git_commit_sha: request.git_commit_sha,
                 pr_number: request.pr_number,
-                immutable: request.immutable,
                 status: request.status,
                 adapter_type: local_profile.adapter_type,
                 worker_queue: request.worker_queue,
@@ -298,12 +297,10 @@ impl<'a> EnvironmentService<'a> {
             .update_environment(UpdateEnvironmentInput {
                 project: project.project_id,
                 slug: request.slug,
-                kind: request.kind,
                 baseline_slug: request.baseline,
                 git_branch: request.git_branch,
                 git_commit_sha: request.git_commit_sha,
                 pr_number: request.pr_number,
-                immutable: request.immutable,
                 status: request.status,
                 adapter_type: request.adapter_type,
                 worker_queue: request.worker_queue,
@@ -349,18 +346,27 @@ impl<'a> EnvironmentService<'a> {
     ) -> AppResult<ProjectRecord> {
         match project.or_else(|| std::env::var("DBTX_PROJECT_ID").ok()) {
             Some(project_id) => self.db.get_project_by_project_id(&project_id).await,
-            None => {
-                let inferred = infer_local_project_defaults(current_dir, None, None, None)?;
+            None => self.load_or_create_inferred_project(current_dir).await,
+        }
+    }
+
+    async fn load_or_create_inferred_project(&self, project_dir: &Path) -> AppResult<ProjectRecord> {
+        let project_input = infer_local_project_defaults(project_dir, None, None, None)?;
+        match self.db.get_project_by_project_id(&project_input.project_id).await {
+            Ok(project) => Ok(project),
+            Err(AppError::ProjectIdNotFound(_)) => {
                 self.db
                     .upsert_project(CreateProjectInput {
-                        project_id: inferred.project_id,
-                        project_name: inferred.project_name,
-                        git_repo_url: inferred.git_repo_url,
-                        default_branch: inferred.default_branch,
-                        project_root: inferred.project_root,
+                        project_id: project_input.project_id,
+                        project_name: project_input.project_name,
+                        mode: project_input.mode,
+                        git_repo_url: project_input.git_repo_url,
+                        default_branch: project_input.default_branch,
+                        project_root: project_input.project_root,
                     })
                     .await
             }
+            Err(err) => Err(err),
         }
     }
 }
@@ -398,8 +404,6 @@ impl<'a> InvocationService<'a> {
         let (project, environment) = self
             .resolve_local_project_and_environment(&ctx.project_dir, ctx.target_name.as_deref())
             .await?;
-        validate_environment_git_state(&project, &environment, &git_state)?;
-
         match request.command {
             InvocationCommand::Ls => {
                 self.invoke_ls(
@@ -449,8 +453,6 @@ impl<'a> InvocationService<'a> {
         let (project, environment) = self
             .resolve_local_project_and_environment(&ctx.project_dir, ctx.target_name.as_deref())
             .await?;
-        validate_environment_git_state(&project, &environment, &git_state)?;
-
         let reconstructed_manifest = self
             .db
             .load_reconstructed_manifest(project.id, environment.id)
@@ -541,10 +543,10 @@ impl<'a> InvocationService<'a> {
             .get_environment(project_id, environment_slug)
             .await?;
 
-        if !environment.immutable {
-            return Err(AppError::RemoteExecutionRequiresImmutableEnvironment(
+        if project.mode != "remote" {
+            return Err(AppError::RemoteExecutionRequiresRemoteProject(
                 project.project_id.clone(),
-                environment.slug.clone(),
+                project.mode.clone(),
             ));
         }
         let repo_url = project.git_repo_url.clone().ok_or_else(|| {
@@ -654,17 +656,7 @@ impl<'a> InvocationService<'a> {
         project_dir: &Path,
         target_override: Option<&str>,
     ) -> AppResult<(ProjectRecord, EnvironmentRecord)> {
-        let project_input = infer_local_project_defaults(project_dir, None, None, None)?;
-        let project = self
-            .db
-            .upsert_project(CreateProjectInput {
-                project_id: project_input.project_id,
-                project_name: project_input.project_name,
-                git_repo_url: project_input.git_repo_url,
-                default_branch: project_input.default_branch,
-                project_root: project_input.project_root,
-            })
-            .await?;
+        let project = self.load_or_create_inferred_project(project_dir).await?;
         let local_profile = LocalTargetProfile::from_local_project(project_dir, target_override)?;
         let profile_secrets = local_profile.encrypted_secrets()?;
         let environment = self
@@ -681,6 +673,26 @@ impl<'a> InvocationService<'a> {
             })
             .await?;
         Ok((project, environment))
+    }
+
+    async fn load_or_create_inferred_project(&self, project_dir: &Path) -> AppResult<ProjectRecord> {
+        let project_input = infer_local_project_defaults(project_dir, None, None, None)?;
+        match self.db.get_project_by_project_id(&project_input.project_id).await {
+            Ok(project) => Ok(project),
+            Err(AppError::ProjectIdNotFound(_)) => {
+                self.db
+                    .upsert_project(CreateProjectInput {
+                        project_id: project_input.project_id,
+                        project_name: project_input.project_name,
+                        mode: project_input.mode,
+                        git_repo_url: project_input.git_repo_url,
+                        default_branch: project_input.default_branch,
+                        project_root: project_input.project_root,
+                    })
+                    .await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     async fn invoke_persisting<O: InvocationObserver>(
@@ -941,6 +953,7 @@ pub fn infer_local_project_defaults(
     Ok(InferredProjectInput {
         project_id,
         project_name,
+        mode: "local".to_string(),
         git_repo_url: git_repo_url.map(ToString::to_string).or(git_state.repo_url),
         default_branch: default_branch.map(ToString::to_string),
         project_root: project_root

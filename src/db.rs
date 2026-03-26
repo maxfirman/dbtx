@@ -42,6 +42,7 @@ pub struct ProjectRecord {
     pub id: i64,
     pub project_id: String,
     pub project_name: String,
+    pub mode: String,
     pub git_repo_url: Option<String>,
     pub default_branch: Option<String>,
     pub project_root: Option<String>,
@@ -57,13 +58,11 @@ pub struct EnvironmentRecord {
     pub slug: String,
     pub profile_name: String,
     pub target_name: String,
-    pub kind: String,
     pub baseline_environment_id: Option<i64>,
     pub baseline_environment_slug: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
     pub pr_number: Option<i32>,
-    pub immutable: bool,
     pub status: String,
     pub adapter_type: String,
     pub worker_queue: String,
@@ -78,6 +77,7 @@ pub struct EnvironmentRecord {
 pub struct CreateProjectInput {
     pub project_id: String,
     pub project_name: String,
+    pub mode: String,
     pub git_repo_url: Option<String>,
     pub default_branch: Option<String>,
     pub project_root: Option<String>,
@@ -89,12 +89,10 @@ pub struct CreateEnvironmentInput {
     pub slug: String,
     pub profile_name: String,
     pub target_name: String,
-    pub kind: String,
     pub baseline_slug: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
     pub pr_number: Option<i32>,
-    pub immutable: bool,
     pub status: String,
     pub adapter_type: String,
     pub worker_queue: Option<String>,
@@ -108,12 +106,10 @@ pub struct CreateEnvironmentInput {
 pub struct UpdateEnvironmentInput {
     pub project: String,
     pub slug: String,
-    pub kind: Option<String>,
     pub baseline_slug: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
     pub pr_number: Option<i32>,
-    pub immutable: bool,
     pub status: Option<String>,
     pub adapter_type: Option<String>,
     pub worker_queue: Option<String>,
@@ -254,15 +250,17 @@ impl Db {
     }
 
     pub async fn create_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
+        validate_project_mode(&input.mode)?;
         let row = sqlx::query(
             r#"
-            INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root)
-            VALUES ($1, $2, $3, COALESCE($4, 'main'), $5)
-            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
+            INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root)
+            VALUES ($1, $2, $3, $4, COALESCE($5, 'main'), $6)
+            RETURNING id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
+        .bind(&input.mode)
         .bind(input.git_repo_url.as_deref())
         .bind(input.default_branch.as_deref())
         .bind(input.project_root.as_deref())
@@ -272,19 +270,22 @@ impl Db {
     }
 
     pub async fn update_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
+        validate_project_mode(&input.mode)?;
         let row = sqlx::query(
             r#"
             UPDATE projects
             SET project_name = $2,
-                git_repo_url = $3,
-                default_branch = COALESCE($4, 'main'),
-                project_root = $5
+                mode = $3,
+                git_repo_url = $4,
+                default_branch = COALESCE($5, 'main'),
+                project_root = $6
             WHERE project_id = $1
-            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
+            RETURNING id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
+        .bind(&input.mode)
         .bind(input.git_repo_url.as_deref())
         .bind(input.default_branch.as_deref())
         .bind(input.project_root.as_deref())
@@ -295,20 +296,23 @@ impl Db {
     }
 
     pub async fn upsert_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
+        validate_project_mode(&input.mode)?;
         let row = sqlx::query(
             r#"
-            INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root)
-            VALUES ($1, $2, $3, COALESCE($4, 'main'), $5)
+            INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root)
+            VALUES ($1, $2, $3, $4, COALESCE($5, 'main'), $6)
             ON CONFLICT (project_id) DO UPDATE
             SET project_name = EXCLUDED.project_name,
+                mode = EXCLUDED.mode,
                 git_repo_url = EXCLUDED.git_repo_url,
                 default_branch = EXCLUDED.default_branch,
                 project_root = EXCLUDED.project_root
-            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
+            RETURNING id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
+        .bind(&input.mode)
         .bind(input.git_repo_url.as_deref())
         .bind(input.default_branch.as_deref())
         .bind(input.project_root.as_deref())
@@ -322,6 +326,7 @@ impl Db {
         existing_project_id: &str,
         input: CreateProjectInput,
     ) -> AppResult<ProjectRecord> {
+        validate_project_mode(&input.mode)?;
         let mut tx = self.pool.begin().await?;
         let existing_row = sqlx::query("SELECT id FROM projects WHERE project_id = $1")
             .bind(existing_project_id)
@@ -349,16 +354,18 @@ impl Db {
             UPDATE projects
             SET project_id = $2,
                 project_name = $3,
-                git_repo_url = $4,
-                default_branch = COALESCE($5, 'main'),
-                project_root = $6
+                mode = $4,
+                git_repo_url = $5,
+                default_branch = COALESCE($6, 'main'),
+                project_root = $7
             WHERE id = $1
-            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
+            RETURNING id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(project_pk)
         .bind(&input.project_id)
         .bind(&input.project_name)
+        .bind(&input.mode)
         .bind(input.git_repo_url.as_deref())
         .bind(input.default_branch.as_deref())
         .bind(input.project_root.as_deref())
@@ -371,7 +378,7 @@ impl Db {
 
     pub async fn list_projects(&self) -> AppResult<Vec<ProjectRecord>> {
         let rows = sqlx::query(
-            "SELECT id, project_id, project_name, git_repo_url, default_branch, project_root, metadata FROM projects ORDER BY project_name",
+            "SELECT id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata FROM projects ORDER BY project_name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -380,7 +387,7 @@ impl Db {
 
     pub async fn get_project_by_project_id(&self, project_id: &str) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
-            "SELECT id, project_id, project_name, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1",
+            "SELECT id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1",
         )
         .bind(project_id)
         .fetch_optional(&self.pool)
@@ -393,9 +400,9 @@ impl Db {
         &self,
         input: CreateEnvironmentInput,
     ) -> AppResult<EnvironmentRecord> {
-        validate_environment_input(&input.kind, input.git_commit_sha.as_deref())?;
         validate_environment_status(&input.status)?;
         let project = self.get_project_by_project_id(&input.project).await?;
+        validate_environment_git_metadata(&project, &input.slug, input.git_commit_sha.as_deref())?;
         validate_environment_profile(
             &input.adapter_type,
             input.schema_name.as_deref().unwrap_or(""),
@@ -419,11 +426,11 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO environments (
-                project_id, slug, profile_name, target_name, kind, baseline_environment_id, git_branch, git_commit_sha,
-                pr_number, immutable, status, adapter_type, worker_queue, schema_name, threads,
+                project_id, slug, profile_name, target_name, baseline_environment_id, git_branch, git_commit_sha,
+                pr_number, status, adapter_type, worker_queue, schema_name, threads,
                 profile_config, profile_secrets
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING id
             "#,
         )
@@ -431,12 +438,10 @@ impl Db {
         .bind(&input.slug)
         .bind(&input.profile_name)
         .bind(&input.target_name)
-        .bind(&input.kind)
         .bind(baseline.as_ref().map(|env| env.id))
         .bind(input.git_branch.as_deref())
         .bind(input.git_commit_sha.as_deref())
         .bind(input.pr_number)
-        .bind(input.immutable)
         .bind(&input.status)
         .bind(&input.adapter_type)
         .bind(&worker_queue)
@@ -475,21 +480,6 @@ impl Db {
             .get_environment_by_project_id(project.id, &project.project_id, &input.slug)
             .await?;
 
-        if existing.immutable {
-            let changing_identity = input.kind.is_some()
-                || input.baseline_slug.is_some()
-                || input.git_branch.is_some()
-                || input.git_commit_sha.is_some()
-                || input.immutable;
-            if changing_identity {
-                return Err(AppError::ImmutableEnvironment(
-                    project.project_id,
-                    existing.slug,
-                ));
-            }
-        }
-
-        let kind = input.kind.as_deref().unwrap_or(&existing.kind).to_string();
         let baseline_environment_id = match input.baseline_slug.as_deref() {
             Some(baseline_slug) => Some(
                 self.get_environment_by_project_id(project.id, &project.project_id, baseline_slug)
@@ -500,7 +490,7 @@ impl Db {
         };
         let git_branch = input.git_branch.or(existing.git_branch.clone());
         let git_commit_sha = input.git_commit_sha.or(existing.git_commit_sha.clone());
-        validate_environment_input(&kind, git_commit_sha.as_deref())?;
+        validate_environment_git_metadata(&project, &existing.slug, git_commit_sha.as_deref())?;
         let adapter_type = input
             .adapter_type
             .as_deref()
@@ -541,39 +531,34 @@ impl Db {
                 .unwrap_or(&existing.profile_secrets),
             true,
         )?;
-        let immutable = existing.immutable || input.immutable;
         let status = input.status.unwrap_or(existing.status.clone());
         validate_environment_status(&status)?;
 
         sqlx::query(
             r#"
             UPDATE environments
-            SET kind = $3,
-                baseline_environment_id = $4,
-                git_branch = $5,
-                git_commit_sha = $6,
-                pr_number = $7,
-                immutable = $8,
-                status = $9,
-                adapter_type = $10,
-                worker_queue = $11,
-                profile_name = $12,
-                target_name = $13,
-                schema_name = $14,
-                threads = $15,
-                profile_config = $16,
-                profile_secrets = $17
+            SET baseline_environment_id = $3,
+                git_branch = $4,
+                git_commit_sha = $5,
+                pr_number = $6,
+                status = $7,
+                adapter_type = $8,
+                worker_queue = $9,
+                profile_name = $10,
+                target_name = $11,
+                schema_name = $12,
+                threads = $13,
+                profile_config = $14,
+                profile_secrets = $15
             WHERE id = $1 AND project_id = $2
             "#,
         )
         .bind(existing.id)
         .bind(project.id)
-        .bind(&kind)
         .bind(baseline_environment_id)
         .bind(git_branch.as_deref())
         .bind(git_commit_sha.as_deref())
         .bind(input.pr_number.or(existing.pr_number))
-        .bind(immutable)
         .bind(&status)
         .bind(&adapter_type)
         .bind(&worker_queue)
@@ -614,13 +599,11 @@ impl Db {
                 e.slug,
                 e.profile_name,
                 e.target_name,
-                e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
                 e.pr_number,
-                e.immutable,
                 e.status,
                 e.adapter_type,
                 e.worker_queue,
@@ -1440,10 +1423,10 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO environments (
-                project_id, slug, profile_name, target_name, kind, status, adapter_type,
+                project_id, slug, profile_name, target_name, status, adapter_type,
                 worker_queue, schema_name, threads, profile_config, profile_secrets
             )
-            VALUES ($1, $2, $3, $4, 'persistent', 'active', $5, 'generic', $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, 'active', $5, 'generic', $6, $7, $8, $9)
             ON CONFLICT (project_id, slug) DO UPDATE
             SET slug = EXCLUDED.slug,
                 profile_name = EXCLUDED.profile_name,
@@ -1525,10 +1508,10 @@ impl Db {
         sqlx::query(
             r#"
             INSERT INTO environment_versions (
-                environment_id, project_id, reason, git_branch, git_commit_sha, kind,
-                immutable, baseline_environment_id, metadata
+                environment_id, project_id, reason, git_branch, git_commit_sha,
+                baseline_environment_id, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
         .bind(environment.id)
@@ -1536,8 +1519,6 @@ impl Db {
         .bind(reason)
         .bind(environment.git_branch.as_deref())
         .bind(environment.git_commit_sha.as_deref())
-        .bind(&environment.kind)
-        .bind(environment.immutable)
         .bind(environment.baseline_environment_id)
         .bind(sqlx::types::Json(serde_json::json!({
             "environment_slug": environment.slug,
@@ -1618,13 +1599,11 @@ impl Db {
                 e.slug,
                 e.profile_name,
                 e.target_name,
-                e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
                 e.pr_number,
-                e.immutable,
                 e.status,
                 e.adapter_type,
                 e.worker_queue,
@@ -1661,13 +1640,11 @@ impl Db {
                 e.slug,
                 e.profile_name,
                 e.target_name,
-                e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
                 e.pr_number,
-                e.immutable,
                 e.status,
                 e.adapter_type,
                 e.worker_queue,
@@ -1703,13 +1680,11 @@ impl Db {
                 e.slug,
                 e.profile_name,
                 e.target_name,
-                e.kind,
                 e.baseline_environment_id,
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
                 e.pr_number,
-                e.immutable,
                 e.status,
                 e.adapter_type,
                 e.worker_queue,
@@ -2328,14 +2303,28 @@ fn is_promotable_status(status: &str) -> bool {
     matches!(status, "success" | "pass" | "created")
 }
 
-fn validate_environment_input(kind: &str, git_commit_sha: Option<&str>) -> AppResult<()> {
-    if !matches!(kind, "persistent" | "ephemeral" | "commit") {
-        return Err(AppError::InvalidEnvironmentKind(kind.to_string()));
+fn validate_project_mode(mode: &str) -> AppResult<()> {
+    if matches!(mode, "local" | "remote") {
+        Ok(())
+    } else {
+        Err(AppError::InvalidProjectMode(mode.to_string()))
     }
-    if kind == "commit" && git_commit_sha.is_none() {
-        return Err(AppError::CommitEnvironmentRequiresSha);
+}
+
+fn validate_environment_git_metadata(
+    project: &ProjectRecord,
+    environment_slug: &str,
+    git_commit_sha: Option<&str>,
+) -> AppResult<()> {
+    validate_project_mode(&project.mode)?;
+    if project.mode == "remote" && git_commit_sha.is_none() {
+        Err(AppError::RemoteProjectEnvironmentRequiresSha(
+            project.project_id.clone(),
+            environment_slug.to_string(),
+        ))
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 fn validate_environment_status(status: &str) -> AppResult<()> {
@@ -2352,6 +2341,7 @@ fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
         project_name: row.get("project_name"),
+        mode: row.get("mode"),
         git_repo_url: row.get("git_repo_url"),
         default_branch: row.get("default_branch"),
         project_root: row.get("project_root"),
@@ -2371,13 +2361,11 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         slug: row.get("slug"),
         profile_name: row.get("profile_name"),
         target_name: row.get("target_name"),
-        kind: row.get("kind"),
         baseline_environment_id: row.get("baseline_environment_id"),
         baseline_environment_slug: row.get("baseline_environment_slug"),
         git_branch: row.get("git_branch"),
         git_commit_sha: row.get("git_commit_sha"),
         pr_number: row.get("pr_number"),
-        immutable: row.get("immutable"),
         status: row.get("status"),
         adapter_type: row.get("adapter_type"),
         worker_queue: row.get("worker_queue"),
@@ -2555,30 +2543,6 @@ pub(crate) fn read_git_state(project_dir: &Path) -> GitState {
         branch,
         commit_sha,
         repo_url,
-    }
-}
-
-pub(crate) fn validate_environment_git_state(
-    project: &ProjectRecord,
-    environment: &EnvironmentRecord,
-    git_state: &GitState,
-) -> AppResult<()> {
-    if !environment.immutable {
-        return Ok(());
-    }
-
-    let branch_matches =
-        environment.git_branch.is_none() || environment.git_branch == git_state.branch;
-    let commit_matches =
-        environment.git_commit_sha.is_none() || environment.git_commit_sha == git_state.commit_sha;
-
-    if branch_matches && commit_matches {
-        Ok(())
-    } else {
-        Err(AppError::ImmutableEnvironmentGitMismatch(
-            project.project_id.clone(),
-            environment.slug.clone(),
-        ))
     }
 }
 

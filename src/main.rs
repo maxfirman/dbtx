@@ -202,6 +202,7 @@ async fn handle_project_command(
     let client = daemon_client(&current_dir, service_url_override)?;
     match command {
         ProjectCommand::Init {
+            mode,
             git_repo_url,
             project_root,
             default_branch,
@@ -210,6 +211,7 @@ async fn handle_project_command(
             let project = client
                 .project_init(api::ProjectInitApiRequest {
                     current_dir: current_dir.display().to_string(),
+                    mode,
                     git_repo_url,
                     project_root,
                     default_branch,
@@ -220,6 +222,7 @@ async fn handle_project_command(
             print_project(&project);
         }
         ProjectCommand::Update {
+            mode,
             git_repo_url,
             project_root,
             default_branch,
@@ -234,6 +237,7 @@ async fn handle_project_command(
                     &project_id,
                     api::ProjectUpdateApiRequest {
                         current_dir: current_dir.display().to_string(),
+                        mode,
                         git_repo_url,
                         project_root,
                         default_branch,
@@ -273,12 +277,10 @@ async fn handle_environment_command(
             project,
             slug,
             target,
-            kind,
             baseline,
             git_branch,
             git_commit_sha,
             pr_number,
-            immutable,
             status,
             worker_queue,
             schema_name,
@@ -289,12 +291,10 @@ async fn handle_environment_command(
                     project,
                     slug,
                     target,
-                    kind,
                     baseline,
                     git_branch,
                     git_commit_sha,
                     pr_number,
-                    immutable,
                     status,
                     worker_queue,
                     schema_name,
@@ -306,12 +306,10 @@ async fn handle_environment_command(
         EnvironmentCommand::Update {
             project,
             slug,
-            kind,
             baseline,
             git_branch,
             git_commit_sha,
             pr_number,
-            immutable,
             status,
             adapter_type,
             worker_queue,
@@ -326,12 +324,10 @@ async fn handle_environment_command(
                         current_dir: current_dir.display().to_string(),
                         project: project.clone(),
                         slug: slug.clone(),
-                        kind,
                         baseline,
                         git_branch,
                         git_commit_sha,
                         pr_number,
-                        immutable,
                         status,
                         adapter_type,
                         worker_queue,
@@ -645,10 +641,11 @@ async fn create_invocation(
 
 fn print_project(project: &ProjectRecord) {
     println!(
-        "project id={} project_id={} project_name={} git_repo_url={} default_branch={} project_root={} metadata={}",
+        "project id={} project_id={} project_name={} mode={} git_repo_url={} default_branch={} project_root={} metadata={}",
         project.id,
         project.project_id,
         project.project_name,
+        project.mode,
         project.git_repo_url.as_deref().unwrap_or(""),
         project.default_branch.as_deref().unwrap_or(""),
         project.project_root.as_deref().unwrap_or(""),
@@ -658,7 +655,7 @@ fn print_project(project: &ProjectRecord) {
 
 fn print_environment(environment: &EnvironmentRecord) {
     println!(
-        "environment id={} project_pk={} project_id={} project={} slug={} profile_name={} target_name={} kind={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} immutable={} status={} adapter_type={} worker_queue={} schema_name={} threads={} profile_config={} metadata={}",
+        "environment id={} project_pk={} project_id={} project={} slug={} profile_name={} target_name={} baseline_id={} baseline={} git_branch={} git_commit_sha={} pr_number={} status={} adapter_type={} worker_queue={} schema_name={} threads={} profile_config={} metadata={}",
         environment.id,
         environment.project_id,
         environment.project_ref,
@@ -666,7 +663,6 @@ fn print_environment(environment: &EnvironmentRecord) {
         environment.slug,
         environment.profile_name,
         environment.target_name,
-        environment.kind,
         environment
             .baseline_environment_id
             .map(|value| value.to_string())
@@ -681,7 +677,6 @@ fn print_environment(environment: &EnvironmentRecord) {
             .pr_number
             .map(|value| value.to_string())
             .unwrap_or_default(),
-        environment.immutable,
         environment.status,
         environment.adapter_type,
         environment.worker_queue,

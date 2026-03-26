@@ -56,16 +56,7 @@ async fn project_and_environment_cli_round_trip() {
     let output = run_dbtx_in_dir(
         db.service_url(),
         repo.project_dir(),
-        &[
-            "environment",
-            "create",
-            "--slug",
-            "staging",
-            "--target",
-            "dev",
-            "--kind",
-            "persistent",
-        ],
+        &["environment", "create", "--slug", "staging", "--target", "dev"],
     );
     assert_success(&output);
 
@@ -105,15 +96,13 @@ async fn project_and_environment_cli_round_trip() {
         Some("https://example.com/repo.git")
     );
 
-    let environment_row = sqlx::query(
-        "SELECT slug, target_name, kind, status FROM environments WHERE slug = 'staging'",
-    )
+    let environment_row =
+        sqlx::query("SELECT slug, target_name, status FROM environments WHERE slug = 'staging'")
     .fetch_one(db.pool())
     .await
     .expect("environment row");
     assert_eq!(environment_row.get::<String, _>("slug"), "staging");
     assert_eq!(environment_row.get::<String, _>("target_name"), "dev");
-    assert_eq!(environment_row.get::<String, _>("kind"), "persistent");
     assert_eq!(environment_row.get::<String, _>("status"), "active");
 
     let duplicate_output = run_dbtx_in_dir(
@@ -239,8 +228,6 @@ async fn environment_seed_from_copies_active_state_without_runs() {
             &project_id,
             "--slug",
             "target",
-            "--kind",
-            "ephemeral",
             "--baseline",
             "source",
             "--git-branch",
@@ -287,7 +274,7 @@ async fn environment_seed_from_copies_active_state_without_runs() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
-async fn commit_environment_requires_commit_sha_and_records_version_history() {
+async fn remote_project_environment_requires_commit_sha_and_records_version_history() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
@@ -295,7 +282,7 @@ async fn commit_environment_requires_commit_sha_and_records_version_history() {
     assert_success(&run_dbtx_in_dir(
         db.service_url(),
         repo.project_dir(),
-        &["project", "init"],
+        &["project", "init", "--mode", "remote"],
     ));
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
@@ -309,13 +296,11 @@ async fn commit_environment_requires_commit_sha_and_records_version_history() {
             &project_id,
             "--slug",
             "ci-main",
-            "--kind",
-            "commit",
         ],
     );
     assert_failure(&missing_sha);
     assert!(
-        String::from_utf8_lossy(&missing_sha.stderr).contains("require --git-commit-sha"),
+        String::from_utf8_lossy(&missing_sha.stderr).contains("requires --git-commit-sha"),
         "unexpected stderr: {}",
         String::from_utf8_lossy(&missing_sha.stderr)
     );
@@ -330,13 +315,10 @@ async fn commit_environment_requires_commit_sha_and_records_version_history() {
             &project_id,
             "--slug",
             "ci-main",
-            "--kind",
-            "commit",
             "--git-branch",
             "main",
             "--git-commit-sha",
             "abc123",
-            "--immutable",
         ],
     ));
 
@@ -351,7 +333,7 @@ async fn commit_environment_requires_commit_sha_and_records_version_history() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
-async fn immutable_environment_rejects_identity_updates() {
+async fn remote_project_environment_allows_commit_updates() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
@@ -359,7 +341,7 @@ async fn immutable_environment_rejects_identity_updates() {
     assert_success(&run_dbtx_in_dir(
         db.service_url(),
         repo.project_dir(),
-        &["project", "init"],
+        &["project", "init", "--mode", "remote"],
     ));
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
 
@@ -373,13 +355,10 @@ async fn immutable_environment_rejects_identity_updates() {
             &project_id,
             "--slug",
             "ci-main",
-            "--kind",
-            "commit",
             "--git-branch",
             "main",
             "--git-commit-sha",
             "abc123",
-            "--immutable",
         ],
     ));
 
@@ -397,48 +376,36 @@ async fn immutable_environment_rejects_identity_updates() {
             "def456",
         ],
     );
-    assert_failure(&update);
-    assert!(
-        String::from_utf8_lossy(&update.stderr).contains("immutable"),
-        "unexpected stderr: {}",
-        String::from_utf8_lossy(&update.stderr)
-    );
+    assert_success(&update);
+
+    let commit_sha: Option<String> = sqlx::query_scalar(
+        "SELECT git_commit_sha FROM environments WHERE slug = 'ci-main'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("environment commit sha");
+    assert_eq!(commit_sha.as_deref(), Some("def456"));
 }
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
-async fn remote_invocation_requires_project_git_metadata() {
+async fn remote_invocation_requires_remote_project_mode() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
-    bootstrap_project_and_env(&repo, db.service_url(), "remote").await;
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &["project", "init"],
+    ));
     let project_id = read_project_id_from_dbt_project(repo.project_dir());
-
-    sqlx::query("UPDATE projects SET git_repo_url = NULL WHERE project_id = $1")
-        .bind(&project_id)
-        .execute(db.pool())
-        .await
-        .expect("null git_repo_url");
-
-    assert!(
-        client
-            .invocation_create(remote_invocation_request(
-                &project_id,
-                "remote",
-                InvocationCommandApi::Ls,
-                None,
-            ))
-            .await
-            .is_err()
-    );
-
-    sqlx::query("UPDATE projects SET git_repo_url = 'https://example.com/repo.git', project_root = NULL WHERE project_id = $1")
-        .bind(&project_id)
-        .execute(db.pool())
-        .await
-        .expect("null project_root");
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &["environment", "create", "--slug", "remote", "--target", "dev"],
+    ));
 
     assert!(
         client
@@ -1594,7 +1561,7 @@ async fn bootstrap_project_and_env(repo: &TempProjectRepo, service_url: &str, sl
     assert_success(&run_dbtx_in_dir(
         service_url,
         repo.project_dir(),
-        &["project", "init"],
+        &["project", "init", "--mode", "remote"],
     ));
     assert_success(&run_dbtx_in_dir(
         service_url,
@@ -1606,9 +1573,6 @@ async fn bootstrap_project_and_env(repo: &TempProjectRepo, service_url: &str, sl
             slug,
             "--target",
             "dev",
-            "--kind",
-            "commit",
-            "--immutable",
             "--git-branch",
             "main",
             "--git-commit-sha",

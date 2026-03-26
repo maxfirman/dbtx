@@ -44,6 +44,7 @@ pub struct EnvironmentsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectInitApiRequest {
     pub current_dir: String,
+    pub mode: Option<String>,
     pub git_repo_url: Option<String>,
     pub project_root: Option<String>,
     pub default_branch: Option<String>,
@@ -53,6 +54,7 @@ pub struct ProjectInitApiRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectUpdateApiRequest {
     pub current_dir: String,
+    pub mode: Option<String>,
     pub git_repo_url: Option<String>,
     pub project_root: Option<String>,
     pub default_branch: Option<String>,
@@ -70,12 +72,10 @@ pub struct EnvironmentCreateApiRequest {
     pub project: Option<String>,
     pub slug: Option<String>,
     pub target: Option<String>,
-    pub kind: String,
     pub baseline: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
     pub pr_number: Option<i32>,
-    pub immutable: bool,
     pub status: String,
     pub worker_queue: Option<String>,
     pub schema_name: Option<String>,
@@ -86,12 +86,10 @@ pub struct EnvironmentUpdateApiRequest {
     pub current_dir: String,
     pub project: String,
     pub slug: String,
-    pub kind: Option<String>,
     pub baseline: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
     pub pr_number: Option<i32>,
-    pub immutable: bool,
     pub status: Option<String>,
     pub adapter_type: Option<String>,
     pub worker_queue: Option<String>,

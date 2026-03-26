@@ -64,12 +64,12 @@ pub enum AppError {
     RemoteExecutionRequiresProjectId,
     #[error("remote execution requires an environment slug")]
     RemoteExecutionRequiresEnvironmentSlug,
+    #[error("project '{0}' has mode '{1}' but remote execution requires mode 'remote'")]
+    RemoteExecutionRequiresRemoteProject(String, String),
     #[error("project '{0}' is missing git_repo_url required for remote execution")]
     RemoteExecutionRequiresGitRepoUrl(String),
     #[error("project '{0}' is missing project_root required for remote execution")]
     RemoteExecutionRequiresProjectRoot(String),
-    #[error("environment '{1}' for project '{0}' must be immutable for remote execution")]
-    RemoteExecutionRequiresImmutableEnvironment(String, String),
     #[error(
         "environment '{1}' for project '{0}' is missing git_commit_sha required for remote execution"
     )]
@@ -97,16 +97,12 @@ pub enum AppError {
     EnvironmentNotFound(String, String),
     #[error("environment '{1}' for project '{0}' already exists")]
     EnvironmentAlreadyExists(String, String),
-    #[error("invalid environment kind '{0}'")]
-    InvalidEnvironmentKind(String),
+    #[error("invalid project mode '{0}'")]
+    InvalidProjectMode(String),
     #[error("invalid environment status '{0}'")]
     InvalidEnvironmentStatus(String),
-    #[error("commit environments require --git-commit-sha")]
-    CommitEnvironmentRequiresSha,
-    #[error("environment '{1}' for project '{0}' is immutable and cannot be updated")]
-    ImmutableEnvironment(String, String),
-    #[error("immutable environment '{1}' for project '{0}' does not match the current git state")]
-    ImmutableEnvironmentGitMismatch(String, String),
+    #[error("environment '{1}' for remote project '{0}' requires --git-commit-sha")]
+    RemoteProjectEnvironmentRequiresSha(String, String),
     #[error(
         "registered project metadata does not match the current repo state for project id '{0}'. Run `dbtx project update` to sync the database, or `dbtx project init --force` to re-initialize the project."
     )]

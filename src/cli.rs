@@ -82,6 +82,8 @@ pub enum ProjectCommand {
     #[command(about = "Initialize the current dbt project and write dbtx.toml")]
     Init {
         #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
         git_repo_url: Option<String>,
         #[arg(long)]
         project_root: Option<String>,
@@ -92,6 +94,8 @@ pub enum ProjectCommand {
     },
     #[command(about = "Update the registered dbtx project to match the current repo state")]
     Update {
+        #[arg(long)]
+        mode: Option<String>,
         #[arg(long)]
         git_repo_url: Option<String>,
         #[arg(long)]
@@ -118,8 +122,6 @@ pub enum EnvironmentCommand {
         slug: Option<String>,
         #[arg(long)]
         target: Option<String>,
-        #[arg(long, default_value = "persistent")]
-        kind: String,
         #[arg(long)]
         baseline: Option<String>,
         #[arg(long)]
@@ -128,8 +130,6 @@ pub enum EnvironmentCommand {
         git_commit_sha: Option<String>,
         #[arg(long)]
         pr_number: Option<i32>,
-        #[arg(long)]
-        immutable: bool,
         #[arg(long, default_value = "active")]
         status: String,
         #[arg(long)]
@@ -144,8 +144,6 @@ pub enum EnvironmentCommand {
         #[arg(long)]
         slug: String,
         #[arg(long)]
-        kind: Option<String>,
-        #[arg(long)]
         baseline: Option<String>,
         #[arg(long)]
         git_branch: Option<String>,
@@ -153,8 +151,6 @@ pub enum EnvironmentCommand {
         git_commit_sha: Option<String>,
         #[arg(long)]
         pr_number: Option<i32>,
-        #[arg(long)]
-        immutable: bool,
         #[arg(long)]
         status: Option<String>,
         #[arg(long)]
@@ -419,11 +415,13 @@ mod tests {
         ]);
         match cli.command {
             Command::Project(ProjectCommand::Init {
+                mode,
                 git_repo_url,
                 project_root,
                 default_branch,
                 force,
             }) => {
+                assert!(mode.is_none());
                 assert_eq!(
                     git_repo_url.as_deref(),
                     Some("https://github.com/example/repo.git")
@@ -441,10 +439,12 @@ mod tests {
         let cli = Cli::parse_from(["dbtx", "project", "update", "--default-branch", "main"]);
         match cli.command {
             Command::Project(ProjectCommand::Update {
+                mode,
                 git_repo_url,
                 project_root,
                 default_branch,
             }) => {
+                assert!(mode.is_none());
                 assert!(git_repo_url.is_none());
                 assert!(project_root.is_none());
                 assert_eq!(default_branch.as_deref(), Some("main"));
@@ -478,26 +478,21 @@ mod tests {
             "main",
             "--git-commit-sha",
             "abc123",
-            "--immutable",
         ]);
         match cli.command {
             Command::Environment(EnvironmentCommand::Update {
                 project,
                 slug,
-                kind,
                 baseline,
                 git_branch,
                 git_commit_sha,
-                immutable,
                 ..
             }) => {
                 assert_eq!(project, "prj_123");
                 assert_eq!(slug, "ci-main");
-                assert!(kind.is_none());
                 assert!(baseline.is_none());
                 assert_eq!(git_branch.as_deref(), Some("main"));
                 assert_eq!(git_commit_sha.as_deref(), Some("abc123"));
-                assert!(immutable);
             }
             _ => panic!("expected environment update command"),
         }

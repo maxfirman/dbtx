@@ -487,6 +487,7 @@ async fn project_init(
     let project = service
         .init(ProjectInitRequest {
             current_dir: PathBuf::from(request.current_dir),
+            mode: request.mode,
             git_repo_url: request.git_repo_url,
             project_root: request.project_root,
             default_branch: request.default_branch,
@@ -507,6 +508,7 @@ async fn project_update(
     let project = service
         .update(ProjectUpdateRequest {
             current_dir: PathBuf::from(request.current_dir),
+            mode: request.mode,
             git_repo_url: request.git_repo_url,
             project_root: request.project_root,
             default_branch: request.default_branch,
@@ -555,12 +557,10 @@ async fn environment_create(
             project: request.project,
             slug: request.slug,
             target: request.target,
-            kind: request.kind,
             baseline: request.baseline,
             git_branch: request.git_branch,
             git_commit_sha: request.git_commit_sha,
             pr_number: request.pr_number,
-            immutable: request.immutable,
             status: request.status,
             worker_queue: request.worker_queue,
             schema_name: request.schema_name,
@@ -586,12 +586,10 @@ async fn environment_update(
             current_dir: PathBuf::from(request.current_dir),
             project: request.project,
             slug: request.slug,
-            kind: request.kind,
             baseline: request.baseline,
             git_branch: request.git_branch,
             git_commit_sha: request.git_commit_sha,
             pr_number: request.pr_number,
-            immutable: request.immutable,
             status: request.status,
             adapter_type: request.adapter_type,
             worker_queue: request.worker_queue,
@@ -1040,6 +1038,7 @@ impl IntoResponse for ApiError {
             AppError::ProjectIdMissing
             | AppError::RemoteExecutionRequiresProjectId
             | AppError::RemoteExecutionRequiresEnvironmentSlug
+            | AppError::RemoteExecutionRequiresRemoteProject(_, _)
             | AppError::RemoteExecutionRequiresGitRepoUrl(_)
             | AppError::RemoteExecutionRequiresProjectRoot(_)
             | AppError::RemoteExecutionRequiresCommitSha(_, _)
@@ -1047,9 +1046,9 @@ impl IntoResponse for ApiError {
             | AppError::UserStateNotAllowed
             | AppError::UserTargetNotAllowed
             | AppError::UserProfilesDirNotAllowed
-            | AppError::InvalidEnvironmentKind(_)
+            | AppError::InvalidProjectMode(_)
             | AppError::InvalidEnvironmentStatus(_)
-            | AppError::CommitEnvironmentRequiresSha
+            | AppError::RemoteProjectEnvironmentRequiresSha(_, _)
             | AppError::InvalidProfileConfig(_)
             | AppError::InvalidProfileSecret(_)
             | AppError::MissingSecretKey
@@ -1063,9 +1062,6 @@ impl IntoResponse for ApiError {
             AppError::InvocationAlreadyClaimed(_) => StatusCode::CONFLICT,
             AppError::InvocationNotClaimable(_) => StatusCode::BAD_REQUEST,
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,
-            AppError::ImmutableEnvironment(_, _)
-            | AppError::ImmutableEnvironmentGitMismatch(_, _)
-            | AppError::RemoteExecutionRequiresImmutableEnvironment(_, _) => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = serde_json::json!({ "error": self.0.to_string() });
