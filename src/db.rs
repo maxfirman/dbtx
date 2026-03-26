@@ -1169,10 +1169,7 @@ impl Db {
                 exit_code = 1,
                 error = 'worker heartbeat timed out',
                 completed_at = NOW(),
-                claimed_by = NULL,
-                lease_token = NULL,
-                claimed_at = NULL,
-                last_heartbeat_at = NULL
+                lease_token = NULL
             WHERE status = 'running'
               AND claimed_by IS NOT NULL
               AND (
@@ -1360,10 +1357,7 @@ impl Db {
                 exit_code = $4,
                 error = $5,
                 completed_at = NOW(),
-                claimed_by = NULL,
-                lease_token = NULL,
-                claimed_at = NULL,
-                last_heartbeat_at = NULL
+                lease_token = NULL
             WHERE invocation_id = $1
               AND claimed_by = $2
               AND lease_token = $6

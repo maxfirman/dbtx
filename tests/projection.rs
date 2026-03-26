@@ -688,6 +688,9 @@ async fn lease_tokens_enforce_invocation_ownership() {
         status.status,
         InvocationLifecycleStatus::Succeeded
     ));
+    assert_eq!(status.claimed_by.as_deref(), Some("worker-a"));
+    assert!(status.claimed_at.is_some());
+    assert!(status.last_heartbeat_at.is_some());
 }
 
 #[tokio::test]
@@ -734,6 +737,9 @@ async fn claimed_invocation_timeout_fails_without_reclaim() {
         .expect("load invocation status");
     assert!(matches!(status.status, InvocationLifecycleStatus::Failed));
     assert_eq!(status.error.as_deref(), Some("worker heartbeat timed out"));
+    assert_eq!(status.claimed_by.as_deref(), Some("worker-a"));
+    assert!(status.claimed_at.is_some());
+    assert!(status.last_heartbeat_at.is_some());
 
     let reclaimed = client
         .invocation_claim_next(InvocationClaimNextApiRequest {
