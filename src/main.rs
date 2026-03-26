@@ -21,7 +21,9 @@ use std::process::Command as StdCommand;
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
-        eprintln!("error: {err}");
+        if !matches!(err, AppError::SilentExit(_)) {
+            eprintln!("error: {err}");
+        }
         std::process::exit(err.exit_code());
     }
 }
@@ -399,11 +401,7 @@ async fn handle_environment_command(
                         .as_deref()
                         .unwrap_or("release validation failed"),
                 );
-                return Err(AppError::Io(std::io::Error::other(
-                    status
-                        .error
-                        .unwrap_or_else(|| "release validation failed".to_string()),
-                )));
+                return Err(AppError::SilentExit(1));
             }
             let environment = client
                 .environment_show_by_id(&project, &slug)

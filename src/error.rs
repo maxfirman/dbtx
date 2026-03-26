@@ -2,6 +2,8 @@ use std::io;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("")]
+    SilentExit(i32),
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("database error: {0}")]
@@ -136,6 +138,7 @@ pub type AppResult<T> = Result<T, AppError>;
 impl AppError {
     pub fn exit_code(&self) -> i32 {
         match self {
+            Self::SilentExit(code) => *code,
             Self::DbtFailed(code) => *code,
             _ => 1,
         }
