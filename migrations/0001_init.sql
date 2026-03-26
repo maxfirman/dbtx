@@ -240,7 +240,7 @@ DROP CONSTRAINT IF EXISTS chk_environment_versions_kind;
 
 ALTER TABLE environment_versions
 ADD CONSTRAINT chk_environment_versions_reason
-CHECK (reason IN ('created', 'updated', 'seeded')),
+CHECK (reason IN ('created', 'updated', 'seeded', 'released', 'rolled_back')),
 ADD CONSTRAINT chk_environment_versions_kind
 CHECK (kind IN ('persistent', 'ephemeral', 'commit'));
 

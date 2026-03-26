@@ -389,6 +389,93 @@ async fn remote_project_environment_allows_commit_updates() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn remote_environment_release_and_rollback_record_forward_history() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &["project", "init", "--mode", "remote"],
+    ));
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "create",
+            "--project",
+            &project_id,
+            "--slug",
+            "ci-main",
+            "--git-branch",
+            "main",
+            "--git-commit-sha",
+            "abc123",
+        ],
+    ));
+
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "release",
+            "--project",
+            &project_id,
+            "--slug",
+            "ci-main",
+            "--git-branch",
+            "main",
+            "--git-commit-sha",
+            "def456",
+        ],
+    ));
+
+    let created_version_id: i64 = sqlx::query_scalar(
+        "SELECT ev.id FROM environment_versions ev JOIN environments e ON e.id = ev.environment_id WHERE e.slug = 'ci-main' AND ev.reason = 'created' ORDER BY ev.id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("created version id");
+
+    assert_success(&run_dbtx_in_dir(
+        db.service_url(),
+        repo.project_dir(),
+        &[
+            "environment",
+            "rollback",
+            "--project",
+            &project_id,
+            "--slug",
+            "ci-main",
+            "--version-id",
+            &created_version_id.to_string(),
+        ],
+    ));
+
+    let commit_sha: Option<String> = sqlx::query_scalar(
+        "SELECT git_commit_sha FROM environments WHERE slug = 'ci-main'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("environment commit sha");
+    assert_eq!(commit_sha.as_deref(), Some("abc123"));
+
+    let reasons: Vec<String> = sqlx::query_scalar(
+        "SELECT reason FROM environment_versions ev JOIN environments e ON e.id = ev.environment_id WHERE e.slug = 'ci-main' ORDER BY ev.id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("environment version reasons");
+    assert_eq!(reasons, vec!["created", "released", "rolled_back"]);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn project_update_preserves_existing_remote_mode_without_flag() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;

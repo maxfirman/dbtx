@@ -174,6 +174,33 @@ pub enum EnvironmentCommand {
         #[arg(long)]
         slug: String,
     },
+    #[command(about = "Update the desired git commit for a remote environment")]
+    Release {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        git_branch: Option<String>,
+        #[arg(long)]
+        git_commit_sha: String,
+    },
+    #[command(about = "Show environment version history")]
+    History {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        slug: String,
+    },
+    #[command(about = "Roll an environment forward to a previously recorded version")]
+    Rollback {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        version_id: i64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -342,6 +369,62 @@ mod tests {
                 assert!(wait);
             }
             _ => panic!("expected invocation cancel command"),
+        }
+    }
+
+    #[test]
+    fn environment_release_parses() {
+        let cli = Cli::parse_from([
+            "dbtx",
+            "environment",
+            "release",
+            "--project",
+            "proj",
+            "--slug",
+            "prod",
+            "--git-commit-sha",
+            "abc123",
+        ]);
+        match cli.command {
+            Command::Environment(EnvironmentCommand::Release {
+                project,
+                slug,
+                git_branch,
+                git_commit_sha,
+            }) => {
+                assert_eq!(project, "proj");
+                assert_eq!(slug, "prod");
+                assert_eq!(git_branch, None);
+                assert_eq!(git_commit_sha, "abc123");
+            }
+            _ => panic!("expected environment release command"),
+        }
+    }
+
+    #[test]
+    fn environment_rollback_parses() {
+        let cli = Cli::parse_from([
+            "dbtx",
+            "environment",
+            "rollback",
+            "--project",
+            "proj",
+            "--slug",
+            "prod",
+            "--version-id",
+            "42",
+        ]);
+        match cli.command {
+            Command::Environment(EnvironmentCommand::Rollback {
+                project,
+                slug,
+                version_id,
+            }) => {
+                assert_eq!(project, "proj");
+                assert_eq!(slug, "prod");
+                assert_eq!(version_id, 42);
+            }
+            _ => panic!("expected environment rollback command"),
         }
     }
 

@@ -1,4 +1,4 @@
-use crate::db::{AppliedMigration, EnvironmentRecord, ProjectRecord};
+use crate::db::{AppliedMigration, EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
 use crate::execution::{ExecutionCompletion, ExecutionEvent};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,11 @@ pub struct EnvironmentResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentsResponse {
     pub environments: Vec<EnvironmentRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentVersionsResponse {
+    pub versions: Vec<EnvironmentVersionRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +100,23 @@ pub struct EnvironmentUpdateApiRequest {
     pub worker_queue: Option<String>,
     pub schema_name: Option<String>,
     pub threads: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentReleaseApiRequest {
+    pub current_dir: String,
+    pub project: String,
+    pub slug: String,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentRollbackApiRequest {
+    pub current_dir: String,
+    pub project: String,
+    pub slug: String,
+    pub version_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

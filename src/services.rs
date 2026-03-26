@@ -1,7 +1,8 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
-    CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, GitState,
-    LocalEnvironmentUpsertInput, ProjectRecord, RunFinalization, RunStart, UpdateEnvironmentInput,
+    CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, EnvironmentReleaseInput,
+    EnvironmentVersionRecord, GitState, LocalEnvironmentUpsertInput, ProjectRecord,
+    RunFinalization, RunStart, UpdateEnvironmentInput,
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
     read_dbt_project_name, read_git_state, spawn_dbt_child,
 };
@@ -156,6 +157,23 @@ pub struct EnvironmentUpdateRequest {
     pub worker_queue: Option<String>,
     pub schema_name: Option<String>,
     pub threads: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentReleaseRequest {
+    pub current_dir: PathBuf,
+    pub project: String,
+    pub slug: String,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentRollbackRequest {
+    pub current_dir: PathBuf,
+    pub project: String,
+    pub slug: String,
+    pub version_id: i64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -350,6 +368,62 @@ impl<'a> EnvironmentService<'a> {
                 profile_config: None,
                 profile_secrets: None,
             })
+            .await
+    }
+
+    pub async fn release(
+        &self,
+        request: EnvironmentReleaseRequest,
+    ) -> AppResult<EnvironmentRecord> {
+        self.db.require_current_schema().await?;
+        let project = self
+            .resolve_project_identifier(Some(request.project), &request.current_dir)
+            .await?;
+        if project.mode != "remote" {
+            return Err(AppError::RemoteExecutionRequiresRemoteProject(
+                project.project_id,
+                project.mode,
+            ));
+        }
+        self.db
+            .release_environment(EnvironmentReleaseInput {
+                project: project.project_id,
+                slug: request.slug,
+                git_branch: request.git_branch,
+                git_commit_sha: request.git_commit_sha,
+            })
+            .await
+    }
+
+    pub async fn history(
+        &self,
+        current_dir: &Path,
+        project: String,
+        slug: String,
+    ) -> AppResult<Vec<EnvironmentVersionRecord>> {
+        self.db.require_current_schema().await?;
+        let project = self
+            .resolve_project_identifier(Some(project), current_dir)
+            .await?;
+        self.db.list_environment_versions(&project.project_id, &slug).await
+    }
+
+    pub async fn rollback(
+        &self,
+        request: EnvironmentRollbackRequest,
+    ) -> AppResult<EnvironmentRecord> {
+        self.db.require_current_schema().await?;
+        let project = self
+            .resolve_project_identifier(Some(request.project), &request.current_dir)
+            .await?;
+        if project.mode != "remote" {
+            return Err(AppError::RemoteExecutionRequiresRemoteProject(
+                project.project_id,
+                project.mode,
+            ));
+        }
+        self.db
+            .rollback_environment_to_version(&project.project_id, &request.slug, request.version_id)
             .await
     }
 

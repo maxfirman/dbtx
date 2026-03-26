@@ -10,7 +10,7 @@ use dbtx::cli::{
 };
 use dbtx::client;
 use dbtx::config::{self, resolve_service_url};
-use dbtx::db::{self, EnvironmentRecord, ProjectRecord};
+use dbtx::db::{self, EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
 use dbtx::error::{AppError, AppResult};
 use dbtx::services::InvocationCommand;
 use std::ffi::OsString;
@@ -351,6 +351,53 @@ async fn handle_environment_command(
                 .environment;
             print_environment(&environment);
         }
+        EnvironmentCommand::Release {
+            project,
+            slug,
+            git_branch,
+            git_commit_sha,
+        } => {
+            let environment = client
+                .environment_release(
+                    &project,
+                    &slug,
+                    api::EnvironmentReleaseApiRequest {
+                        current_dir: current_dir.display().to_string(),
+                        project: project.clone(),
+                        slug: slug.clone(),
+                        git_branch,
+                        git_commit_sha,
+                    },
+                )
+                .await?
+                .environment;
+            print_environment(&environment);
+        }
+        EnvironmentCommand::History { project, slug } => {
+            for version in client.environment_history(&project, &slug).await?.versions {
+                print_environment_version(&version);
+            }
+        }
+        EnvironmentCommand::Rollback {
+            project,
+            slug,
+            version_id,
+        } => {
+            let environment = client
+                .environment_rollback(
+                    &project,
+                    &slug,
+                    api::EnvironmentRollbackApiRequest {
+                        current_dir: current_dir.display().to_string(),
+                        project: project.clone(),
+                        slug: slug.clone(),
+                        version_id,
+                    },
+                )
+                .await?
+                .environment;
+            print_environment(&environment);
+        }
     }
     Ok(())
 }
@@ -687,6 +734,24 @@ fn print_environment(environment: &EnvironmentRecord) {
             .unwrap_or_default(),
         environment.profile_config,
         environment.metadata,
+    );
+}
+
+fn print_environment_version(version: &EnvironmentVersionRecord) {
+    println!(
+        "environment_version id={} environment_id={} project_id={} recorded_at={} reason={} git_branch={} git_commit_sha={} baseline_environment_id={} metadata={}",
+        version.id,
+        version.environment_id,
+        version.project_id,
+        version.recorded_at.to_rfc3339(),
+        version.reason,
+        version.git_branch.as_deref().unwrap_or(""),
+        version.git_commit_sha.as_deref().unwrap_or(""),
+        version
+            .baseline_environment_id
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        version.metadata,
     );
 }
 

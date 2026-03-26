@@ -1,5 +1,6 @@
 use crate::api::{
-    EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
+    EnvironmentCreateApiRequest, EnvironmentReleaseApiRequest, EnvironmentResponse,
+    EnvironmentRollbackApiRequest, EnvironmentUpdateApiRequest, EnvironmentVersionsResponse,
     EnvironmentsResponse, HealthResponse, InvocationCancelApiRequest,
     InvocationClaimNextApiRequest, InvocationCleanupApiRequest, InvocationCleanupResponse,
     InvocationCommandApi, InvocationCompleteApiRequest, InvocationCreateApiRequest,
@@ -23,9 +24,10 @@ use crate::execution::{
     heartbeat_stale_timeout,
 };
 use crate::services::{
-    EnvironmentCreateRequest, EnvironmentService, EnvironmentUpdateRequest, InvocationCommand,
-    InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectInitRequest,
-    ProjectService, ProjectUpdateRequest,
+    EnvironmentCreateRequest, EnvironmentReleaseRequest, EnvironmentRollbackRequest,
+    EnvironmentService, EnvironmentUpdateRequest, InvocationCommand, InvocationRequest,
+    InvocationService, PreparedExecutionSpec, ProjectInitRequest, ProjectService,
+    ProjectUpdateRequest,
 };
 use async_stream::stream;
 use axum::extract::{Path, Query, State};
@@ -310,6 +312,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/projects/{project_id}/environments/{slug}",
             get(environment_get).patch(environment_update),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{slug}/release",
+            post(environment_release),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{slug}/history",
+            get(environment_history),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{slug}/rollback",
+            post(environment_rollback),
         )
         .route(
             "/v1/invocations",
@@ -628,6 +642,64 @@ async fn environment_get(
         project_id = %environment.project_ref,
         environment = %environment.slug,
         "loaded environment"
+    );
+    Ok(Json(EnvironmentResponse { environment }))
+}
+
+async fn environment_release(
+    State(state): State<AppState>,
+    Path((_project_id, _slug)): Path<(String, String)>,
+    Json(request): Json<EnvironmentReleaseApiRequest>,
+) -> Result<Json<EnvironmentResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let environment = service
+        .release(EnvironmentReleaseRequest {
+            current_dir: PathBuf::from(request.current_dir),
+            project: request.project,
+            slug: request.slug,
+            git_branch: request.git_branch,
+            git_commit_sha: request.git_commit_sha,
+        })
+        .await?;
+    info!(
+        project_id = %environment.project_ref,
+        environment = %environment.slug,
+        git_commit_sha = %environment.git_commit_sha.as_deref().unwrap_or(""),
+        "released environment"
+    );
+    Ok(Json(EnvironmentResponse { environment }))
+}
+
+async fn environment_history(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Json<EnvironmentVersionsResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let versions = service
+        .history(std::path::Path::new("."), project_id, slug)
+        .await?;
+    Ok(Json(EnvironmentVersionsResponse { versions }))
+}
+
+async fn environment_rollback(
+    State(state): State<AppState>,
+    Path((_project_id, _slug)): Path<(String, String)>,
+    Json(request): Json<EnvironmentRollbackApiRequest>,
+) -> Result<Json<EnvironmentResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let environment = service
+        .rollback(EnvironmentRollbackRequest {
+            current_dir: PathBuf::from(request.current_dir),
+            project: request.project,
+            slug: request.slug,
+            version_id: request.version_id,
+        })
+        .await?;
+    info!(
+        project_id = %environment.project_ref,
+        environment = %environment.slug,
+        git_commit_sha = %environment.git_commit_sha.as_deref().unwrap_or(""),
+        "rolled back environment"
     );
     Ok(Json(EnvironmentResponse { environment }))
 }

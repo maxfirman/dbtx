@@ -73,6 +73,19 @@ pub struct EnvironmentRecord {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentVersionRecord {
+    pub id: i64,
+    pub environment_id: i64,
+    pub project_id: i64,
+    pub recorded_at: chrono::DateTime<Utc>,
+    pub reason: String,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
+    pub baseline_environment_id: Option<i64>,
+    pub metadata: Value,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateProjectInput {
     pub project_id: String,
@@ -119,6 +132,14 @@ pub struct UpdateEnvironmentInput {
     pub threads: Option<i32>,
     pub profile_config: Option<Value>,
     pub profile_secrets: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentReleaseInput {
+    pub project: String,
+    pub slug: String,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: String,
 }
 
 #[derive(Debug, Clone)]
@@ -587,6 +608,38 @@ impl Db {
         Ok(environment)
     }
 
+    pub async fn release_environment(
+        &self,
+        input: EnvironmentReleaseInput,
+    ) -> AppResult<EnvironmentRecord> {
+        let project = self.get_project_by_project_id(&input.project).await?;
+        let existing = self
+            .get_environment_by_project_id(project.id, &project.project_id, &input.slug)
+            .await?;
+
+        validate_environment_git_metadata(&project, &existing.slug, Some(&input.git_commit_sha))?;
+
+        sqlx::query(
+            r#"
+            UPDATE environments
+            SET git_branch = $3,
+                git_commit_sha = $4
+            WHERE id = $1 AND project_id = $2
+            "#,
+        )
+        .bind(existing.id)
+        .bind(project.id)
+        .bind(input.git_branch.as_deref())
+        .bind(&input.git_commit_sha)
+        .execute(&self.pool)
+        .await?;
+
+        let environment = self.get_environment_by_id(existing.id).await?;
+        self.record_environment_version(&environment, "released")
+            .await?;
+        Ok(environment)
+    }
+
     pub async fn list_environments(&self, project: &str) -> AppResult<Vec<EnvironmentRecord>> {
         let project = self.get_project_by_project_id(project).await?;
         let rows = sqlx::query(
@@ -623,6 +676,83 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(environment_record_from_row).collect())
+    }
+
+    pub async fn list_environment_versions(
+        &self,
+        project: &str,
+        slug: &str,
+    ) -> AppResult<Vec<EnvironmentVersionRecord>> {
+        let project = self.get_project_by_project_id(project).await?;
+        let environment = self
+            .get_environment_by_project_id(project.id, &project.project_id, slug)
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT id, environment_id, project_id, recorded_at, reason, git_branch, git_commit_sha,
+                   baseline_environment_id, metadata
+            FROM environment_versions
+            WHERE environment_id = $1
+            ORDER BY id DESC
+            "#,
+        )
+        .bind(environment.id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(environment_version_record_from_row).collect())
+    }
+
+    pub async fn rollback_environment_to_version(
+        &self,
+        project: &str,
+        slug: &str,
+        version_id: i64,
+    ) -> AppResult<EnvironmentRecord> {
+        let project = self.get_project_by_project_id(project).await?;
+        let existing = self
+            .get_environment_by_project_id(project.id, &project.project_id, slug)
+            .await?;
+        let version = sqlx::query(
+            r#"
+            SELECT id, environment_id, project_id, recorded_at, reason, git_branch, git_commit_sha,
+                   baseline_environment_id, metadata
+            FROM environment_versions
+            WHERE id = $1 AND environment_id = $2
+            "#,
+        )
+        .bind(version_id)
+        .bind(existing.id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::EnvironmentVersionNotFound(project.project_id.clone(), slug.to_string(), version_id))?;
+        let version = environment_version_record_from_row(&version);
+        validate_environment_git_metadata(
+            &project,
+            &existing.slug,
+            version.git_commit_sha.as_deref(),
+        )?;
+
+        sqlx::query(
+            r#"
+            UPDATE environments
+            SET baseline_environment_id = $3,
+                git_branch = $4,
+                git_commit_sha = $5
+            WHERE id = $1 AND project_id = $2
+            "#,
+        )
+        .bind(existing.id)
+        .bind(project.id)
+        .bind(version.baseline_environment_id)
+        .bind(version.git_branch.as_deref())
+        .bind(version.git_commit_sha.as_deref())
+        .execute(&self.pool)
+        .await?;
+
+        let environment = self.get_environment_by_id(existing.id).await?;
+        self.record_environment_version(&environment, "rolled_back")
+            .await?;
+        Ok(environment)
     }
 
     pub async fn get_environment(
@@ -2397,6 +2527,20 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         profile_config: profile_config.0,
         profile_secrets: profile_secrets.0,
         metadata: metadata.0,
+    }
+}
+
+fn environment_version_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentVersionRecord {
+    EnvironmentVersionRecord {
+        id: row.get("id"),
+        environment_id: row.get("environment_id"),
+        project_id: row.get("project_id"),
+        recorded_at: row.get("recorded_at"),
+        reason: row.get("reason"),
+        git_branch: row.get("git_branch"),
+        git_commit_sha: row.get("git_commit_sha"),
+        baseline_environment_id: row.get("baseline_environment_id"),
+        metadata: row.get::<sqlx::types::Json<Value>, _>("metadata").0,
     }
 }
 

@@ -1,5 +1,6 @@
 use crate::api::{
-    EnvironmentCreateApiRequest, EnvironmentResponse, EnvironmentUpdateApiRequest,
+    EnvironmentCreateApiRequest, EnvironmentReleaseApiRequest, EnvironmentResponse,
+    EnvironmentRollbackApiRequest, EnvironmentUpdateApiRequest, EnvironmentVersionsResponse,
     EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
     InvocationClaimResponse, InvocationCleanupApiRequest, InvocationCleanupResponse,
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
@@ -118,6 +119,46 @@ impl DaemonClient {
         self.send(
             self.http
                 .get(self.url(&format!("/v1/projects/{project_id}/environments/{slug}"))),
+        )
+        .await
+    }
+
+    pub async fn environment_release(
+        &self,
+        project_id: &str,
+        slug: &str,
+        request: EnvironmentReleaseApiRequest,
+    ) -> AppResult<EnvironmentResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/v1/projects/{project_id}/environments/{slug}/release")))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn environment_history(
+        &self,
+        project_id: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentVersionsResponse> {
+        self.send(
+            self.http
+                .get(self.url(&format!("/v1/projects/{project_id}/environments/{slug}/history"))),
+        )
+        .await
+    }
+
+    pub async fn environment_rollback(
+        &self,
+        project_id: &str,
+        slug: &str,
+        request: EnvironmentRollbackApiRequest,
+    ) -> AppResult<EnvironmentResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/v1/projects/{project_id}/environments/{slug}/rollback")))
+                .json(&request),
         )
         .await
     }
