@@ -1,4 +1,5 @@
 use crate::api::{
+    EnvironmentDraftResponse, EnvironmentDraftStartResponse, EnvironmentDraftUpdateApiRequest,
     EnvironmentReleaseApiRequest, EnvironmentResponse, EnvironmentRollbackApiRequest,
     EnvironmentVersionsResponse, EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
     InvocationClaimResponse, InvocationCleanupApiRequest, InvocationCleanupResponse,
@@ -101,6 +102,62 @@ impl DaemonClient {
         self.send(
             self.http
                 .post(self.url(&format!("/v1/project-drafts/{draft_id}/confirm"))),
+        )
+        .await
+    }
+
+    pub async fn environment_draft_create(
+        &self,
+        project_id: &str,
+    ) -> AppResult<EnvironmentDraftStartResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/v1/projects/{project_id}/environment-drafts"))),
+        )
+        .await
+    }
+
+    pub async fn environment_draft_get(&self, draft_id: Uuid) -> AppResult<EnvironmentDraftResponse> {
+        self.send(
+            self.http
+                .get(self.url(&format!("/v1/environment-drafts/{draft_id}"))),
+        )
+        .await
+    }
+
+    pub async fn environment_draft_refresh_branch(
+        &self,
+        draft_id: Uuid,
+        request: EnvironmentDraftUpdateApiRequest,
+    ) -> AppResult<EnvironmentDraftStartResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/v1/environment-drafts/{draft_id}/branch")))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn environment_draft_validate(
+        &self,
+        draft_id: Uuid,
+        request: EnvironmentDraftUpdateApiRequest,
+    ) -> AppResult<EnvironmentDraftStartResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/v1/environment-drafts/{draft_id}/validate")))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn environment_draft_confirm(
+        &self,
+        draft_id: Uuid,
+    ) -> AppResult<EnvironmentResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/v1/environment-drafts/{draft_id}/confirm"))),
         )
         .await
     }

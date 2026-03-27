@@ -76,6 +76,32 @@ pub struct ProjectDraftValidateResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentDraftResponse {
+    pub draft: crate::db::EnvironmentDraftRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentDraftUpdateApiRequest {
+    pub slug: String,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
+    pub use_latest_commit: bool,
+    pub auto_deploy: bool,
+    pub immutable: bool,
+    pub adapter_type: String,
+    pub schema_name: String,
+    pub threads: Option<i32>,
+    pub profile_config: serde_json::Value,
+    pub profile_secrets: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentDraftStartResponse {
+    pub draft: crate::db::EnvironmentDraftRecord,
+    pub invocation_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentReleaseApiRequest {
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,

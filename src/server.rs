@@ -1,16 +1,18 @@
 use crate::api::{
-    ApiErrorResponse, EnvironmentReleaseApiRequest, EnvironmentResponse, EnvironmentRollbackApiRequest,
-    EnvironmentVersionsResponse, EnvironmentsResponse, HealthResponse, InvocationCancelApiRequest,
-    InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationClaimResponse,
-    InvocationCleanupApiRequest, InvocationCleanupResponse, InvocationCommandApi,
-    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
-    InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
-    InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
-    InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
-    InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse, ProjectDeleteResponse,
-    ProjectDraftCreateApiRequest, ProjectDraftResponse, ProjectDraftValidateResponse,
-    ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse, QueueStatusResponse,
-    QueuesResponse, ReadyResponse, WorkerStatusResponse, WorkersResponse,
+    ApiErrorResponse, EnvironmentDraftResponse, EnvironmentDraftStartResponse,
+    EnvironmentDraftUpdateApiRequest, EnvironmentReleaseApiRequest, EnvironmentResponse,
+    EnvironmentRollbackApiRequest, EnvironmentVersionsResponse, EnvironmentsResponse,
+    HealthResponse, InvocationCancelApiRequest, InvocationCancelStateApi,
+    InvocationClaimNextApiRequest, InvocationClaimResponse, InvocationCleanupApiRequest,
+    InvocationCleanupResponse, InvocationCommandApi, InvocationCompleteApiRequest,
+    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
+    InvocationEventBatchApiRequest, InvocationExecutionModeApi, InvocationExecutionSpecApi,
+    InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
+    InvocationListApiRequest, InvocationStatusResponse, InvocationWorkerHealthApi,
+    InvocationsResponse, MigrateResponse, ProjectDeleteResponse, ProjectDraftCreateApiRequest,
+    ProjectDraftResponse, ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest,
+    ProjectsResponse, QueueStatusResponse, QueuesResponse, ReadyResponse, WorkerStatusResponse,
+    WorkersResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{
@@ -358,6 +360,23 @@ pub fn router(state: AppState) -> Router {
             post(project_draft_confirm),
         )
         .route(
+            "/v1/projects/{project_id}/environment-drafts",
+            post(environment_draft_create),
+        )
+        .route("/v1/environment-drafts/{draft_id}", get(environment_draft_get))
+        .route(
+            "/v1/environment-drafts/{draft_id}/branch",
+            post(environment_draft_branch_refresh),
+        )
+        .route(
+            "/v1/environment-drafts/{draft_id}/validate",
+            post(environment_draft_validate),
+        )
+        .route(
+            "/v1/environment-drafts/{draft_id}/confirm",
+            post(environment_draft_confirm),
+        )
+        .route(
             "/v1/projects/{project_id}/environments",
             get(environment_list),
         )
@@ -449,6 +468,11 @@ struct InvocationEventsQuery {
         project_draft_get,
         project_draft_validate,
         project_draft_confirm,
+        environment_draft_create,
+        environment_draft_get,
+        environment_draft_branch_refresh,
+        environment_draft_validate,
+        environment_draft_confirm,
         projects_list,
         project_get,
         project_update,
@@ -481,6 +505,9 @@ struct InvocationEventsQuery {
             ProjectDraftValidateResponse,
             ProjectDraftCreateApiRequest,
             ProjectUpdateApiRequest,
+            EnvironmentDraftResponse,
+            EnvironmentDraftStartResponse,
+            EnvironmentDraftUpdateApiRequest,
             EnvironmentResponse,
             EnvironmentsResponse,
             EnvironmentVersionsResponse,
@@ -848,6 +875,230 @@ async fn project_draft_confirm(
         .confirm_draft(draft_id)
         .await?;
     Ok(Json(ProjectResponse { project }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/environment-drafts",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier")
+    ),
+    responses(
+        (status = 200, description = "Started environment draft git metadata load", body = EnvironmentDraftStartResponse),
+        (status = 404, description = "Project not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_draft_create(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<EnvironmentDraftStartResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let draft = service.create_draft(project_id).await?;
+    let prepared = service.prepare_draft_git_metadata(draft.id).await?;
+    let invocation_id = start_environment_draft_prepare_invocation(&state, prepared).await?;
+    let draft = service.get_draft(draft.id).await?;
+    Ok(Json(EnvironmentDraftStartResponse {
+        draft,
+        invocation_id,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/environment-drafts/{draft_id}",
+    tag = "environments",
+    params(
+        ("draft_id" = Uuid, Path, description = "Draft identifier")
+    ),
+    responses(
+        (status = 200, description = "Environment draft", body = EnvironmentDraftResponse),
+        (status = 404, description = "Draft not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_draft_get(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+) -> Result<Json<EnvironmentDraftResponse>, ApiError> {
+    let draft = EnvironmentService::new(&state.db).get_draft(draft_id).await?;
+    Ok(Json(EnvironmentDraftResponse { draft }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/environment-drafts/{draft_id}/branch",
+    tag = "environments",
+    params(
+        ("draft_id" = Uuid, Path, description = "Draft identifier")
+    ),
+    request_body = EnvironmentDraftUpdateApiRequest,
+    responses(
+        (status = 200, description = "Started branch metadata refresh", body = EnvironmentDraftStartResponse),
+        (status = 404, description = "Draft not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_draft_branch_refresh(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+    Json(request): Json<EnvironmentDraftUpdateApiRequest>,
+) -> Result<Json<EnvironmentDraftStartResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let prepared = service
+        .refresh_draft_branch(draft_id, environment_draft_update_request(request))
+        .await?;
+    let invocation_id = start_environment_draft_prepare_invocation(&state, prepared).await?;
+    let draft = service.get_draft(draft_id).await?;
+    Ok(Json(EnvironmentDraftStartResponse {
+        draft,
+        invocation_id,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/environment-drafts/{draft_id}/validate",
+    tag = "environments",
+    params(
+        ("draft_id" = Uuid, Path, description = "Draft identifier")
+    ),
+    request_body = EnvironmentDraftUpdateApiRequest,
+    responses(
+        (status = 200, description = "Started environment draft validation", body = EnvironmentDraftStartResponse),
+        (status = 404, description = "Draft not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_draft_validate(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+    Json(request): Json<EnvironmentDraftUpdateApiRequest>,
+) -> Result<Json<EnvironmentDraftStartResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let prepared = service
+        .prepare_draft_validation(draft_id, environment_draft_update_request(request))
+        .await?;
+    let invocation_id = start_environment_draft_validation_invocation(&state, prepared).await?;
+    let draft = service.get_draft(draft_id).await?;
+    Ok(Json(EnvironmentDraftStartResponse {
+        draft,
+        invocation_id,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/environment-drafts/{draft_id}/confirm",
+    tag = "environments",
+    params(
+        ("draft_id" = Uuid, Path, description = "Draft identifier")
+    ),
+    responses(
+        (status = 200, description = "Confirmed environment", body = EnvironmentResponse),
+        (status = 404, description = "Draft not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_draft_confirm(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+) -> Result<Json<EnvironmentResponse>, ApiError> {
+    let environment = EnvironmentService::new(&state.db).confirm_draft(draft_id).await?;
+    Ok(Json(EnvironmentResponse { environment }))
+}
+
+fn environment_draft_update_request(
+    request: EnvironmentDraftUpdateApiRequest,
+) -> crate::services::EnvironmentDraftUpdateRequest {
+    crate::services::EnvironmentDraftUpdateRequest {
+        project: String::new(),
+        slug: request.slug,
+        git_branch: request.git_branch,
+        git_commit_sha: request.git_commit_sha,
+        use_latest_commit: request.use_latest_commit,
+        auto_deploy: request.auto_deploy,
+        immutable: request.immutable,
+        adapter_type: request.adapter_type,
+        schema_name: request.schema_name,
+        threads: request.threads,
+        profile_config: request.profile_config,
+        profile_secrets: request.profile_secrets,
+    }
+}
+
+async fn start_environment_draft_prepare_invocation(
+    state: &AppState,
+    prepared: crate::services::EnvironmentDraftCreatePrepared,
+) -> Result<Uuid, ApiError> {
+    let invocation_id = prepared.invocation_id;
+    state
+        .db
+        .create_invocation(CreateInvocationInput {
+            invocation_id,
+            run_id: None,
+            project_id: None,
+            environment_id: None,
+            project_draft_id: None,
+            environment_draft_id: Some(prepared.draft.id),
+            command: InvocationCommand::EnvironmentPrepare.as_str().to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: prepared.worker_queue,
+            execution_spec: Some(InvocationExecutionSpecApi::EnvironmentPrepare {
+                repo_url: prepared.spec.repo_url,
+                selected_branch: prepared.spec.selected_branch,
+            }),
+            promote_base_manifest: false,
+            claim_deadline_at: Some(invocation_claim_deadline_at(
+                InvocationExecutionModeApi::Server,
+            )),
+        })
+        .await?;
+    state
+        .db
+        .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
+        .await?;
+    state.bootstrap_invocation_started(invocation_id, None).await?;
+    Ok(invocation_id)
+}
+
+async fn start_environment_draft_validation_invocation(
+    state: &AppState,
+    prepared: crate::services::EnvironmentDraftValidationPrepared,
+) -> Result<Uuid, ApiError> {
+    let invocation_id = prepared.invocation_id;
+    state
+        .db
+        .create_invocation(CreateInvocationInput {
+            invocation_id,
+            run_id: None,
+            project_id: None,
+            environment_id: None,
+            project_draft_id: None,
+            environment_draft_id: Some(prepared.draft.id),
+            command: InvocationCommand::EnvironmentValidate.as_str().to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: prepared.worker_queue,
+            execution_spec: Some(InvocationExecutionSpecApi::EnvironmentValidate {
+                repo_url: prepared.spec.repo_url,
+                commit_sha: prepared.spec.commit_sha,
+                project_root: prepared.spec.project_root,
+                selected_branch: prepared.spec.selected_branch,
+                profiles_yml: prepared.spec.profiles_yml,
+            }),
+            promote_base_manifest: false,
+            claim_deadline_at: Some(invocation_claim_deadline_at(
+                InvocationExecutionModeApi::Server,
+            )),
+        })
+        .await?;
+    state
+        .db
+        .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
+        .await?;
+    state.bootstrap_invocation_started(invocation_id, None).await?;
+    Ok(invocation_id)
 }
 
 #[utoipa::path(
