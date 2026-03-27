@@ -1946,9 +1946,10 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{InvocationEvent, SequencedInvocationEvent, event_stream};
+    use super::{ApiDoc, InvocationEvent, SequencedInvocationEvent, event_stream};
     use chrono::Utc;
     use futures_util::StreamExt;
+    use utoipa::OpenApi;
     use tokio::sync::broadcast;
 
     fn sample_event(text: &str) -> InvocationEvent {
@@ -2015,5 +2016,20 @@ mod tests {
         .expect("send next live event");
 
         let _second = stream.next().await.expect("live item").expect("event");
+    }
+
+    #[test]
+    fn openapi_includes_environment_draft_endpoints() {
+        let json = serde_json::to_value(ApiDoc::openapi()).expect("openapi json");
+        let paths = json
+            .get("paths")
+            .and_then(|value| value.as_object())
+            .expect("paths object");
+
+        assert!(paths.contains_key("/v1/projects/{project_id}/environment-drafts"));
+        assert!(paths.contains_key("/v1/environment-drafts/{draft_id}"));
+        assert!(paths.contains_key("/v1/environment-drafts/{draft_id}/branch"));
+        assert!(paths.contains_key("/v1/environment-drafts/{draft_id}/validate"));
+        assert!(paths.contains_key("/v1/environment-drafts/{draft_id}/confirm"));
     }
 }

@@ -1395,11 +1395,15 @@ fn local_machine_scope() -> AppResult<String> {
 }
 
 fn validation_worker_queue() -> String {
-    std::env::var("DBTX_VALIDATION_QUEUE")
-        .ok()
-        .map(|value| value.trim().to_string())
+    validation_worker_queue_from_env(std::env::var("DBTX_VALIDATION_QUEUE").ok().as_deref())
+}
+
+fn validation_worker_queue_from_env(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "generic".to_string())
+        .unwrap_or("generic")
+        .to_string()
 }
 
 fn infer_local_identity_hash(current_dir: &Path, project_name: &str) -> AppResult<String> {
@@ -1418,7 +1422,9 @@ fn short_hash(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_release_commit_sha, parse_release_target_args};
+    use super::{
+        is_valid_release_commit_sha, parse_release_target_args, validation_worker_queue_from_env,
+    };
     use std::ffi::OsString;
 
     #[test]
@@ -1466,6 +1472,17 @@ mod tests {
             error
                 .to_string()
                 .contains("provide exactly one of --git-commit-sha or --git-ref")
+        );
+    }
+
+    #[test]
+    fn validation_worker_queue_defaults_and_trims() {
+        assert_eq!(validation_worker_queue_from_env(None), "generic");
+        assert_eq!(validation_worker_queue_from_env(Some("")), "generic");
+        assert_eq!(validation_worker_queue_from_env(Some("   ")), "generic");
+        assert_eq!(
+            validation_worker_queue_from_env(Some("  validation-q  ")),
+            "validation-q"
         );
     }
 }
