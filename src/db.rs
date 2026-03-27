@@ -51,6 +51,21 @@ pub struct ProjectRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProjectDraftRecord {
+    pub id: Uuid,
+    pub git_repo_url: String,
+    pub project_root: String,
+    pub status: String,
+    pub validation_error: Option<String>,
+    pub project_name: Option<String>,
+    pub default_branch: Option<String>,
+    pub validation_invocation_id: Option<Uuid>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub validated_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentRecord {
     pub id: i64,
     pub project_id: i64,
@@ -95,6 +110,12 @@ pub struct CreateProjectInput {
     pub git_repo_url: Option<String>,
     pub default_branch: Option<String>,
     pub project_root: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateProjectDraftInput {
+    pub git_repo_url: String,
+    pub project_root: String,
 }
 
 #[derive(Debug, Clone)]
@@ -177,8 +198,9 @@ pub(crate) struct RunStart<'a> {
 pub(crate) struct CreateInvocationInput {
     pub(crate) invocation_id: Uuid,
     pub(crate) run_id: Option<Uuid>,
-    pub(crate) project_id: i64,
-    pub(crate) environment_id: i64,
+    pub(crate) project_id: Option<i64>,
+    pub(crate) environment_id: Option<i64>,
+    pub(crate) project_draft_id: Option<Uuid>,
     pub(crate) command: String,
     pub(crate) execution_mode: InvocationExecutionModeApi,
     pub(crate) worker_queue: String,
@@ -190,8 +212,9 @@ pub(crate) struct CreateInvocationInput {
 #[derive(Debug, Clone)]
 pub(crate) struct InvocationPersistenceRecord {
     pub(crate) run_id: Option<Uuid>,
-    pub(crate) project_id: i64,
-    pub(crate) environment_id: i64,
+    pub(crate) project_id: Option<i64>,
+    pub(crate) environment_id: Option<i64>,
+    pub(crate) project_draft_id: Option<Uuid>,
     pub(crate) command: String,
     pub(crate) promote_base_manifest: bool,
 }
@@ -405,6 +428,124 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(project_record_from_row).collect())
+    }
+
+    pub async fn create_project_draft(
+        &self,
+        input: CreateProjectDraftInput,
+    ) -> AppResult<ProjectDraftRecord> {
+        validate_remote_project_root(&input.project_root)?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO project_onboarding_drafts (
+                id, git_repo_url, project_root, status
+            )
+            VALUES ($1, $2, $3, 'draft')
+            RETURNING id, git_repo_url, project_root, status, validation_error, project_name,
+                default_branch, validation_invocation_id, created_at, updated_at, validated_at
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(&input.git_repo_url)
+        .bind(&input.project_root)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(project_draft_record_from_row(&row))
+    }
+
+    pub async fn get_project_draft(&self, draft_id: Uuid) -> AppResult<ProjectDraftRecord> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, git_repo_url, project_root, status, validation_error, project_name,
+                default_branch, validation_invocation_id, created_at, updated_at, validated_at
+            FROM project_onboarding_drafts
+            WHERE id = $1
+            "#,
+        )
+        .bind(draft_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("project draft '{draft_id}' was not found"),
+        )))?;
+        Ok(project_draft_record_from_row(&row))
+    }
+
+    pub async fn mark_project_draft_validating(&self, draft_id: Uuid) -> AppResult<ProjectDraftRecord> {
+        let row = sqlx::query(
+            r#"
+            UPDATE project_onboarding_drafts
+            SET status = 'validating',
+                validation_error = NULL,
+                project_name = NULL,
+                default_branch = NULL,
+                validation_invocation_id = NULL,
+                validated_at = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, git_repo_url, project_root, status, validation_error, project_name,
+                default_branch, validation_invocation_id, created_at, updated_at, validated_at
+            "#,
+        )
+        .bind(draft_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("project draft '{draft_id}' was not found"),
+        )))?;
+        Ok(project_draft_record_from_row(&row))
+    }
+
+    pub async fn attach_project_draft_invocation(
+        &self,
+        draft_id: Uuid,
+        invocation_id: Uuid,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE project_onboarding_drafts
+            SET validation_invocation_id = $2,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(draft_id)
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn confirm_project_draft(&self, draft_id: Uuid) -> AppResult<ProjectRecord> {
+        let draft = self.get_project_draft(draft_id).await?;
+        if draft.status != "validated" {
+            return Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "project draft must be validated before confirmation",
+            )));
+        }
+        let project_name = draft.project_name.clone().ok_or_else(|| {
+            AppError::Io(std::io::Error::other(
+                "validated project draft missing project_name",
+            ))
+        })?;
+        let default_branch = draft.default_branch.clone().ok_or_else(|| {
+            AppError::Io(std::io::Error::other(
+                "validated project draft missing default_branch",
+            ))
+        })?;
+        let project_id = remote_project_id(&draft.git_repo_url, &draft.project_root, &project_name);
+        self.upsert_project(CreateProjectInput {
+            project_id,
+            project_name,
+            mode: "remote".to_string(),
+            git_repo_url: Some(draft.git_repo_url),
+            default_branch: Some(default_branch),
+            project_root: Some(draft.project_root),
+        })
+        .await
     }
 
     pub async fn get_project_by_project_id(&self, project_id: &str) -> AppResult<ProjectRecord> {
@@ -786,10 +927,10 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO invocations (
-                invocation_id, run_id, project_id, environment_id, command, execution_mode,
+                invocation_id, run_id, project_id, environment_id, project_draft_id, command, execution_mode,
                 worker_queue, status, execution_spec, promote_base_manifest, claim_deadline_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10, $11)
             RETURNING invocation_id, execution_mode, worker_queue, status, exit_code, error,
                 started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
                 cancel_requested, claimed_by
@@ -799,6 +940,7 @@ impl Db {
         .bind(input.run_id)
         .bind(input.project_id)
         .bind(input.environment_id)
+        .bind(input.project_draft_id)
         .bind(&input.command)
         .bind(match input.execution_mode {
             InvocationExecutionModeApi::Server => "server",
@@ -1230,7 +1372,7 @@ impl Db {
     ) -> AppResult<InvocationPersistenceRecord> {
         let row = sqlx::query(
             r#"
-            SELECT run_id, project_id, environment_id, command, promote_base_manifest
+            SELECT run_id, project_id, environment_id, project_draft_id, command, promote_base_manifest
             FROM invocations
             WHERE invocation_id = $1
               AND ($2::TEXT IS NULL OR claimed_by = $2)
@@ -1252,6 +1394,7 @@ impl Db {
             run_id: row.get("run_id"),
             project_id: row.get("project_id"),
             environment_id: row.get("environment_id"),
+            project_draft_id: row.get("project_draft_id"),
             command: row.get("command"),
             promote_base_manifest: row.get("promote_base_manifest"),
         })
@@ -1345,8 +1488,8 @@ impl Db {
                 &mut tx,
                 RunFinalization {
                     run_id,
-                    project_id: persistence.project_id,
-                    environment_id: persistence.environment_id,
+                    project_id: persistence.project_id.ok_or_else(|| AppError::Io(std::io::Error::other("run invocation missing project scope")))?,
+                    environment_id: persistence.environment_id.ok_or_else(|| AppError::Io(std::io::Error::other("run invocation missing environment scope")))?,
                     subcommand: &persistence.command,
                     dbt_version: completion.dbt_version.as_deref(),
                     exit_code: completion.exit_code,
@@ -1369,9 +1512,18 @@ impl Db {
         {
             self.apply_release_completion_in_tx(
                 &mut tx,
-                persistence.project_id,
-                persistence.environment_id,
+                persistence.project_id.ok_or_else(|| AppError::Io(std::io::Error::other("release invocation missing project scope")))?,
+                persistence.environment_id.ok_or_else(|| AppError::Io(std::io::Error::other("release invocation missing environment scope")))?,
                 completion.result.as_ref(),
+            )
+            .await?;
+        }
+
+        if persistence.command == "project_validate" {
+            self.apply_project_validation_completion_in_tx(
+                &mut tx,
+                persistence.project_draft_id.ok_or_else(|| AppError::Io(std::io::Error::other("project validation invocation missing draft scope")))?,
+                completion,
             )
             .await?;
         }
@@ -1399,6 +1551,65 @@ impl Db {
         .await?;
 
         tx.commit().await?;
+        Ok(())
+    }
+
+    async fn apply_project_validation_completion_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        draft_id: Uuid,
+        completion: &crate::execution::ExecutionCompletion,
+    ) -> AppResult<()> {
+        match completion.status {
+            InvocationLifecycleStatus::Succeeded => {
+                let result = completion.result.as_ref().ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "project validation completed without metadata",
+                    ))
+                })?;
+                let project_name = result
+                    .get("project_name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| AppError::Io(std::io::Error::other("project validation missing project_name")))?;
+                let default_branch = result
+                    .get("default_branch")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| AppError::Io(std::io::Error::other("project validation missing default_branch")))?;
+                sqlx::query(
+                    r#"
+                    UPDATE project_onboarding_drafts
+                    SET status = 'validated',
+                        validation_error = NULL,
+                        project_name = $2,
+                        default_branch = $3,
+                        validated_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(draft_id)
+                .bind(project_name)
+                .bind(default_branch)
+                .execute(&mut **tx)
+                .await?;
+            }
+            _ => {
+                sqlx::query(
+                    r#"
+                    UPDATE project_onboarding_drafts
+                    SET status = 'failed',
+                        validation_error = $2,
+                        validated_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(draft_id)
+                .bind(completion.error.as_deref().unwrap_or("project validation failed"))
+                .execute(&mut **tx)
+                .await?;
+            }
+        }
         Ok(())
     }
 
@@ -2545,6 +2756,21 @@ fn validate_remote_project_root_value(project_root: &str) -> AppResult<()> {
     }
 }
 
+pub(crate) fn validate_remote_project_root(project_root: &str) -> AppResult<()> {
+    validate_remote_project_root_value(project_root)
+}
+
+pub(crate) fn remote_project_id(repo_url: &str, project_root: &str, project_name: &str) -> String {
+    let digest = md5::compute(format!(
+        "{}\u{1f}{}\u{1f}{}",
+        repo_url.trim(),
+        project_root.trim(),
+        project_name.trim()
+    ));
+    let hex = format!("{:x}", digest);
+    format!("prj_remote_{}", &hex[..16])
+}
+
 fn validate_environment_git_metadata(
     project: &ProjectRecord,
     environment_slug: &str,
@@ -2595,6 +2821,22 @@ fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
         default_branch: row.get("default_branch"),
         project_root: row.get("project_root"),
         metadata: metadata.0,
+    }
+}
+
+fn project_draft_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectDraftRecord {
+    ProjectDraftRecord {
+        id: row.get("id"),
+        git_repo_url: row.get("git_repo_url"),
+        project_root: row.get("project_root"),
+        status: row.get("status"),
+        validation_error: row.get("validation_error"),
+        project_name: row.get("project_name"),
+        default_branch: row.get("default_branch"),
+        validation_invocation_id: row.get("validation_invocation_id"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        validated_at: row.get("validated_at"),
     }
 }
 

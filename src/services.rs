@@ -1,10 +1,10 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
-    CreateEnvironmentInput, CreateProjectInput, Db, EnvironmentRecord, EnvironmentReleaseInput,
-    EnvironmentVersionRecord, GitState, LocalEnvironmentUpsertInput, ProjectRecord,
-    RunFinalization, RunStart, UpdateEnvironmentInput, append_invocation_id, append_profiles_dir,
-    append_state_dir, build_generated_profiles, read_dbt_project_name, read_git_state,
-    spawn_dbt_child,
+    CreateEnvironmentInput, CreateProjectDraftInput, CreateProjectInput, Db, EnvironmentRecord,
+    EnvironmentReleaseInput, EnvironmentVersionRecord, GitState, LocalEnvironmentUpsertInput,
+    ProjectDraftRecord, ProjectRecord, RunFinalization, RunStart, UpdateEnvironmentInput,
+    append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
+    read_dbt_project_name, read_git_state, spawn_dbt_child,
 };
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
@@ -33,6 +33,7 @@ pub enum InvocationCommand {
     Test,
     Seed,
     Release,
+    ProjectValidate,
 }
 
 impl InvocationCommand {
@@ -44,11 +45,12 @@ impl InvocationCommand {
             Self::Test => "test",
             Self::Seed => "seed",
             Self::Release => "release",
+            Self::ProjectValidate => "project_validate",
         }
     }
 
     pub fn persists_state(self) -> bool {
-        !matches!(self, Self::Ls | Self::Release)
+        !matches!(self, Self::Ls | Self::Release | Self::ProjectValidate)
     }
 }
 
@@ -96,10 +98,17 @@ pub struct ReleaseValidationSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProjectValidationSpec {
+    pub repo_url: String,
+    pub project_root: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum PreparedExecutionSpec {
     Local(LocalExecutionSpec),
     Remote(RemoteExecutionSpec),
     ReleaseValidation(ReleaseValidationSpec),
+    ProjectValidation(ProjectValidationSpec),
 }
 
 #[derive(Debug, Clone)]
@@ -107,8 +116,9 @@ pub struct LocalExecutionPrepared {
     pub spec: PreparedExecutionSpec,
     pub persistence: Option<LocalExecutionPersistence>,
     pub worker_queue: String,
-    pub project_id: i64,
-    pub environment_id: i64,
+    pub project_id: Option<i64>,
+    pub environment_id: Option<i64>,
+    pub project_draft_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,22 +131,24 @@ pub struct LocalExecutionPersistence {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProjectInitRequest {
-    pub current_dir: PathBuf,
-    pub mode: Option<String>,
-    pub git_repo_url: Option<String>,
-    pub project_root: Option<String>,
-    pub default_branch: Option<String>,
-    pub force: bool,
+pub struct ProjectCreateRequest {
+    pub git_repo_url: String,
+    pub project_root: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectDraftValidationPrepared {
+    pub draft: ProjectDraftRecord,
+    pub invocation_id: Uuid,
+    pub spec: ProjectValidationSpec,
+    pub worker_queue: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ProjectUpdateRequest {
-    pub current_dir: PathBuf,
-    pub mode: Option<String>,
+    pub project: String,
     pub git_repo_url: Option<String>,
     pub project_root: Option<String>,
-    pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,59 +226,71 @@ impl<'a> ProjectService<'a> {
         Self { db }
     }
 
-    pub async fn init(&self, request: ProjectInitRequest) -> AppResult<ProjectRecord> {
+    pub async fn create_draft(&self, request: ProjectCreateRequest) -> AppResult<ProjectDraftRecord> {
         self.db.require_current_schema().await?;
-        let inferred = self
-            .infer_project_defaults(
-                &request.current_dir,
-                request.mode.as_deref(),
-                request.git_repo_url.as_deref(),
-                request.project_root.as_deref(),
-                request.default_branch.as_deref(),
-            )
+        self.db
+            .create_project_draft(CreateProjectDraftInput {
+                git_repo_url: request.git_repo_url,
+                project_root: request.project_root,
+            })
+            .await
+    }
+
+    pub async fn prepare_draft_validation(
+        &self,
+        draft_id: Uuid,
+    ) -> AppResult<ProjectDraftValidationPrepared> {
+        self.db.require_current_schema().await?;
+        let invocation_id = Uuid::new_v4();
+        let draft = self
+            .db
+            .mark_project_draft_validating(draft_id)
             .await?;
-        let input = CreateProjectInput {
-            project_id: inferred.project_id,
-            project_name: inferred.project_name,
-            mode: inferred.mode,
-            git_repo_url: inferred.git_repo_url,
-            default_branch: inferred.default_branch,
-            project_root: inferred.project_root,
-        };
-        if request.force {
-            self.db.upsert_project(input).await
-        } else {
-            match self.db.create_project(input.clone()).await {
-                Ok(project) => Ok(project),
-                Err(AppError::Sqlx(sqlx::Error::Database(db_err)))
-                    if db_err.code().as_deref() == Some("23505") =>
-                {
-                    self.db.upsert_project(input).await
-                }
-                Err(err) => Err(err),
-            }
-        }
+        Ok(ProjectDraftValidationPrepared {
+            spec: ProjectValidationSpec {
+                repo_url: draft.git_repo_url.clone(),
+                project_root: draft.project_root.clone(),
+            },
+            worker_queue: "generic".to_string(),
+            draft,
+            invocation_id,
+        })
+    }
+
+    pub async fn get_draft(&self, draft_id: Uuid) -> AppResult<ProjectDraftRecord> {
+        self.db.require_current_schema().await?;
+        self.db.get_project_draft(draft_id).await
+    }
+
+    pub async fn confirm_draft(&self, draft_id: Uuid) -> AppResult<ProjectRecord> {
+        self.db.require_current_schema().await?;
+        self.db.confirm_project_draft(draft_id).await
     }
 
     pub async fn update(&self, request: ProjectUpdateRequest) -> AppResult<ProjectRecord> {
         self.db.require_current_schema().await?;
-        let inferred = self
-            .infer_project_defaults(
-                &request.current_dir,
-                request.mode.as_deref(),
-                request.git_repo_url.as_deref(),
-                request.project_root.as_deref(),
-                request.default_branch.as_deref(),
-            )
-            .await?;
+        let existing = self.db.get_project_by_project_id(&request.project).await?;
+        if existing.mode != "remote" {
+            return Err(AppError::RemoteExecutionRequiresRemoteProject(
+                existing.project_id.clone(),
+                existing.mode,
+            ));
+        }
+        let git_repo_url = request.git_repo_url.or(existing.git_repo_url.clone());
+        let project_root = request.project_root.or(existing.project_root.clone());
+        validate_remote_project_root(
+            project_root
+                .as_deref()
+                .ok_or_else(|| AppError::InvalidRemoteProjectRoot(String::new()))?,
+        )?;
         self.db
             .update_project(CreateProjectInput {
-                project_id: inferred.project_id,
-                project_name: inferred.project_name,
-                mode: inferred.mode,
-                git_repo_url: inferred.git_repo_url,
-                default_branch: inferred.default_branch,
-                project_root: inferred.project_root,
+                project_id: existing.project_id.clone(),
+                project_name: existing.project_name,
+                mode: "remote".to_string(),
+                git_repo_url,
+                default_branch: existing.default_branch,
+                project_root,
             })
             .await
     }
@@ -276,59 +300,9 @@ impl<'a> ProjectService<'a> {
         self.db.list_projects().await
     }
 
-    pub async fn show(
-        &self,
-        current_dir: &Path,
-        project: Option<String>,
-    ) -> AppResult<ProjectRecord> {
+    pub async fn show(&self, project: String) -> AppResult<ProjectRecord> {
         self.db.require_current_schema().await?;
-        let project_id = match project {
-            Some(project_id) => project_id,
-            None => {
-                self.infer_project_defaults(current_dir, None, None, None, None)
-                    .await?
-                    .project_id
-            }
-        };
-        self.db.get_project_by_project_id(&project_id).await
-    }
-
-    async fn infer_project_defaults(
-        &self,
-        current_dir: &Path,
-        explicit_mode: Option<&str>,
-        git_repo_url: Option<&str>,
-        project_root: Option<&str>,
-        default_branch: Option<&str>,
-    ) -> AppResult<InferredProjectInput> {
-        let local =
-            infer_local_project_defaults(current_dir, git_repo_url, project_root, default_branch)?;
-        let remote =
-            infer_remote_project_defaults(current_dir, git_repo_url, project_root, default_branch)
-                .ok();
-
-        let chosen_mode = match explicit_mode {
-            Some(mode) => mode.to_string(),
-            None => {
-                if let Some(remote_input) = remote.as_ref()
-                    && self
-                        .db
-                        .get_project_by_project_id(&remote_input.project_id)
-                        .await
-                        .is_ok()
-                {
-                    "remote".to_string()
-                } else {
-                    "local".to_string()
-                }
-            }
-        };
-
-        match chosen_mode.as_str() {
-            "local" => Ok(local),
-            "remote" => remote.ok_or(AppError::RemoteProjectRequiresGitRepo),
-            other => Err(AppError::InvalidProjectMode(other.to_string())),
-        }
+        self.db.get_project_by_project_id(&project).await
     }
 }
 
@@ -695,8 +669,9 @@ impl<'a> InvocationService<'a> {
             }),
             persistence,
             worker_queue: environment.worker_queue.clone(),
-            project_id: project.id,
-            environment_id: environment.id,
+            project_id: Some(project.id),
+            environment_id: Some(environment.id),
+            project_draft_id: None,
         })
     }
 
@@ -818,8 +793,9 @@ impl<'a> InvocationService<'a> {
             }),
             persistence,
             worker_queue: environment.worker_queue.clone(),
-            project_id: project.id,
-            environment_id: environment.id,
+            project_id: Some(project.id),
+            environment_id: Some(environment.id),
+            project_draft_id: None,
         })
     }
 
@@ -856,8 +832,9 @@ impl<'a> InvocationService<'a> {
             }),
             persistence: None,
             worker_queue: environment.worker_queue.clone(),
-            project_id: project.id,
-            environment_id: environment.id,
+            project_id: Some(project.id),
+            environment_id: Some(environment.id),
+            project_draft_id: None,
         })
     }
 
@@ -1198,12 +1175,7 @@ pub fn infer_remote_project_defaults(
         .map(ToString::to_string)
         .unwrap_or_else(|| relative_project_root(&repo_root, &canonical_project_dir));
     validate_remote_project_root(&inferred_project_root)?;
-    let project_id = format!(
-        "prj_remote_{}",
-        short_hash(&format!(
-            "{repo_url}\n{inferred_project_root}\n{project_name}"
-        ))
-    );
+    let project_id = crate::db::remote_project_id(&repo_url, &inferred_project_root, &project_name);
 
     Ok(InferredProjectInput {
         project_id,

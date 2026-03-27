@@ -1,0 +1,22 @@
+<div class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-950">
+  <div class="flex items-center justify-between gap-4">
+    <div>
+      <div class="font-medium">Validation succeeded</div>
+      <div class="mt-1 text-emerald-900">{{ draft.git_repo_url }} · {{ draft.project_root }}</div>
+    </div>
+    <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ draft.status_class }}">{{ draft.status }}</span>
+  </div>
+  <div class="mt-4 grid gap-3 md:grid-cols-2">
+    <div class="rounded-lg bg-white/70 px-3 py-2">
+      <div class="text-xs font-medium uppercase tracking-wide text-emerald-700">Project name</div>
+      <div class="mt-1 font-medium text-slate-900">{{ draft.project_name }}</div>
+    </div>
+    <div class="rounded-lg bg-white/70 px-3 py-2">
+      <div class="text-xs font-medium uppercase tracking-wide text-emerald-700">Default branch</div>
+      <div class="mt-1 font-medium text-slate-900">{{ draft.default_branch }}</div>
+    </div>
+  </div>
+  <form class="mt-4 flex items-center justify-end" method="post" action="/ui/project-drafts/{{ draft.id }}/confirm">
+    <button type="submit" class="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600">Create Project</button>
+  </form>
+</div>

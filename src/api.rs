@@ -33,6 +33,11 @@ pub struct ProjectsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProjectDraftResponse {
+    pub draft: crate::db::ProjectDraftRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentResponse {
     pub environment: EnvironmentRecord,
 }
@@ -48,28 +53,21 @@ pub struct EnvironmentVersionsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ProjectInitApiRequest {
-    pub current_dir: String,
-    pub mode: Option<String>,
-    pub git_repo_url: Option<String>,
-    pub project_root: Option<String>,
-    pub default_branch: Option<String>,
-    pub force: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProjectUpdateApiRequest {
-    pub current_dir: String,
-    pub mode: Option<String>,
     pub git_repo_url: Option<String>,
     pub project_root: Option<String>,
-    pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ProjectShowApiRequest {
-    pub current_dir: String,
-    pub project: Option<String>,
+pub struct ProjectDraftCreateApiRequest {
+    pub git_repo_url: String,
+    pub project_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProjectDraftValidateResponse {
+    pub draft: crate::db::ProjectDraftRecord,
+    pub invocation_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -141,6 +139,7 @@ pub enum InvocationCommandApi {
     Test,
     Seed,
     Release,
+    ProjectValidate,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -206,6 +205,10 @@ pub enum InvocationExecutionSpecApi {
         git_ref: Option<String>,
         git_commit_sha: Option<String>,
         git_branch: Option<String>,
+    },
+    ProjectValidation {
+        repo_url: String,
+        project_root: String,
     },
 }
 

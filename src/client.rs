@@ -6,15 +6,14 @@ use crate::api::{
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
     InvocationEvent, InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest,
     InvocationHeartbeatResponse, InvocationListApiRequest, InvocationStatusResponse,
-    InvocationsResponse, MigrateResponse, ProjectInitApiRequest, ProjectResponse,
-    ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse, QueuesResponse,
-    WorkersResponse,
+    InvocationsResponse, MigrateResponse, ProjectDraftCreateApiRequest, ProjectDraftResponse,
+    ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse,
+    QueuesResponse, WorkersResponse,
 };
 use crate::error::{AppError, AppResult};
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
-use std::path::Path;
 use uuid::Uuid;
 
 pub struct DaemonClient {
@@ -32,11 +31,6 @@ impl DaemonClient {
 
     pub async fn migrate(&self) -> AppResult<MigrateResponse> {
         self.send(self.http.post(self.url("/v1/state/migrate")))
-            .await
-    }
-
-    pub async fn project_init(&self, request: ProjectInitApiRequest) -> AppResult<ProjectResponse> {
-        self.send(self.http.post(self.url("/v1/projects:init")).json(&request))
             .await
     }
 
@@ -65,18 +59,37 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn project_show_with_context(
+    pub async fn project_draft_create(
         &self,
-        current_dir: &Path,
-        project: Option<String>,
-    ) -> AppResult<ProjectResponse> {
+        request: ProjectDraftCreateApiRequest,
+    ) -> AppResult<ProjectDraftResponse> {
+        self.send(self.http.post(self.url("/v1/project-drafts")).json(&request))
+            .await
+    }
+
+    pub async fn project_draft_get(&self, draft_id: Uuid) -> AppResult<ProjectDraftResponse> {
         self.send(
             self.http
-                .post(self.url("/v1/projects/show"))
-                .json(&ProjectShowApiRequest {
-                    current_dir: current_dir.display().to_string(),
-                    project,
-                }),
+                .get(self.url(&format!("/v1/project-drafts/{draft_id}"))),
+        )
+        .await
+    }
+
+    pub async fn project_draft_validate(
+        &self,
+        draft_id: Uuid,
+    ) -> AppResult<ProjectDraftValidateResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/v1/project-drafts/{draft_id}/validate"))),
+        )
+        .await
+    }
+
+    pub async fn project_draft_confirm(&self, draft_id: Uuid) -> AppResult<ProjectResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/v1/project-drafts/{draft_id}/confirm"))),
         )
         .await
     }

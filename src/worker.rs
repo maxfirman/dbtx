@@ -4,6 +4,7 @@ use crate::api::{
     InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
 };
 use crate::client::DaemonClient;
+use crate::services::read_dbt_project_name_from_root;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use serde_json::json;
@@ -32,6 +33,9 @@ pub async fn execute_claimed_invocation(
     let spec = claim.execution_spec.clone();
     if matches!(spec, InvocationExecutionSpecApi::ReleaseValidation { .. }) {
         return execute_release_validation(client, claim, &spec).await;
+    }
+    if matches!(spec, InvocationExecutionSpecApi::ProjectValidation { .. }) {
+        return execute_project_validation(client, claim, &spec).await;
     }
     let command_name = spec.command();
     let pretty_terminal_output = claim.execution_mode == InvocationExecutionModeApi::Local;
@@ -386,6 +390,7 @@ impl InvocationExecutionSpecApi {
         match self {
             Self::Local { command, .. } | Self::Remote { command, .. } => *command,
             Self::ReleaseValidation { .. } => InvocationCommandApi::Release,
+            Self::ProjectValidation { .. } => InvocationCommandApi::ProjectValidate,
         }
     }
 
@@ -393,6 +398,7 @@ impl InvocationExecutionSpecApi {
         match self {
             Self::Local { args, .. } | Self::Remote { args, .. } => args,
             Self::ReleaseValidation { .. } => &[],
+            Self::ProjectValidation { .. } => &[],
         }
     }
 
@@ -400,6 +406,7 @@ impl InvocationExecutionSpecApi {
         match self {
             Self::Local { profiles_yml, .. } | Self::Remote { profiles_yml, .. } => profiles_yml,
             Self::ReleaseValidation { .. } => "",
+            Self::ProjectValidation { .. } => "",
         }
     }
 
@@ -409,6 +416,7 @@ impl InvocationExecutionSpecApi {
                 state_manifest.as_ref()
             }
             Self::ReleaseValidation { .. } => None,
+            Self::ProjectValidation { .. } => None,
         }
     }
 }
@@ -492,6 +500,104 @@ async fn execute_release_validation(
     Ok(())
 }
 
+async fn execute_project_validation(
+    client: &DaemonClient,
+    claim: InvocationClaimResponse,
+    spec: &InvocationExecutionSpecApi,
+) -> AppResult<()> {
+    let InvocationExecutionSpecApi::ProjectValidation {
+        repo_url,
+        project_root,
+    } = spec
+    else {
+        unreachable!("project validation requires project validation spec");
+    };
+
+    send_worker_event(
+        client,
+        &claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Validating project repository {repo_url}"),
+    )
+    .await?;
+    send_worker_event(
+        client,
+        &claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Checking project path {project_root}"),
+    )
+    .await?;
+
+    let default_branch = match resolve_remote_default_branch(repo_url).await {
+        Ok(branch) => branch,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+
+    send_worker_event(
+        client,
+        &claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Resolved default branch {default_branch}"),
+    )
+    .await?;
+
+    let default_commit = match resolve_remote_git_target(repo_url, Some(&default_branch), None).await {
+        Ok(commit) => commit,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+    let repo_checkout = match ensure_git_worktree(repo_url, &default_commit).await {
+        Ok(path) => path,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+    let project_dir = repo_checkout.join(project_root);
+    let project_name = match read_dbt_project_name_from_root(&project_dir) {
+        Ok(name) => name,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+
+    send_worker_event(
+        client,
+        &claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Found dbt project {project_name}"),
+    )
+    .await?;
+
+    client
+        .invocation_complete(
+            claim.invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                completion: crate::execution::ExecutionCompletion {
+                    status: InvocationLifecycleStatus::Succeeded,
+                    exit_code: 0,
+                    error: None,
+                    dbt_version: None,
+                    manifest: None,
+                    result: Some(json!({
+                        "project_name": project_name,
+                        "default_branch": default_branch,
+                    })),
+                },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 async fn send_worker_event(
     client: &DaemonClient,
     claim: &InvocationClaimResponse,
@@ -552,6 +658,9 @@ async fn materialize_execution_project_dir(
         InvocationExecutionSpecApi::ReleaseValidation { .. } => {
             Err(AppError::UnsupportedLocalExecution("release".to_string()))
         }
+        InvocationExecutionSpecApi::ProjectValidation { .. } => {
+            Err(AppError::UnsupportedLocalExecution("project_validate".to_string()))
+        }
     }
 }
 
@@ -583,6 +692,29 @@ async fn resolve_remote_git_target(
             "provide exactly one of git_ref or git_commit_sha",
         ))),
     }
+}
+
+async fn resolve_remote_default_branch(repo_url: &str) -> AppResult<String> {
+    let output = TokioCommand::new("git")
+        .args(["ls-remote", "--symref", repo_url, "HEAD"])
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(AppError::Io(std::io::Error::other(format!(
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))));
+    }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(rest) = line.strip_prefix("ref: refs/heads/")
+            && let Some((branch, _)) = rest.split_once('\t')
+        {
+            return Ok(branch.to_string());
+        }
+    }
+    Err(AppError::Io(std::io::Error::other(format!(
+        "git failed: could not determine default branch for {repo_url}"
+    ))))
 }
 
 async fn resolve_git_ref(git_dir: &Path, git_ref: &str, repo_url: &str) -> AppResult<String> {
@@ -875,7 +1007,7 @@ async fn prune_git_cache(
 fn persists_state(command: InvocationCommandApi) -> bool {
     !matches!(
         command,
-        InvocationCommandApi::Ls | InvocationCommandApi::Release
+        InvocationCommandApi::Ls | InvocationCommandApi::Release | InvocationCommandApi::ProjectValidate
     )
 }
 
@@ -887,6 +1019,7 @@ fn map_command(command: InvocationCommandApi) -> &'static str {
         InvocationCommandApi::Test => "test",
         InvocationCommandApi::Seed => "seed",
         InvocationCommandApi::Release => "release",
+        InvocationCommandApi::ProjectValidate => "project_validate",
     }
 }
 

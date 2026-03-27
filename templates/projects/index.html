@@ -2,9 +2,19 @@
 
 {% block content %}
 <div class="space-y-8">
-  <div>
-    <h1 class="text-3xl font-semibold tracking-tight">Projects</h1>
-    <p class="mt-2 text-sm text-slate-600">Registered projects and their environments.</p>
+  <div class="flex items-start justify-between gap-4">
+    <div>
+      <h1 class="text-3xl font-semibold tracking-tight">Projects</h1>
+      <p class="mt-2 text-sm text-slate-600">Registered projects and their environments.</p>
+    </div>
+    <button
+      class="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
+      hx-get="/ui/projects/new"
+      hx-target="#modal-root"
+      hx-swap="innerHTML"
+    >
+      Create Project
+    </button>
   </div>
 
   <div class="space-y-6">
@@ -57,4 +67,5 @@
     {% endfor %}
   </div>
 </div>
+<div id="modal-root"></div>
 {% endblock %}

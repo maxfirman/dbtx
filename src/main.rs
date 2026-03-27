@@ -203,46 +203,48 @@ async fn handle_project_command(
     let current_dir = std::env::current_dir()?;
     let client = daemon_client(&current_dir, service_url_override)?;
     match command {
-        ProjectCommand::Init {
-            mode,
+        ProjectCommand::Create {
             git_repo_url,
             project_root,
-            default_branch,
-            force,
         } => {
-            let project = client
-                .project_init(api::ProjectInitApiRequest {
-                    current_dir: current_dir.display().to_string(),
-                    mode,
+            print_project_create_start(&git_repo_url, &project_root);
+            let draft = client
+                .project_draft_create(api::ProjectDraftCreateApiRequest {
                     git_repo_url,
                     project_root,
-                    default_branch,
-                    force,
                 })
                 .await?
-                .project;
+                .draft;
+            let validation = client.project_draft_validate(draft.id).await?;
+            client
+                .stream_invocation_events(
+                    validation.invocation_id,
+                    render_project_validation_event,
+                )
+                .await?;
+            let status = wait_for_invocation_completion(&client, validation.invocation_id).await?;
+            if !matches!(status.status, api::InvocationLifecycleStatus::Succeeded) {
+                eprintln!(
+                    "project validation failed: {}",
+                    status.error.as_deref().unwrap_or("validation failed")
+                );
+                return Err(AppError::SilentExit(1));
+            }
+            let draft = client.project_draft_get(draft.id).await?.draft;
+            let project = client.project_draft_confirm(draft.id).await?.project;
             print_project(&project);
         }
         ProjectCommand::Update {
-            mode,
+            project,
             git_repo_url,
             project_root,
-            default_branch,
         } => {
-            let project_id = client
-                .project_show_with_context(&current_dir, None)
-                .await?
-                .project
-                .project_id;
             let project = client
                 .project_update(
-                    &project_id,
+                    &project,
                     api::ProjectUpdateApiRequest {
-                        current_dir: current_dir.display().to_string(),
-                        mode,
                         git_repo_url,
                         project_root,
-                        default_branch,
                     },
                 )
                 .await?;
@@ -254,14 +256,7 @@ async fn handle_project_command(
             }
         }
         ProjectCommand::Show { project } => {
-            let project = if let Some(project_id) = project.clone() {
-                client.project_show_by_id(&project_id).await?.project
-            } else {
-                client
-                    .project_show_with_context(&current_dir, project)
-                    .await?
-                    .project
-            };
+            let project = client.project_show_by_id(&project).await?.project;
             print_project(&project);
         }
     }
@@ -663,6 +658,36 @@ fn render_release_event(event: api::InvocationEvent) {
     }
 }
 
+fn render_project_validation_event(event: api::InvocationEvent) {
+    let use_color = should_use_color();
+    if let Some(text) = event.text {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let bullet = style("  •", &[CliStyle::Cyan, CliStyle::Bold], use_color);
+        println!("{bullet} {}", style(text, &[], use_color));
+    }
+}
+
+fn print_project_create_start(repo_url: &str, project_root: &str) {
+    let use_color = should_use_color();
+    println!(
+        "{}",
+        style("dbtx project create", &[CliStyle::Cyan, CliStyle::Bold], use_color)
+    );
+    println!(
+        "  {} {}",
+        style("Repository", &[CliStyle::Dim], use_color),
+        style(repo_url, &[CliStyle::Bold], use_color),
+    );
+    println!(
+        "  {} {}",
+        style("Project root", &[CliStyle::Dim], use_color),
+        style(project_root, &[CliStyle::Bold], use_color),
+    );
+}
+
 fn print_release_start(
     project: &str,
     slug: &str,
@@ -848,6 +873,7 @@ async fn create_invocation(
                 InvocationCommand::Test => api::InvocationCommandApi::Test,
                 InvocationCommand::Seed => api::InvocationCommandApi::Seed,
                 InvocationCommand::Release => api::InvocationCommandApi::Release,
+                InvocationCommand::ProjectValidate => api::InvocationCommandApi::ProjectValidate,
             },
             args: args
                 .into_iter()

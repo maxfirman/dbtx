@@ -1,0 +1,16 @@
+<div
+  class="rounded-xl border border-sky-200 bg-sky-50 px-4 py-4 text-sm text-sky-900"
+  {% if should_poll %}
+  hx-get="/ui/project-drafts/{{ draft.id }}"
+  hx-trigger="load delay:1s"
+  hx-swap="outerHTML"
+  {% endif %}
+>
+  <div class="flex items-center justify-between gap-4">
+    <div>
+      <div class="font-medium">Validating remote project…</div>
+      <div class="mt-1 text-sky-800">{{ draft.git_repo_url }} · {{ draft.project_root }}</div>
+    </div>
+    <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ draft.status_class }}">{{ draft.status }}</span>
+  </div>
+</div>

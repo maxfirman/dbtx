@@ -79,36 +79,28 @@ pub enum StateCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ProjectCommand {
-    #[command(about = "Initialize the current dbt project and write dbtx.toml")]
-    Init {
+    #[command(about = "Create a remote dbtx project")]
+    Create {
         #[arg(long)]
-        mode: Option<String>,
+        git_repo_url: String,
         #[arg(long)]
-        git_repo_url: Option<String>,
-        #[arg(long)]
-        project_root: Option<String>,
-        #[arg(long)]
-        default_branch: Option<String>,
-        #[arg(long)]
-        force: bool,
+        project_root: String,
     },
-    #[command(about = "Update the registered dbtx project to match the current repo state")]
+    #[command(about = "Update a remote dbtx project")]
     Update {
         #[arg(long)]
-        mode: Option<String>,
+        project: String,
         #[arg(long)]
         git_repo_url: Option<String>,
         #[arg(long)]
         project_root: Option<String>,
-        #[arg(long)]
-        default_branch: Option<String>,
     },
-    #[command(about = "List registered dbtx projects")]
+    #[command(about = "List registered remote dbtx projects")]
     List,
     #[command(about = "Show one registered dbtx project")]
     Show {
         #[arg(long)]
-        project: Option<String>,
+        project: String,
     },
 }
 
@@ -490,62 +482,51 @@ mod tests {
     }
 
     #[test]
-    fn project_init_parses() {
+    fn project_create_parses() {
         let cli = Cli::parse_from([
             "dbtx",
             "project",
-            "init",
+            "create",
             "--git-repo-url",
             "https://github.com/example/repo.git",
             "--project-root",
             "analytics",
         ]);
         match cli.command {
-            Command::Project(ProjectCommand::Init {
-                mode,
+            Command::Project(ProjectCommand::Create {
                 git_repo_url,
                 project_root,
-                default_branch,
-                force,
             }) => {
-                assert!(mode.is_none());
-                assert_eq!(
-                    git_repo_url.as_deref(),
-                    Some("https://github.com/example/repo.git")
-                );
-                assert_eq!(project_root.as_deref(), Some("analytics"));
-                assert_eq!(default_branch.as_deref(), None);
-                assert!(!force);
+                assert_eq!(git_repo_url, "https://github.com/example/repo.git");
+                assert_eq!(project_root, "analytics");
             }
-            _ => panic!("expected project init command"),
+            _ => panic!("expected project create command"),
         }
     }
 
     #[test]
     fn project_update_parses() {
-        let cli = Cli::parse_from(["dbtx", "project", "update", "--default-branch", "main"]);
+        let cli = Cli::parse_from(["dbtx", "project", "update", "--project", "proj"]);
         match cli.command {
             Command::Project(ProjectCommand::Update {
-                mode,
+                project,
                 git_repo_url,
                 project_root,
-                default_branch,
             }) => {
-                assert!(mode.is_none());
+                assert_eq!(project, "proj");
                 assert!(git_repo_url.is_none());
                 assert!(project_root.is_none());
-                assert_eq!(default_branch.as_deref(), Some("main"));
             }
             _ => panic!("expected project update command"),
         }
     }
 
     #[test]
-    fn project_show_allows_omitted_project_flag() {
-        let cli = Cli::parse_from(["dbtx", "project", "show"]);
+    fn project_show_requires_project_flag() {
+        let cli = Cli::parse_from(["dbtx", "project", "show", "--project", "proj"]);
         match cli.command {
             Command::Project(ProjectCommand::Show { project }) => {
-                assert!(project.is_none());
+                assert_eq!(project, "proj");
             }
             _ => panic!("expected project show command"),
         }

@@ -426,6 +426,29 @@ ADD CONSTRAINT invocations_claim_lease_consistency CHECK (
 ALTER TABLE invocations
 ADD COLUMN cancel_requested_at TIMESTAMPTZ;
 
+ALTER TABLE invocations
+ALTER COLUMN project_id DROP NOT NULL,
+ALTER COLUMN environment_id DROP NOT NULL;
+
+CREATE TABLE IF NOT EXISTS project_onboarding_drafts (
+    id UUID PRIMARY KEY,
+    git_repo_url TEXT NOT NULL,
+    project_root TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    validation_error TEXT NULL,
+    project_name TEXT NULL,
+    default_branch TEXT NULL,
+    validation_invocation_id UUID NULL REFERENCES invocations(invocation_id) ON DELETE SET NULL,
+    validated_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_project_onboarding_drafts_status
+        CHECK (status IN ('draft', 'validating', 'validated', 'failed'))
+);
+
+ALTER TABLE invocations
+ADD COLUMN IF NOT EXISTS project_draft_id UUID NULL REFERENCES project_onboarding_drafts(id) ON DELETE CASCADE;
+
 ALTER TABLE environments
 ADD COLUMN IF NOT EXISTS profile_name TEXT;
 

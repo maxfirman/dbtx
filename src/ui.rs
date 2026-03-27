@@ -5,12 +5,14 @@ use crate::api::{
 use crate::db::{EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
 use crate::error::{AppError, AppResult};
 use crate::server::AppState;
+use crate::services::{ProjectCreateRequest, ProjectService};
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
+use chrono::Duration;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -19,6 +21,13 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(dashboard))
         .route("/ui/projects", get(projects_index))
+        .route("/ui/projects/new", get(project_create_modal))
+        .route("/ui/project-drafts", post(project_draft_create))
+        .route("/ui/project-drafts/{draft_id}", get(project_draft_status))
+        .route(
+            "/ui/project-drafts/{draft_id}/confirm",
+            post(project_draft_confirm),
+        )
         .route("/ui/invocations", get(invocations_index))
         .route("/ui/invocations/{id}", get(invocation_detail))
         .route("/ui/invocations/{id}/cancel", post(invocation_cancel))
@@ -53,6 +62,12 @@ impl IntoResponse for UiError {
             AppError::ProjectIdNotFound(_)
             | AppError::EnvironmentNotFound(_, _)
             | AppError::EnvironmentVersionNotFound(_, _, _) => (StatusCode::NOT_FOUND, "Not Found"),
+            AppError::Io(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                (StatusCode::NOT_FOUND, "Not Found")
+            }
+            AppError::Io(err) if err.kind() == std::io::ErrorKind::InvalidInput => {
+                (StatusCode::BAD_REQUEST, "Invalid Request")
+            }
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "Server Error"),
         };
         let body = render_template(&ErrorTemplate {
@@ -125,6 +140,137 @@ async fn projects_index(State(state): State<AppState>) -> Result<Html<String>, U
         title: "Projects",
         projects: views,
     })
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+struct ProjectDraftForm {
+    git_repo_url: String,
+    project_root: String,
+}
+
+async fn project_create_modal() -> Result<Html<String>, UiError> {
+    render_template(&ProjectCreateModalTemplate {
+        draft: ProjectDraftForm::default(),
+        error: None,
+    })
+}
+
+async fn project_draft_create(
+    State(state): State<AppState>,
+    Form(form): Form<ProjectDraftForm>,
+) -> Result<Html<String>, UiError> {
+    let service = ProjectService::new(state.db());
+    let draft = match service
+        .create_draft(ProjectCreateRequest {
+            git_repo_url: form.git_repo_url.clone(),
+            project_root: form.project_root.clone(),
+        })
+        .await
+    {
+        Ok(draft) => draft,
+        Err(err) => return render_template(&ProjectDraftFailedTemplate { error: err.to_string() }),
+    };
+    if let Err(err) = start_project_draft_validation(&state, draft.id).await {
+        return render_template(&ProjectDraftFailedTemplate {
+            error: err.0.to_string(),
+        });
+    }
+    render_project_draft_fragment(&draft, None, true)
+}
+
+async fn project_draft_status(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+) -> Result<Html<String>, UiError> {
+    let draft = ProjectService::new(state.db()).get_draft(draft_id).await?;
+    render_project_draft_fragment(&draft, None, false)
+}
+
+async fn project_draft_confirm(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+) -> Result<impl IntoResponse, UiError> {
+    ProjectService::new(state.db()).confirm_draft(draft_id).await?;
+    Ok(Redirect::to("/ui/projects"))
+}
+
+async fn start_project_draft_validation(
+    state: &AppState,
+    draft_id: Uuid,
+) -> Result<(), UiError> {
+    let prepared = ProjectService::new(state.db())
+        .prepare_draft_validation(draft_id)
+        .await?;
+    let invocation_id = prepared.invocation_id;
+    state
+        .db()
+        .create_invocation(crate::db::CreateInvocationInput {
+            invocation_id,
+            run_id: None,
+            project_id: None,
+            environment_id: None,
+            project_draft_id: Some(prepared.draft.id),
+            command: crate::services::InvocationCommand::ProjectValidate
+                .as_str()
+                .to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: prepared.worker_queue,
+            execution_spec: Some(crate::api::InvocationExecutionSpecApi::ProjectValidation {
+                repo_url: prepared.spec.repo_url,
+                project_root: prepared.spec.project_root,
+            }),
+            promote_base_manifest: false,
+            claim_deadline_at: Some(
+                Utc::now()
+                    + Duration::from_std(crate::execution::claim_startup_timeout(
+                        InvocationExecutionModeApi::Server,
+                    ))
+                    .expect("duration"),
+            ),
+        })
+        .await?;
+    state
+        .db()
+        .attach_project_draft_invocation(prepared.draft.id, invocation_id)
+        .await?;
+    let started_event = crate::api::InvocationEvent {
+        event_type: "invocation.started".to_string(),
+        timestamp: Utc::now(),
+        text: None,
+        stream: None,
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        exit_code: None,
+        error: None,
+    };
+    let seq = state
+        .db()
+        .append_invocation_event(invocation_id, &started_event)
+        .await?;
+    state
+        .publish_invocation_event(invocation_id, seq, started_event)
+        .await;
+    Ok(())
+}
+
+fn render_project_draft_fragment(
+    draft: &crate::db::ProjectDraftRecord,
+    error: Option<String>,
+    should_poll: bool,
+) -> Result<Html<String>, UiError> {
+    match draft.status.as_str() {
+        "validated" => render_template(&ProjectDraftValidatedTemplate {
+            draft: project_draft_view(draft),
+        }),
+        "failed" => render_template(&ProjectDraftFailedTemplate {
+            error: error.or_else(|| draft.validation_error.clone()).unwrap_or_default(),
+        }),
+        _ => render_template(&ProjectDraftPendingTemplate {
+            draft: project_draft_view(draft),
+            should_poll,
+        }),
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -462,6 +608,17 @@ struct ProjectWithEnvironmentsView {
 }
 
 #[derive(Clone)]
+struct ProjectDraftView {
+    id: String,
+    git_repo_url: String,
+    project_root: String,
+    status: String,
+    status_class: &'static str,
+    project_name: String,
+    default_branch: String,
+}
+
+#[derive(Clone)]
 struct EnvironmentLinkView {
     slug: String,
     target_name: String,
@@ -579,6 +736,18 @@ fn environment_link_view(environment: &EnvironmentRecord) -> EnvironmentLinkView
     }
 }
 
+fn project_draft_view(draft: &crate::db::ProjectDraftRecord) -> ProjectDraftView {
+    ProjectDraftView {
+        id: draft.id.to_string(),
+        git_repo_url: draft.git_repo_url.clone(),
+        project_root: draft.project_root.clone(),
+        status_class: status_badge_class(&draft.status),
+        status: draft.status.clone(),
+        project_name: draft.project_name.clone().unwrap_or_default(),
+        default_branch: draft.default_branch.clone().unwrap_or_default(),
+    }
+}
+
 fn invocation_summary_view(invocation: &InvocationStatusResponse) -> InvocationSummaryView {
     let status = invocation_status_value(&invocation.status).to_string();
     InvocationSummaryView {
@@ -681,6 +850,32 @@ struct DashboardTemplate {
 struct ProjectsTemplate {
     title: &'static str,
     projects: Vec<ProjectWithEnvironmentsView>,
+}
+
+#[derive(Template)]
+#[template(path = "projects/_create_modal.html")]
+struct ProjectCreateModalTemplate {
+    draft: ProjectDraftForm,
+    error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "projects/_draft_pending.html")]
+struct ProjectDraftPendingTemplate {
+    draft: ProjectDraftView,
+    should_poll: bool,
+}
+
+#[derive(Template)]
+#[template(path = "projects/_draft_failed.html")]
+struct ProjectDraftFailedTemplate {
+    error: String,
+}
+
+#[derive(Template)]
+#[template(path = "projects/_draft_validated.html")]
+struct ProjectDraftValidatedTemplate {
+    draft: ProjectDraftView,
 }
 
 #[derive(Template)]

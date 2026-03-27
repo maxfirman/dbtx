@@ -8,9 +8,10 @@ use crate::api::{
     InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
     InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
     InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
-    InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse, ProjectInitApiRequest,
-    ProjectResponse, ProjectShowApiRequest, ProjectUpdateApiRequest, ProjectsResponse,
-    QueueStatusResponse, QueuesResponse, ReadyResponse, WorkerStatusResponse, WorkersResponse,
+    InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse, ProjectDraftCreateApiRequest,
+    ProjectDraftResponse, ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest,
+    ProjectsResponse, QueueStatusResponse, QueuesResponse, ReadyResponse, WorkerStatusResponse,
+    WorkersResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{
@@ -28,7 +29,7 @@ use crate::execution::{
 use crate::services::{
     EnvironmentCreateRequest, EnvironmentReleaseRequest, EnvironmentRollbackRequest,
     EnvironmentService, EnvironmentUpdateRequest, InvocationCommand, InvocationRequest,
-    InvocationService, PreparedExecutionSpec, ProjectInitRequest, ProjectService,
+    InvocationService, PreparedExecutionSpec, ProjectCreateRequest, ProjectService,
     ProjectUpdateRequest,
 };
 use async_stream::stream;
@@ -70,6 +71,16 @@ impl AppState {
 
     pub(crate) fn db(&self) -> &Db {
         &self.db
+    }
+
+    pub(crate) async fn publish_invocation_event(
+        &self,
+        invocation_id: Uuid,
+        sequence: u64,
+        event: InvocationEvent,
+    ) {
+        let runtime = self.invocations.get_or_create(invocation_id, None).await;
+        runtime.push_event(sequence, event).await;
     }
 }
 
@@ -114,8 +125,8 @@ impl InvocationPersistence {
     fn from_record(record: InvocationPersistenceRecord) -> Option<Self> {
         Some(Self {
             run_id: record.run_id?,
-            project_id: record.project_id,
-            environment_id: record.environment_id,
+            project_id: record.project_id?,
+            environment_id: record.environment_id?,
             promote_base_manifest: record.promote_base_manifest,
         })
     }
@@ -177,7 +188,7 @@ impl InvocationManager {
 }
 
 impl InvocationRuntime {
-    async fn push_event(&self, sequence: u64, event: InvocationEvent) {
+    pub(crate) async fn push_event(&self, sequence: u64, event: InvocationEvent) {
         let sequenced = {
             let mut history = self.history.lock().await;
             let sequenced = SequencedInvocationEvent { sequence, event };
@@ -307,12 +318,20 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/state/migrate", post(migrate))
-        .route("/v1/projects:init", post(project_init))
         .route("/v1/projects", get(projects_list))
-        .route("/v1/projects/show", post(project_show))
         .route(
             "/v1/projects/{project_id}",
             patch(project_update).get(project_get),
+        )
+        .route("/v1/project-drafts", post(project_draft_create))
+        .route("/v1/project-drafts/{draft_id}", get(project_draft_get))
+        .route(
+            "/v1/project-drafts/{draft_id}/validate",
+            post(project_draft_validate),
+        )
+        .route(
+            "/v1/project-drafts/{draft_id}/confirm",
+            post(project_draft_confirm),
         )
         .route("/v1/environments", post(environment_create))
         .route(
@@ -403,9 +422,11 @@ struct InvocationEventsQuery {
 #[openapi(
     paths(
         migrate,
-        project_init,
+        project_draft_create,
+        project_draft_get,
+        project_draft_validate,
+        project_draft_confirm,
         projects_list,
-        project_show,
         project_get,
         project_update,
         environment_create,
@@ -434,9 +455,10 @@ struct InvocationEventsQuery {
             MigrateResponse,
             ProjectResponse,
             ProjectsResponse,
-            ProjectInitApiRequest,
+            ProjectDraftResponse,
+            ProjectDraftValidateResponse,
+            ProjectDraftCreateApiRequest,
             ProjectUpdateApiRequest,
-            ProjectShowApiRequest,
             EnvironmentResponse,
             EnvironmentsResponse,
             EnvironmentVersionsResponse,
@@ -632,37 +654,6 @@ async fn migrate(State(state): State<AppState>) -> Result<Json<MigrateResponse>,
 }
 
 #[utoipa::path(
-    post,
-    path = "/v1/projects:init",
-    tag = "projects",
-    request_body = ProjectInitApiRequest,
-    responses(
-        (status = 200, description = "Initialized project", body = ProjectResponse),
-        (status = 400, description = "Invalid request", body = ApiErrorResponse),
-        (status = 409, description = "Project already configured", body = ApiErrorResponse),
-        (status = 500, description = "Server error", body = ApiErrorResponse)
-    )
-)]
-async fn project_init(
-    State(state): State<AppState>,
-    Json(request): Json<ProjectInitApiRequest>,
-) -> Result<Json<ProjectResponse>, ApiError> {
-    let service = ProjectService::new(&state.db);
-    let project = service
-        .init(ProjectInitRequest {
-            current_dir: PathBuf::from(request.current_dir),
-            mode: request.mode,
-            git_repo_url: request.git_repo_url,
-            project_root: request.project_root,
-            default_branch: request.default_branch,
-            force: request.force,
-        })
-        .await?;
-    info!(project_id = %project.project_id, project_name = %project.project_name, "initialized project");
-    Ok(Json(ProjectResponse { project }))
-}
-
-#[utoipa::path(
     patch,
     path = "/v1/projects/{project_id}",
     tag = "projects",
@@ -682,18 +673,152 @@ async fn project_update(
     Path(project_id): Path<String>,
     Json(request): Json<ProjectUpdateApiRequest>,
 ) -> Result<Json<ProjectResponse>, ApiError> {
-    let _ = project_id;
     let service = ProjectService::new(&state.db);
     let project = service
         .update(ProjectUpdateRequest {
-            current_dir: PathBuf::from(request.current_dir),
-            mode: request.mode,
+            project: project_id,
             git_repo_url: request.git_repo_url,
             project_root: request.project_root,
-            default_branch: request.default_branch,
         })
         .await?;
     info!(project_id = %project.project_id, project_name = %project.project_name, "updated project");
+    Ok(Json(ProjectResponse { project }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/project-drafts",
+    tag = "projects",
+    request_body = ProjectDraftCreateApiRequest,
+    responses(
+        (status = 200, description = "Created project draft", body = ProjectDraftResponse),
+        (status = 400, description = "Invalid request", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn project_draft_create(
+    State(state): State<AppState>,
+    Json(request): Json<ProjectDraftCreateApiRequest>,
+) -> Result<Json<ProjectDraftResponse>, ApiError> {
+    let service = ProjectService::new(&state.db);
+    let draft = service
+        .create_draft(ProjectCreateRequest {
+            git_repo_url: request.git_repo_url,
+            project_root: request.project_root,
+        })
+        .await?;
+    Ok(Json(ProjectDraftResponse { draft }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/project-drafts/{draft_id}",
+    tag = "projects",
+    params(
+        ("draft_id" = Uuid, Path, description = "Draft identifier")
+    ),
+    responses(
+        (status = 200, description = "Project draft", body = ProjectDraftResponse),
+        (status = 404, description = "Draft not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn project_draft_get(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+) -> Result<Json<ProjectDraftResponse>, ApiError> {
+    let draft = ProjectService::new(&state.db).get_draft(draft_id).await?;
+    Ok(Json(ProjectDraftResponse { draft }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/project-drafts/{draft_id}/validate",
+    tag = "projects",
+    params(
+        ("draft_id" = Uuid, Path, description = "Draft identifier")
+    ),
+    responses(
+        (status = 200, description = "Started draft validation", body = ProjectDraftValidateResponse),
+        (status = 404, description = "Draft not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn project_draft_validate(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+) -> Result<Json<ProjectDraftValidateResponse>, ApiError> {
+    let prepared = ProjectService::new(&state.db)
+        .prepare_draft_validation(draft_id)
+        .await?;
+    let invocation_id = prepared.invocation_id;
+    state
+        .db
+        .create_invocation(CreateInvocationInput {
+            invocation_id,
+            run_id: None,
+            project_id: None,
+            environment_id: None,
+            project_draft_id: Some(prepared.draft.id),
+            command: InvocationCommand::ProjectValidate.as_str().to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: prepared.worker_queue,
+            execution_spec: Some(InvocationExecutionSpecApi::ProjectValidation {
+                repo_url: prepared.spec.repo_url,
+                project_root: prepared.spec.project_root,
+            }),
+            promote_base_manifest: false,
+            claim_deadline_at: Some(
+                Utc::now()
+                    + chrono::Duration::from_std(
+                        claim_startup_timeout(InvocationExecutionModeApi::Server),
+                    )
+                    .expect("duration"),
+            ),
+        })
+        .await?;
+    let runtime = state.invocations.get_or_create(invocation_id, None).await;
+    let started_event = InvocationEvent {
+        event_type: "invocation.started".to_string(),
+        timestamp: Utc::now(),
+        text: None,
+        stream: None,
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        exit_code: None,
+        error: None,
+    };
+    let started_sequence = state
+        .db
+        .append_invocation_event(invocation_id, &started_event)
+        .await?;
+    runtime.push_event(started_sequence, started_event).await;
+    Ok(Json(ProjectDraftValidateResponse {
+        draft: prepared.draft,
+        invocation_id,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/project-drafts/{draft_id}/confirm",
+    tag = "projects",
+    params(
+        ("draft_id" = Uuid, Path, description = "Draft identifier")
+    ),
+    responses(
+        (status = 200, description = "Confirmed project", body = ProjectResponse),
+        (status = 400, description = "Draft not validated", body = ApiErrorResponse),
+        (status = 404, description = "Draft not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn project_draft_confirm(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+) -> Result<Json<ProjectResponse>, ApiError> {
+    let project = ProjectService::new(&state.db).confirm_draft(draft_id).await?;
     Ok(Json(ProjectResponse { project }))
 }
 
@@ -732,30 +857,6 @@ async fn project_get(
 ) -> Result<Json<ProjectResponse>, ApiError> {
     let project = state.db.get_project_by_project_id(&project_id).await?;
     info!(project_id = %project.project_id, "loaded project");
-    Ok(Json(ProjectResponse { project }))
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/projects/show",
-    tag = "projects",
-    request_body = ProjectShowApiRequest,
-    responses(
-        (status = 200, description = "Resolved project", body = ProjectResponse),
-        (status = 400, description = "Invalid request", body = ApiErrorResponse),
-        (status = 404, description = "Project not found", body = ApiErrorResponse),
-        (status = 500, description = "Server error", body = ApiErrorResponse)
-    )
-)]
-async fn project_show(
-    State(state): State<AppState>,
-    Json(request): Json<ProjectShowApiRequest>,
-) -> Result<Json<ProjectResponse>, ApiError> {
-    let service = ProjectService::new(&state.db);
-    let project = service
-        .show(&PathBuf::from(request.current_dir), request.project)
-        .await?;
-    info!(project_id = %project.project_id, "resolved project via context");
     Ok(Json(ProjectResponse { project }))
 }
 
@@ -1133,6 +1234,10 @@ async fn invocation_create(
                 git_branch: spec.git_branch,
             }
         }
+        PreparedExecutionSpec::ProjectValidation(spec) => InvocationExecutionSpecApi::ProjectValidation {
+            repo_url: spec.repo_url,
+            project_root: spec.project_root,
+        },
     };
     let worker_queue = request
         .worker_queue
@@ -1151,6 +1256,7 @@ async fn invocation_create(
             run_id: persistence.as_ref().map(|p| p.run_id),
             project_id: prepared.project_id,
             environment_id: prepared.environment_id,
+            project_draft_id: prepared.project_draft_id,
             command: map_invocation_command(request.command).as_str().to_string(),
             execution_mode: request.execution_mode,
             worker_queue: worker_queue.clone(),
@@ -1578,6 +1684,7 @@ fn map_invocation_command(command: InvocationCommandApi) -> InvocationCommand {
         InvocationCommandApi::Test => InvocationCommand::Test,
         InvocationCommandApi::Seed => InvocationCommand::Seed,
         InvocationCommandApi::Release => InvocationCommand::Release,
+        InvocationCommandApi::ProjectValidate => InvocationCommand::ProjectValidate,
     }
 }
 
@@ -1621,6 +1728,12 @@ impl IntoResponse for ApiError {
             AppError::InvocationAlreadyClaimed(_) => StatusCode::CONFLICT,
             AppError::InvocationNotClaimable(_) => StatusCode::BAD_REQUEST,
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,
+            AppError::Io(ref err) if err.kind() == std::io::ErrorKind::NotFound => {
+                StatusCode::NOT_FOUND
+            }
+            AppError::Io(ref err) if err.kind() == std::io::ErrorKind::InvalidInput => {
+                StatusCode::BAD_REQUEST
+            }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = ApiErrorResponse {
