@@ -30,7 +30,27 @@
             {% endif %}
           </div>
           <div class="text-right text-xs text-slate-500">
-            <div><span class="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-700">{{ item.project.mode }}</span></div>
+            <div class="flex items-center justify-end gap-2">
+              <span class="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-700">{{ item.project.mode }}</span>
+              {% if item.project.mode == "remote" %}
+              <button
+                class="rounded-lg border border-sky-300 px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-50"
+                hx-get="{{ item.project.create_environment_url }}"
+                hx-target="#modal-root"
+                hx-swap="innerHTML"
+              >
+                Create Environment
+              </button>
+              {% endif %}
+              <button
+                class="rounded-lg border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
+                hx-get="{{ item.project.delete_url }}"
+                hx-target="#modal-root"
+                hx-swap="innerHTML"
+              >
+                Delete Project
+              </button>
+            </div>
             {% if item.project.project_root.len() > 0 %}
             <div class="mt-2">{{ item.project.project_root }}</div>
             {% endif %}

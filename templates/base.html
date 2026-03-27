@@ -28,23 +28,540 @@
   </div>
   <script>
     document.addEventListener('alpine:init', () => {
+      const attachInvocationEventListeners = (source, handler) => {
+        const eventTypes = [
+          'invocation.started',
+          'stdout.line',
+          'stderr.line',
+          'dbt.log',
+          'invocation.completed',
+        ];
+        for (const eventType of eventTypes) {
+          source.addEventListener(eventType, handler);
+        }
+        source.onmessage = handler;
+      };
+
       Alpine.data('invocationLogs', (url) => ({
         source: null,
         init() {
           if (!url) return;
           this.source = new EventSource(url);
-          this.source.onmessage = (event) => {
+          attachInvocationEventListeners(this.source, (event) => {
             const payload = JSON.parse(event.data);
             const line = this.renderLine(payload);
             if (!line) return;
             const target = this.$refs.log;
             target.textContent = target.textContent ? `${target.textContent}\n${line}` : line;
             target.scrollTop = target.scrollHeight;
-          };
+          });
         },
         renderLine(payload) {
           if (!payload.text) return null;
           return payload.text.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
+        }
+      }));
+
+      Alpine.data('environmentValidationProgress', (sseUrl, statusUrl) => ({
+        source: null,
+        refreshInFlight: false,
+        init() {
+          if (!sseUrl || !statusUrl) return;
+          this.source = new EventSource(sseUrl);
+          attachInvocationEventListeners(this.source, async (event) => {
+            const payload = JSON.parse(event.data);
+            const line = this.renderLine(payload);
+            if (line) {
+              const target = this.$refs.log;
+              target.textContent = target.textContent
+                ? `${target.textContent}\n${line}`
+                : line;
+              target.scrollTop = target.scrollHeight;
+            }
+            if (payload.event_type === 'invocation.completed') {
+              await this.refreshStatus();
+            }
+          });
+          this.source.onerror = async () => {
+            await this.refreshStatus();
+          };
+        },
+        async refreshStatus() {
+          if (this.refreshInFlight) return;
+          this.refreshInFlight = true;
+          try {
+            const response = await fetch(statusUrl, {
+              headers: { 'HX-Request': 'true' }
+            });
+            if (!response.ok) return;
+            const html = await response.text();
+            const modalRoot = document.getElementById('modal-root');
+            if (!modalRoot) return;
+            modalRoot.innerHTML = html;
+            if (window.htmx) {
+              window.htmx.process(modalRoot);
+            }
+            if (window.Alpine) {
+              window.Alpine.initTree(modalRoot);
+            }
+          } finally {
+            if (this.source) {
+              this.source.close();
+              this.source = null;
+            }
+            this.refreshInFlight = false;
+          }
+        },
+        renderLine(payload) {
+          if (!payload.text) return null;
+          return payload.text.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
+        }
+      }));
+
+      Alpine.data('projectValidationProgress', (sseUrl, statusUrl) => ({
+        source: null,
+        refreshInFlight: false,
+        steps: [
+          { key: 'repo', label: 'Reach repository', hint: 'Connect to the remote git repository.', state: 'pending' },
+          { key: 'path', label: 'Validate project path', hint: 'Confirm the repo-relative path points to a dbt project.', state: 'pending' },
+          { key: 'branch', label: 'Resolve default branch', hint: 'Discover the repository default branch.', state: 'pending' },
+          { key: 'project', label: 'Read dbt project metadata', hint: 'Load dbt_project.yml and detect the project name.', state: 'pending' },
+        ],
+        init() {
+          if (!sseUrl || !statusUrl) return;
+          this.source = new EventSource(sseUrl);
+          attachInvocationEventListeners(this.source, async (event) => {
+            const payload = JSON.parse(event.data);
+            const line = this.renderLine(payload);
+            if (line) {
+              this.updateSteps(line, payload);
+              const target = this.$refs.log;
+              target.textContent = target.textContent ? `${target.textContent}\n${line}` : line;
+              target.scrollTop = target.scrollHeight;
+            }
+            if (payload.event_type === 'invocation.completed') {
+              this.updateSteps(null, payload);
+              await this.refreshStatus();
+            }
+          });
+          this.source.onerror = async () => {
+            await this.refreshStatus();
+          };
+        },
+        async refreshStatus() {
+          if (this.refreshInFlight) return;
+          this.refreshInFlight = true;
+          try {
+            const response = await fetch(statusUrl, {
+              headers: { 'HX-Request': 'true' }
+            });
+            if (!response.ok) return;
+            const html = await response.text();
+            const template = document.createElement('template');
+            template.innerHTML = html.trim();
+            const nextRoot = template.content.firstElementChild;
+            if (!nextRoot) return;
+            if (nextRoot.dataset.validationStatus === 'failed') {
+              nextRoot.dataset.stepSnapshot = JSON.stringify(this.steps);
+              nextRoot.dataset.logSnapshot = this.$refs.log?.textContent ?? '';
+            }
+            this.$root.replaceWith(nextRoot);
+            if (window.htmx) {
+              window.htmx.process(nextRoot);
+            }
+            if (window.Alpine) {
+              window.Alpine.initTree(nextRoot);
+            }
+          } finally {
+            if (this.source) {
+              this.source.close();
+              this.source = null;
+            }
+            this.refreshInFlight = false;
+          }
+        },
+        renderLine(payload) {
+          if (!payload.text) return null;
+          return payload.text.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
+        },
+        setStepState(key, state) {
+          const step = this.steps.find((item) => item.key === key);
+          if (step) step.state = state;
+        },
+        updateSteps(line, payload) {
+          if (line?.startsWith('Validating project repository ')) {
+            this.setStepState('repo', 'active');
+          } else if (line?.startsWith('Checking project path ')) {
+            this.setStepState('repo', 'done');
+            this.setStepState('path', 'active');
+          } else if (line?.startsWith('Resolved default branch ')) {
+            this.setStepState('path', 'done');
+            this.setStepState('branch', 'done');
+            this.setStepState('project', 'active');
+          } else if (line?.startsWith('Found dbt project ')) {
+            this.setStepState('project', 'done');
+          }
+
+          if (payload?.event_type === 'invocation.completed') {
+            if (payload?.status === 'Succeeded') {
+              this.steps.forEach((step) => {
+                if (step.state !== 'done') {
+                  step.state = 'done';
+                }
+              });
+            } else {
+              const current = this.steps.find((step) => step.state === 'active')
+                ?? this.steps.find((step) => step.state === 'pending');
+              if (current) {
+                current.state = 'failed';
+              }
+            }
+          }
+        },
+        stepGlyph(state) {
+          switch (state) {
+            case 'done': return '✓';
+            case 'active': return '…';
+            case 'failed': return '!';
+            default: return '·';
+          }
+        },
+        stepClasses(state) {
+          switch (state) {
+            case 'done': return 'border-emerald-200 bg-emerald-50 text-emerald-950';
+            case 'active': return 'border-sky-200 bg-sky-50 text-sky-950';
+            case 'failed': return 'border-rose-200 bg-rose-50 text-rose-950';
+            default: return 'border-slate-200 bg-slate-50 text-slate-700';
+          }
+        },
+        stepIconClasses(state) {
+          switch (state) {
+            case 'done': return 'bg-emerald-600 text-white';
+            case 'active': return 'bg-sky-600 text-white';
+            case 'failed': return 'bg-rose-600 text-white';
+            default: return 'bg-slate-200 text-slate-600';
+          }
+        }
+      }));
+
+      Alpine.data('projectValidationFailure', (stepSnapshot, logSnapshot) => ({
+        steps: (() => {
+          try {
+            return JSON.parse(stepSnapshot || '[]');
+          } catch {
+            return [];
+          }
+        })(),
+        logText: logSnapshot || '',
+        stepGlyph(state) {
+          switch (state) {
+            case 'done': return '✓';
+            case 'active': return '…';
+            case 'failed': return '!';
+            default: return '·';
+          }
+        },
+        stepClasses(state) {
+          switch (state) {
+            case 'done': return 'border-emerald-200 bg-emerald-50 text-emerald-950';
+            case 'active': return 'border-sky-200 bg-sky-50 text-sky-950';
+            case 'failed': return 'border-rose-200 bg-rose-50 text-rose-950';
+            default: return 'border-slate-200 bg-slate-50 text-slate-700';
+          }
+        },
+        stepIconClasses(state) {
+          switch (state) {
+            case 'done': return 'bg-emerald-600 text-white';
+            case 'active': return 'bg-sky-600 text-white';
+            case 'failed': return 'bg-rose-600 text-white';
+            default: return 'bg-slate-200 text-slate-600';
+          }
+        }
+      }));
+
+      Alpine.data('projectDraftForm', () => ({
+        status: 'idle',
+        confirmUrl: '',
+        isSubmitting: false,
+        get isBusy() {
+          return this.status === 'validating' || this.status === 'confirming';
+        },
+        get inputsLocked() {
+          return this.isBusy || this.status === 'validated';
+        },
+        async replaceDraftPanel(html) {
+          const panel = document.getElementById('project-draft-panel');
+          if (!panel) return;
+          panel.innerHTML = html;
+          if (window.htmx) {
+            window.htmx.process(panel);
+          }
+          if (window.Alpine) {
+            window.Alpine.initTree(panel);
+          }
+        },
+        updateState(detail) {
+          this.status = detail?.status ?? 'idle';
+          this.confirmUrl = detail?.confirmUrl ?? '';
+          this.isSubmitting = this.status === 'validating' || this.status === 'confirming';
+        },
+        validateGitUrl() {
+          const value = this.$refs.gitUrl?.value?.trim() ?? '';
+          let message = '';
+          if (!value) {
+            message = 'Enter a git URL.';
+          } else if (
+            !value.startsWith('git@') &&
+            !value.startsWith('https://') &&
+            !value.startsWith('file://')
+          ) {
+            message = 'Use an SSH, HTTPS, or file:// git URL.';
+          }
+          this.$refs.gitUrl?.setCustomValidity(message);
+          return !message;
+        },
+        validateProjectRoot() {
+          const value = this.$refs.projectRoot?.value?.trim() ?? '';
+          let message = '';
+          if (!value) {
+            message = 'Enter a repo-relative dbt project path.';
+          } else if (value.startsWith('/')) {
+            message = 'Project path must be relative, not absolute.';
+          } else if (value.split('/').some((segment) => segment === '..')) {
+            message = 'Project path must not contain parent traversal segments.';
+          } else if (/\s/.test(value)) {
+            message = 'Project path must not contain whitespace.';
+          }
+          this.$refs.projectRoot?.setCustomValidity(message);
+          return !message;
+        },
+        validateAll(event) {
+          const valid = this.validateGitUrl() && this.validateProjectRoot();
+          if (!valid) {
+            event.preventDefault();
+            this.$refs.gitUrl?.reportValidity();
+            this.$refs.projectRoot?.reportValidity();
+            return false;
+          }
+          return true;
+        },
+        async submit(event) {
+          event.preventDefault();
+          if (this.confirmUrl) {
+            this.status = 'confirming';
+            this.isSubmitting = true;
+            const response = await fetch(this.confirmUrl, {
+              method: 'POST',
+              headers: { 'HX-Request': 'true' }
+            });
+            this.isSubmitting = false;
+            if (!response.ok) {
+              this.status = 'validated';
+              return;
+            }
+            const redirect = response.headers.get('HX-Redirect');
+            if (redirect) {
+              window.location.assign(redirect);
+              return;
+            }
+            window.location.reload();
+            return;
+          }
+
+          const valid = this.validateAll(event);
+          if (!valid) {
+            return;
+          }
+          this.status = 'validating';
+          this.isSubmitting = true;
+          try {
+            const formData = new FormData(this.$root);
+            const response = await fetch('/ui/project-drafts', {
+              method: 'POST',
+              headers: {
+                'HX-Request': 'true',
+                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+              },
+              body: new URLSearchParams(formData).toString(),
+            });
+            const html = await response.text();
+            await this.replaceDraftPanel(html);
+          } catch (error) {
+            this.status = 'failed';
+            this.isSubmitting = false;
+            const message = error instanceof Error ? error.message : 'request failed';
+            await this.replaceDraftPanel(`
+              <div class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-800"
+                   x-init="$dispatch('project-draft-state', { status: 'failed', confirmUrl: '' })">
+                <div class="font-medium">Validation failed</div>
+                <div class="mt-1">${message}</div>
+                <div class="mt-3 text-rose-700">Edit the repository or project path above and try again.</div>
+              </div>
+            `);
+          }
+        },
+        buttonClasses() {
+          if (this.isSubmitting) {
+            return 'rounded-lg bg-slate-300 px-4 py-2 text-sm font-medium text-slate-500 cursor-not-allowed';
+          }
+          return 'rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700';
+        },
+        buttonLabel() {
+          switch (this.status) {
+            case 'validating':
+              return 'Validating...';
+            case 'validated':
+              return 'Confirm Create';
+            case 'confirming':
+              return 'Creating...';
+            default:
+              return 'Create Project';
+          }
+        }
+      }));
+
+      Alpine.data('projectDeleteConfirm', (expected) => ({
+        typed: '',
+        submitting: false,
+        get matches() {
+          return this.typed.trim() === expected;
+        },
+        buttonClasses() {
+          if (!this.matches || this.submitting) {
+            return 'rounded-lg bg-rose-200 px-4 py-2 text-sm font-medium text-rose-500 cursor-not-allowed';
+          }
+          return 'rounded-lg bg-rose-700 px-4 py-2 text-sm font-medium text-white hover:bg-rose-600';
+        }
+      }));
+
+      Alpine.data('environmentDraftForm', (options) => ({
+        status: options.status,
+        statusUrl: options.statusUrl,
+        branchRefreshUrl: options.branchRefreshUrl,
+        validateUrl: options.validateUrl,
+        confirmUrl: options.confirmUrl,
+        latestCommitSha: options.latestCommitSha || '',
+        configPairs: options.configPairs || [],
+        secretPairs: options.secretPairs || [],
+        init() {
+          if (this.status === 'loading_git' || this.status === 'validating') {
+            window.setTimeout(() => {
+              this.refreshStatus();
+            }, 1500);
+          }
+        },
+        get isBusy() {
+          return this.status === 'loading_git' || this.status === 'validating' || this.status === 'confirming';
+        },
+        get inputsLocked() {
+          return this.isBusy || this.status === 'validated';
+        },
+        useLatestSelected() {
+          return !!this.$refs.useLatestCommit?.checked;
+        },
+        addConfigPair() {
+          this.configPairs.push({ key: '', value: '' });
+        },
+        removeConfigPair(index) {
+          this.configPairs.splice(index, 1);
+        },
+        addSecretPair() {
+          this.secretPairs.push({ key: '', value: '' });
+        },
+        removeSecretPair(index) {
+          this.secretPairs.splice(index, 1);
+        },
+        serializePairs(pairs) {
+          const result = {};
+          for (const pair of pairs) {
+            const key = (pair.key || '').trim();
+            if (!key) continue;
+            result[key] = pair.value ?? '';
+          }
+          return JSON.stringify(result);
+        },
+        syncHiddenJson() {
+          if (this.$refs.profileConfigJson) {
+            this.$refs.profileConfigJson.value = this.serializePairs(this.configPairs);
+          }
+          if (this.$refs.profileSecretsJson) {
+            this.$refs.profileSecretsJson.value = this.serializePairs(this.secretPairs);
+          }
+          if (this.useLatestSelected() && this.$refs.gitCommitSha) {
+            this.$refs.gitCommitSha.value = this.latestCommitSha;
+          }
+        },
+        async replaceModal(html) {
+          const modalRoot = document.getElementById('modal-root');
+          if (!modalRoot) return;
+          modalRoot.innerHTML = html;
+          if (window.htmx) {
+            window.htmx.process(modalRoot);
+          }
+          if (window.Alpine) {
+            window.Alpine.initTree(modalRoot);
+          }
+        },
+        async postForm(url) {
+          this.syncHiddenJson();
+          const formData = new FormData(this.$root);
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'HX-Request': 'true',
+              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+            },
+            body: new URLSearchParams(formData).toString(),
+          });
+          const redirect = response.headers.get('HX-Redirect');
+          if (redirect) {
+            window.location.assign(redirect);
+            return;
+          }
+          await this.replaceModal(await response.text());
+        },
+        async refreshStatus() {
+          if (!this.statusUrl || this.status === 'confirming') return;
+          const response = await fetch(this.statusUrl, {
+            headers: { 'HX-Request': 'true' },
+          });
+          if (!response.ok) return;
+          await this.replaceModal(await response.text());
+        },
+        async refreshBranch() {
+          if (this.inputsLocked) return;
+          this.status = 'loading_git';
+          await this.postForm(this.branchRefreshUrl);
+        },
+        async submit(event) {
+          event.preventDefault();
+          if (this.status === 'validated') {
+            this.status = 'confirming';
+            await this.postForm(this.confirmUrl);
+            return;
+          }
+          this.status = 'validating';
+          await this.postForm(this.validateUrl);
+        },
+        buttonClasses() {
+          if (this.isBusy) {
+            return 'rounded-lg bg-slate-300 px-4 py-2 text-sm font-medium text-slate-500 cursor-not-allowed';
+          }
+          return 'rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700';
+        },
+        buttonLabel() {
+          switch (this.status) {
+            case 'loading_git':
+              return 'Loading Branches...';
+            case 'validating':
+              return 'Validating...';
+            case 'validated':
+              return 'Confirm Create';
+            case 'confirming':
+              return 'Creating...';
+            default:
+              return 'Create Environment';
+          }
         }
       }));
     });

@@ -217,10 +217,7 @@ async fn handle_project_command(
                 .draft;
             let validation = client.project_draft_validate(draft.id).await?;
             client
-                .stream_invocation_events(
-                    validation.invocation_id,
-                    render_project_validation_event,
-                )
+                .stream_invocation_events(validation.invocation_id, render_project_validation_event)
                 .await?;
             let status = wait_for_invocation_completion(&client, validation.invocation_id).await?;
             if !matches!(status.status, api::InvocationLifecycleStatus::Succeeded) {
@@ -674,7 +671,11 @@ fn print_project_create_start(repo_url: &str, project_root: &str) {
     let use_color = should_use_color();
     println!(
         "{}",
-        style("dbtx project create", &[CliStyle::Cyan, CliStyle::Bold], use_color)
+        style(
+            "dbtx project create",
+            &[CliStyle::Cyan, CliStyle::Bold],
+            use_color
+        )
     );
     println!(
         "  {} {}",
@@ -874,6 +875,8 @@ async fn create_invocation(
                 InvocationCommand::Seed => api::InvocationCommandApi::Seed,
                 InvocationCommand::Release => api::InvocationCommandApi::Release,
                 InvocationCommand::ProjectValidate => api::InvocationCommandApi::ProjectValidate,
+                InvocationCommand::EnvironmentPrepare => api::InvocationCommandApi::EnvironmentPrepare,
+                InvocationCommand::EnvironmentValidate => api::InvocationCommandApi::EnvironmentValidate,
             },
             args: args
                 .into_iter()

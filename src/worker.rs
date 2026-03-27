@@ -4,9 +4,9 @@ use crate::api::{
     InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
 };
 use crate::client::DaemonClient;
-use crate::services::read_dbt_project_name_from_root;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
+use crate::services::read_dbt_project_name_from_root;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -36,6 +36,12 @@ pub async fn execute_claimed_invocation(
     }
     if matches!(spec, InvocationExecutionSpecApi::ProjectValidation { .. }) {
         return execute_project_validation(client, claim, &spec).await;
+    }
+    if matches!(spec, InvocationExecutionSpecApi::EnvironmentPrepare { .. }) {
+        return execute_environment_prepare(client, claim, &spec).await;
+    }
+    if matches!(spec, InvocationExecutionSpecApi::EnvironmentValidate { .. }) {
+        return execute_environment_validation(client, claim, &spec).await;
     }
     let command_name = spec.command();
     let pretty_terminal_output = claim.execution_mode == InvocationExecutionModeApi::Local;
@@ -391,6 +397,8 @@ impl InvocationExecutionSpecApi {
             Self::Local { command, .. } | Self::Remote { command, .. } => *command,
             Self::ReleaseValidation { .. } => InvocationCommandApi::Release,
             Self::ProjectValidation { .. } => InvocationCommandApi::ProjectValidate,
+            Self::EnvironmentPrepare { .. } => InvocationCommandApi::EnvironmentPrepare,
+            Self::EnvironmentValidate { .. } => InvocationCommandApi::EnvironmentValidate,
         }
     }
 
@@ -399,6 +407,8 @@ impl InvocationExecutionSpecApi {
             Self::Local { args, .. } | Self::Remote { args, .. } => args,
             Self::ReleaseValidation { .. } => &[],
             Self::ProjectValidation { .. } => &[],
+            Self::EnvironmentPrepare { .. } => &[],
+            Self::EnvironmentValidate { .. } => &[],
         }
     }
 
@@ -407,6 +417,8 @@ impl InvocationExecutionSpecApi {
             Self::Local { profiles_yml, .. } | Self::Remote { profiles_yml, .. } => profiles_yml,
             Self::ReleaseValidation { .. } => "",
             Self::ProjectValidation { .. } => "",
+            Self::EnvironmentPrepare { .. } => "",
+            Self::EnvironmentValidate { profiles_yml, .. } => profiles_yml,
         }
     }
 
@@ -417,6 +429,8 @@ impl InvocationExecutionSpecApi {
             }
             Self::ReleaseValidation { .. } => None,
             Self::ProjectValidation { .. } => None,
+            Self::EnvironmentPrepare { .. } => None,
+            Self::EnvironmentValidate { .. } => None,
         }
     }
 }
@@ -544,13 +558,14 @@ async fn execute_project_validation(
     )
     .await?;
 
-    let default_commit = match resolve_remote_git_target(repo_url, Some(&default_branch), None).await {
-        Ok(commit) => commit,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
+    let default_commit =
+        match resolve_remote_git_target(repo_url, Some(&default_branch), None).await {
+            Ok(commit) => commit,
+            Err(err) => {
+                report_setup_failure(client, &claim, &err.to_string()).await?;
+                return Err(err);
+            }
+        };
     let repo_checkout = match ensure_git_worktree(repo_url, &default_commit).await {
         Ok(path) => path,
         Err(err) => {
@@ -590,6 +605,172 @@ async fn execute_project_validation(
                     result: Some(json!({
                         "project_name": project_name,
                         "default_branch": default_branch,
+                    })),
+                },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn execute_environment_prepare(
+    client: &DaemonClient,
+    claim: InvocationClaimResponse,
+    spec: &InvocationExecutionSpecApi,
+) -> AppResult<()> {
+    let InvocationExecutionSpecApi::EnvironmentPrepare {
+        repo_url,
+        selected_branch,
+    } = spec
+    else {
+        unreachable!("environment prepare requires environment prepare spec");
+    };
+
+    send_worker_event(
+        client,
+        &claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Loading branches for {repo_url}"),
+    )
+    .await?;
+
+    let default_branch = match resolve_remote_default_branch(repo_url).await {
+        Ok(branch) => branch,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+    let active_branch = selected_branch
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_branch.clone());
+
+    send_worker_event(
+        client,
+        &claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Resolved branch {active_branch}"),
+    )
+    .await?;
+
+    let branches = match list_remote_branches(repo_url).await {
+        Ok(branches) => branches,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+    let latest_commit_sha = match resolve_remote_git_target(repo_url, Some(&active_branch), None).await {
+        Ok(commit) => commit,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+    let commits = match list_recent_branch_commits(repo_url, &active_branch, 50).await {
+        Ok(commits) => commits,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+
+    client
+        .invocation_complete(
+            claim.invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                completion: crate::execution::ExecutionCompletion {
+                    status: InvocationLifecycleStatus::Succeeded,
+                    exit_code: 0,
+                    error: None,
+                    dbt_version: None,
+                    manifest: None,
+                    result: Some(json!({
+                        "default_branch": default_branch,
+                        "selected_branch": active_branch,
+                        "latest_commit_sha": latest_commit_sha,
+                        "branches": branches,
+                        "commits": commits,
+                    })),
+                },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn execute_environment_validation(
+    client: &DaemonClient,
+    claim: InvocationClaimResponse,
+    spec: &InvocationExecutionSpecApi,
+) -> AppResult<()> {
+    let InvocationExecutionSpecApi::EnvironmentValidate {
+        repo_url,
+        commit_sha,
+        project_root,
+        selected_branch,
+        profiles_yml,
+    } = spec
+    else {
+        unreachable!("environment validation requires environment validate spec");
+    };
+
+    send_worker_event(
+        client,
+        &claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Checking commit {commit_sha}"),
+    )
+    .await?;
+
+    let repo_checkout = match ensure_git_worktree(repo_url, commit_sha).await {
+        Ok(path) => path,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+    validate_remote_project_root(project_root)?;
+    let project_dir = if project_root == "." || project_root.is_empty() {
+        repo_checkout
+    } else {
+        repo_checkout.join(project_root)
+    };
+    if !project_dir.join("dbt_project.yml").is_file() {
+        let err = AppError::NotDbtProjectRoot;
+        report_setup_failure(client, &claim, &err.to_string()).await?;
+        return Err(err);
+    }
+    let profiles_dir = match write_profiles_dir(profiles_yml) {
+        Ok(dir) => dir,
+        Err(err) => {
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
+
+    run_validation_command(client, &claim, &project_dir, profiles_dir.path(), "deps").await?;
+    run_validation_command(client, &claim, &project_dir, profiles_dir.path(), "debug").await?;
+    run_validation_command(client, &claim, &project_dir, profiles_dir.path(), "compile").await?;
+
+    client
+        .invocation_complete(
+            claim.invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                completion: crate::execution::ExecutionCompletion {
+                    status: InvocationLifecycleStatus::Succeeded,
+                    exit_code: 0,
+                    error: None,
+                    dbt_version: None,
+                    manifest: None,
+                    result: Some(json!({
+                        "resolved_commit_sha": commit_sha,
+                        "selected_branch": selected_branch,
                     })),
                 },
             },
@@ -658,9 +839,15 @@ async fn materialize_execution_project_dir(
         InvocationExecutionSpecApi::ReleaseValidation { .. } => {
             Err(AppError::UnsupportedLocalExecution("release".to_string()))
         }
-        InvocationExecutionSpecApi::ProjectValidation { .. } => {
-            Err(AppError::UnsupportedLocalExecution("project_validate".to_string()))
-        }
+        InvocationExecutionSpecApi::ProjectValidation { .. } => Err(
+            AppError::UnsupportedLocalExecution("project_validate".to_string()),
+        ),
+        InvocationExecutionSpecApi::EnvironmentPrepare { .. } => Err(
+            AppError::UnsupportedLocalExecution("environment_prepare".to_string()),
+        ),
+        InvocationExecutionSpecApi::EnvironmentValidate { .. } => Err(
+            AppError::UnsupportedLocalExecution("environment_validate".to_string()),
+        ),
     }
 }
 
@@ -694,6 +881,61 @@ async fn resolve_remote_git_target(
     }
 }
 
+async fn list_remote_branches(repo_url: &str) -> AppResult<Vec<String>> {
+    let cache_root = git_cache_root()?;
+    let repo_hash = short_hash(repo_url);
+    let mirror_dir = cache_root.join("mirrors").join(format!("{repo_hash}.git"));
+    tokio::fs::create_dir_all(mirror_dir.parent().expect("mirror parent")).await?;
+    let _repo_lock = acquire_repo_lock(&cache_root, &repo_hash).await?;
+    ensure_git_mirror(repo_url, &mirror_dir).await?;
+    let output = run_git_capture_with_git_dir(
+        &mirror_dir,
+        ["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"],
+    )
+    .await?;
+    let mut branches: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty() && *line != "HEAD")
+        .map(|line| line.trim().to_string())
+        .collect();
+    branches.sort();
+    branches.dedup();
+    Ok(branches)
+}
+
+async fn list_recent_branch_commits(
+    repo_url: &str,
+    branch: &str,
+    limit: usize,
+) -> AppResult<Vec<serde_json::Value>> {
+    let cache_root = git_cache_root()?;
+    let repo_hash = short_hash(repo_url);
+    let mirror_dir = cache_root.join("mirrors").join(format!("{repo_hash}.git"));
+    tokio::fs::create_dir_all(mirror_dir.parent().expect("mirror parent")).await?;
+    let _repo_lock = acquire_repo_lock(&cache_root, &repo_hash).await?;
+    ensure_git_mirror(repo_url, &mirror_dir).await?;
+    let reference = format!("refs/heads/{branch}");
+    let format = "%H%x1f%h%x1f%s%x1f%cI";
+    let output = run_git_capture_with_git_dir(
+        &mirror_dir,
+        ["log", "--max-count", &limit.to_string(), "--format", format, &reference],
+    )
+    .await?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut parts = line.split('\u{1f}');
+            json!({
+                "sha": parts.next().unwrap_or_default(),
+                "short_sha": parts.next().unwrap_or_default(),
+                "summary": parts.next().unwrap_or_default(),
+                "committed_at": parts.next().unwrap_or_default(),
+            })
+        })
+        .collect())
+}
+
 async fn resolve_remote_default_branch(repo_url: &str) -> AppResult<String> {
     let output = TokioCommand::new("git")
         .args(["ls-remote", "--symref", repo_url, "HEAD"])
@@ -715,6 +957,56 @@ async fn resolve_remote_default_branch(repo_url: &str) -> AppResult<String> {
     Err(AppError::Io(std::io::Error::other(format!(
         "git failed: could not determine default branch for {repo_url}"
     ))))
+}
+
+async fn run_validation_command(
+    client: &DaemonClient,
+    claim: &InvocationClaimResponse,
+    project_dir: &Path,
+    profiles_dir: &Path,
+    command: &str,
+) -> AppResult<()> {
+    send_worker_event(
+        client,
+        claim,
+        crate::execution::ExecutionEventKind::StdoutLine,
+        format!("Running dbt {command}"),
+    )
+    .await?;
+    let output = TokioCommand::new(std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string()))
+        .arg(command)
+        .arg("--profiles-dir")
+        .arg(profiles_dir)
+        .current_dir(project_dir)
+        .output()
+        .await?;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        send_worker_event(
+            client,
+            claim,
+            crate::execution::ExecutionEventKind::StdoutLine,
+            line.to_string(),
+        )
+        .await?;
+    }
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        send_worker_event(
+            client,
+            claim,
+            crate::execution::ExecutionEventKind::StderrLine,
+            line.to_string(),
+        )
+        .await?;
+    }
+    if !output.status.success() {
+        let err = AppError::Io(std::io::Error::other(format!(
+            "dbt {command} failed with exit code {}",
+            output.status.code().unwrap_or(1)
+        )));
+        report_setup_failure(client, claim, &err.to_string()).await?;
+        return Err(err);
+    }
+    Ok(())
 }
 
 async fn resolve_git_ref(git_dir: &Path, git_ref: &str, repo_url: &str) -> AppResult<String> {
@@ -843,10 +1135,7 @@ async fn run_git_with_git_dir<const N: usize>(
     git_dir: &std::path::Path,
     args: [&str; N],
 ) -> AppResult<()> {
-    let mut command = TokioCommand::new("git");
-    command.env("GIT_DIR", git_dir);
-    command.args(args);
-    let output = command.output().await?;
+    let output = run_git_capture_with_git_dir(git_dir, args).await?;
     if output.status.success() {
         Ok(())
     } else {
@@ -855,6 +1144,16 @@ async fn run_git_with_git_dir<const N: usize>(
             String::from_utf8_lossy(&output.stderr).trim()
         ))))
     }
+}
+
+async fn run_git_capture_with_git_dir<const N: usize>(
+    git_dir: &std::path::Path,
+    args: [&str; N],
+) -> AppResult<std::process::Output> {
+    let mut command = TokioCommand::new("git");
+    command.env("GIT_DIR", git_dir);
+    command.args(args);
+    command.output().await.map_err(AppError::from)
 }
 
 async fn ensure_commit_exists_in_mirror(
@@ -1007,7 +1306,11 @@ async fn prune_git_cache(
 fn persists_state(command: InvocationCommandApi) -> bool {
     !matches!(
         command,
-        InvocationCommandApi::Ls | InvocationCommandApi::Release | InvocationCommandApi::ProjectValidate
+        InvocationCommandApi::Ls
+            | InvocationCommandApi::Release
+            | InvocationCommandApi::ProjectValidate
+            | InvocationCommandApi::EnvironmentPrepare
+            | InvocationCommandApi::EnvironmentValidate
     )
 }
 
@@ -1020,6 +1323,8 @@ fn map_command(command: InvocationCommandApi) -> &'static str {
         InvocationCommandApi::Seed => "seed",
         InvocationCommandApi::Release => "release",
         InvocationCommandApi::ProjectValidate => "project_validate",
+        InvocationCommandApi::EnvironmentPrepare => "environment_prepare",
+        InvocationCommandApi::EnvironmentValidate => "environment_validate",
     }
 }
 

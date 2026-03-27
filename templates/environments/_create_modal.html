@@ -1,0 +1,348 @@
+<div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
+  <div class="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div class="flex items-start justify-between border-b border-slate-200 px-6 py-4">
+      <div>
+        <h2 class="text-xl font-semibold tracking-tight text-slate-900">Create Environment</h2>
+        <p class="mt-1 text-sm text-slate-600">
+          Configure a remote environment for <span class="font-medium">{{ project.project_name }}</span>. Git metadata is loaded by a worker and dbt validation runs before creation.
+        </p>
+      </div>
+      <button class="rounded-md px-2 py-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900" onclick="document.getElementById('modal-root').innerHTML = ''">✕</button>
+    </div>
+
+    <form
+      x-data="environmentDraftForm({
+        status: '{{ draft.status }}',
+        statusUrl: '{{ draft.status_url }}',
+        branchRefreshUrl: '{{ draft.branch_refresh_url }}',
+        validateUrl: '{{ draft.validate_url }}',
+        confirmUrl: '{{ draft.confirm_url }}',
+        latestCommitSha: '{{ draft.latest_commit_sha }}',
+        configPairs: {{ draft.profile_config_pairs_json|safe }},
+        secretPairs: {{ draft.profile_secret_pairs_json|safe }}
+      })"
+      @submit="submit($event)"
+      class="space-y-6 px-6 py-5"
+    >
+      <div class="grid gap-4 md:grid-cols-2">
+        <label class="block">
+          <span class="mb-2 block text-sm font-medium text-slate-700">Environment Slug</span>
+          <input
+            name="slug"
+            type="text"
+            required
+            value="{{ draft.slug }}"
+            :disabled="inputsLocked"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+            placeholder="dev"
+          >
+          <span class="mt-2 block text-xs text-slate-500">Used as both the environment slug and the dbt target name.</span>
+        </label>
+
+        <label class="block">
+          <span class="mb-2 block text-sm font-medium text-slate-700">Git Branch</span>
+          <select
+            name="git_branch"
+            :disabled="inputsLocked || status === 'loading_git'"
+            @change="refreshBranch()"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+          >
+            {% for branch in draft.branch_options %}
+            <option value="{{ branch.name }}"{% if branch.selected %} selected{% endif %}>{{ branch.name }}</option>
+            {% endfor %}
+          </select>
+          <span class="mt-2 block text-xs text-slate-500">Default branch is preselected. Changing the branch refreshes the latest commit list.</span>
+        </label>
+      </div>
+
+      <div class="grid gap-4 md:grid-cols-3">
+        <label class="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+          <div>
+            <div class="font-medium text-slate-900">Use Latest Commit</div>
+            <div class="mt-1 text-xs text-slate-500">Track the latest commit on the selected branch.</div>
+          </div>
+          <input
+            x-ref="useLatestCommit"
+            name="use_latest_commit"
+            type="checkbox"
+            value="true"
+            {% if draft.use_latest_commit %}checked{% endif %}
+            :disabled="inputsLocked"
+            class="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
+          >
+        </label>
+
+        <label class="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+          <div>
+            <div class="font-medium text-slate-900">Enable Automatic Deployments</div>
+            <div class="mt-1 text-xs text-slate-500">Persist desired state for future automatic reconciliation.</div>
+          </div>
+          <input
+            name="auto_deploy"
+            type="checkbox"
+            value="true"
+            {% if draft.auto_deploy %}checked{% endif %}
+            :disabled="inputsLocked"
+            class="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
+          >
+        </label>
+
+        <label class="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+          <div>
+            <div class="font-medium text-slate-900">Immutable Environment</div>
+            <div class="mt-1 text-xs text-slate-500">Block later manual release edits after creation.</div>
+          </div>
+          <input
+            name="immutable"
+            type="checkbox"
+            value="true"
+            {% if draft.immutable %}checked{% endif %}
+            :disabled="inputsLocked"
+            class="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
+          >
+        </label>
+      </div>
+
+      <div class="grid gap-4 md:grid-cols-2">
+        <label class="block">
+          <span class="mb-2 block text-sm font-medium text-slate-700">Commit</span>
+          <input
+            x-show="useLatestSelected()"
+            type="text"
+            :value="latestCommitSha || 'Loading latest commit...'"
+            disabled
+            class="w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-600"
+          >
+          <input
+            :name="useLatestSelected() ? 'git_commit_sha' : ''"
+            type="hidden"
+            :value="latestCommitSha"
+          >
+          <select
+            x-ref="gitCommitSha"
+            :name="useLatestSelected() ? '' : 'git_commit_sha'"
+            x-show="!useLatestSelected()"
+            :disabled="inputsLocked || status === 'loading_git'"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+          >
+            {% for commit in draft.commit_options %}
+            <option value="{{ commit.sha }}"{% if commit.selected %} selected{% endif %}>
+              {{ commit.short_sha }} · {{ commit.summary }}{% if commit.committed_at.len() > 0 %} · {{ commit.committed_at }}{% endif %}
+            </option>
+            {% endfor %}
+          </select>
+          <span class="mt-2 block text-xs text-slate-500">Recent commits from the selected branch.</span>
+        </label>
+
+        <div class="grid gap-4 md:grid-cols-3">
+          <label class="block md:col-span-1">
+            <span class="mb-2 block text-sm font-medium text-slate-700">Adapter</span>
+            <input
+              name="adapter_type"
+              type="text"
+              required
+              value="{{ draft.adapter_type }}"
+              :disabled="inputsLocked"
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+              placeholder="postgres"
+            >
+          </label>
+          <label class="block md:col-span-1">
+            <span class="mb-2 block text-sm font-medium text-slate-700">Schema</span>
+            <input
+              name="schema_name"
+              type="text"
+              required
+              value="{{ draft.schema_name }}"
+              :disabled="inputsLocked"
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+              placeholder="analytics"
+            >
+          </label>
+          <label class="block md:col-span-1">
+            <span class="mb-2 block text-sm font-medium text-slate-700">Threads</span>
+            <input
+              name="threads"
+              type="number"
+              min="1"
+              value="{{ draft.threads }}"
+              :disabled="inputsLocked"
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+              placeholder="4"
+            >
+          </label>
+        </div>
+      </div>
+
+      <div class="grid gap-4 md:grid-cols-2">
+        <section class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-medium text-slate-900">Profile Config</h3>
+              <p class="mt-1 text-xs text-slate-500">Additional dbt profile fields.</p>
+            </div>
+            <button
+              type="button"
+              @click="addConfigPair()"
+              :disabled="inputsLocked"
+              class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Add Field
+            </button>
+          </div>
+          <div class="mt-4 space-y-3">
+            <template x-for="(pair, index) in configPairs" :key="`config-${index}`">
+              <div class="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+                <input x-model="pair.key" :disabled="inputsLocked" type="text" class="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900" placeholder="database">
+                <input x-model="pair.value" :disabled="inputsLocked" type="text" class="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900" placeholder="warehouse">
+                <button type="button" @click="removeConfigPair(index)" :disabled="inputsLocked" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50">Remove</button>
+              </div>
+            </template>
+            <div x-show="configPairs.length === 0" class="rounded-lg border border-dashed border-slate-300 px-3 py-4 text-xs text-slate-500">
+              No additional config fields.
+            </div>
+          </div>
+          <input x-ref="profileConfigJson" name="profile_config_json" type="hidden">
+        </section>
+
+        <section class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-medium text-slate-900">Profile Secrets</h3>
+              <p class="mt-1 text-xs text-slate-500">Encrypted server-side after submission.</p>
+            </div>
+            <button
+              type="button"
+              @click="addSecretPair()"
+              :disabled="inputsLocked"
+              class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Add Secret
+            </button>
+          </div>
+          <div class="mt-4 space-y-3">
+            <template x-for="(pair, index) in secretPairs" :key="`secret-${index}`">
+              <div class="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+                <input x-model="pair.key" :disabled="inputsLocked" type="text" class="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900" placeholder="password">
+                <input x-model="pair.value" :disabled="inputsLocked" type="text" class="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900" placeholder="secret">
+                <button type="button" @click="removeSecretPair(index)" :disabled="inputsLocked" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50">Remove</button>
+              </div>
+            </template>
+            <div x-show="secretPairs.length === 0" class="rounded-lg border border-dashed border-slate-300 px-3 py-4 text-xs text-slate-500">
+              No secret fields yet.
+            </div>
+          </div>
+          <input x-ref="profileSecretsJson" name="profile_secrets_json" type="hidden">
+        </section>
+      </div>
+
+      {% if draft.is_loading %}
+      <div
+        class="rounded-xl border border-sky-200 bg-sky-50 px-4 py-4 text-sm text-sky-900"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <div class="font-medium">Loading branch and commit metadata…</div>
+            <div class="mt-1 text-sky-800">Discovering branches and recent commits for this repository.</div>
+          </div>
+          <span class="rounded-full px-2.5 py-1 text-xs font-medium bg-sky-100 text-sky-800">{{ draft.status }}</span>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if draft.is_validating %}
+      <div
+        class="rounded-xl border border-sky-200 bg-sky-50 px-4 py-4 text-sm text-sky-900"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <div class="font-medium">Validating environment…</div>
+            <div class="mt-1 text-sky-800">Running dbt deps, debug, and compile on a worker.</div>
+          </div>
+          <span class="rounded-full px-2.5 py-1 text-xs font-medium bg-sky-100 text-sky-800">{{ draft.status }}</span>
+        </div>
+        <div class="mt-4 rounded-lg border border-sky-200 bg-white/70">
+          <div class="border-b border-sky-200 px-3 py-2 text-xs font-medium uppercase tracking-wide text-sky-700">
+            Validation Progress
+          </div>
+          <pre
+            x-data="environmentValidationProgress('{{ draft.validation_sse_url }}', '{{ draft.status_url }}')"
+            x-ref="log"
+            class="max-h-56 overflow-y-auto whitespace-pre-wrap px-3 py-3 font-mono text-xs leading-5 text-slate-800"
+          >Waiting for worker validation output…</pre>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if draft.is_failed %}
+      <div class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-900">
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <div class="font-medium">Validation failed</div>
+            <div class="mt-1 text-rose-800">Update the environment settings above, then retry.</div>
+          </div>
+          <span class="rounded-full px-2.5 py-1 text-xs font-medium bg-rose-100 text-rose-800">{{ draft.status }}</span>
+        </div>
+        <div class="mt-4 rounded-lg border border-rose-200 bg-white/70 px-4 py-3">
+          {{ draft.validation_error }}
+        </div>
+      </div>
+      {% endif %}
+
+      {% if draft.is_validated %}
+      <div class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-950">
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <div class="font-medium">Validation succeeded</div>
+            <div class="mt-1 text-emerald-900">{{ project.project_name }} · {{ draft.git_branch }} · {{ draft.git_commit_sha }}</div>
+          </div>
+          <span class="rounded-full px-2.5 py-1 text-xs font-medium bg-emerald-100 text-emerald-800">{{ draft.status }}</span>
+        </div>
+        <div class="mt-4 grid gap-3 md:grid-cols-2">
+          <div class="rounded-lg bg-white/70 px-3 py-2">
+            <div class="text-xs font-medium uppercase tracking-wide text-emerald-700">Environment</div>
+            <div class="mt-1 font-medium text-slate-900">{{ draft.slug }}</div>
+          </div>
+          <div class="rounded-lg bg-white/70 px-3 py-2">
+            <div class="text-xs font-medium uppercase tracking-wide text-emerald-700">Branch</div>
+            <div class="mt-1 font-medium text-slate-900">{{ draft.git_branch }}</div>
+          </div>
+          <div class="rounded-lg bg-white/70 px-3 py-2 md:col-span-2">
+            <div class="text-xs font-medium uppercase tracking-wide text-emerald-700">Commit</div>
+            <div class="mt-1 font-medium text-slate-900 break-all">{{ draft.git_commit_sha }}</div>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="flex items-center justify-end gap-3">
+        <button type="button" class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="document.getElementById('modal-root').innerHTML = ''">Cancel</button>
+        {% if draft.is_validated %}
+        <button
+          type="button"
+          class="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
+          hx-post="{{ draft.confirm_url }}"
+          hx-target="body"
+          hx-swap="innerHTML"
+        >
+          Confirm Create
+        </button>
+        {% else %}
+        <button
+          type="submit"
+          :disabled="isBusy"
+          :class="buttonClasses()"
+        >
+          {% if draft.is_loading %}
+          Loading Branches...
+          {% else if draft.is_validating %}
+          Validating...
+          {% else %}
+          Create Environment
+          {% endif %}
+        </button>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+</div>

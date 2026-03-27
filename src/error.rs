@@ -109,6 +109,8 @@ pub enum AppError {
     InvalidProjectMode(String),
     #[error("invalid environment status '{0}'")]
     InvalidEnvironmentStatus(String),
+    #[error("project '{0}' cannot be deleted because dependent records still exist")]
+    ProjectDeleteBlocked(String),
     #[error("invalid release target: {0}")]
     InvalidReleaseTarget(String),
     #[error("environment '{1}' for remote project '{0}' requires --git-commit-sha")]

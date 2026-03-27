@@ -1,4 +1,7 @@
-<div class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-950">
+<div
+  class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-950"
+  x-init="$dispatch('project-draft-state', { status: 'validated', confirmUrl: '/ui/project-drafts/{{ draft.id }}/confirm' })"
+>
   <div class="flex items-center justify-between gap-4">
     <div>
       <div class="font-medium">Validation succeeded</div>
@@ -7,6 +10,14 @@
     <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ draft.status_class }}">{{ draft.status }}</span>
   </div>
   <div class="mt-4 grid gap-3 md:grid-cols-2">
+    <div class="rounded-lg bg-white/70 px-3 py-2 md:col-span-2">
+      <div class="text-xs font-medium uppercase tracking-wide text-emerald-700">Repository</div>
+      <div class="mt-1 font-medium text-slate-900">{{ draft.git_repo_url }}</div>
+    </div>
+    <div class="rounded-lg bg-white/70 px-3 py-2">
+      <div class="text-xs font-medium uppercase tracking-wide text-emerald-700">Project root</div>
+      <div class="mt-1 font-medium text-slate-900">{{ draft.project_root }}</div>
+    </div>
     <div class="rounded-lg bg-white/70 px-3 py-2">
       <div class="text-xs font-medium uppercase tracking-wide text-emerald-700">Project name</div>
       <div class="mt-1 font-medium text-slate-900">{{ draft.project_name }}</div>
@@ -16,7 +27,10 @@
       <div class="mt-1 font-medium text-slate-900">{{ draft.default_branch }}</div>
     </div>
   </div>
-  <form class="mt-4 flex items-center justify-end" method="post" action="/ui/project-drafts/{{ draft.id }}/confirm">
-    <button type="submit" class="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600">Create Project</button>
-  </form>
+  <div class="mt-4 rounded-lg border border-emerald-200 bg-white/70 px-3 py-3 text-emerald-900">
+    Remote project <span class="font-semibold">{{ draft.project_name }}</span> is ready to be created from
+    <span class="font-semibold">{{ draft.git_repo_url }}</span> at
+    <span class="font-semibold">{{ draft.project_root }}</span>. Click
+    <span class="font-semibold">Confirm Create</span> below to finish onboarding.
+  </div>
 </div>

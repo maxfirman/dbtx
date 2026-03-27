@@ -192,6 +192,10 @@ ADD COLUMN IF NOT EXISTS git_branch TEXT,
 ADD COLUMN IF NOT EXISTS git_commit_sha TEXT,
 ADD COLUMN IF NOT EXISTS immutable BOOLEAN NOT NULL DEFAULT FALSE;
 
+ALTER TABLE environments
+ADD COLUMN IF NOT EXISTS use_latest_commit BOOLEAN NOT NULL DEFAULT TRUE,
+ADD COLUMN IF NOT EXISTS auto_deploy BOOLEAN NOT NULL DEFAULT TRUE;
+
 ALTER TABLE runs
 ADD COLUMN IF NOT EXISTS git_branch TEXT,
 ADD COLUMN IF NOT EXISTS git_commit_sha TEXT,
@@ -208,6 +212,8 @@ CREATE TABLE IF NOT EXISTS environment_versions (
     reason TEXT NOT NULL,
     git_branch TEXT,
     git_commit_sha TEXT,
+    use_latest_commit BOOLEAN NOT NULL DEFAULT TRUE,
+    auto_deploy BOOLEAN NOT NULL DEFAULT TRUE,
     kind TEXT NOT NULL,
     immutable BOOLEAN NOT NULL,
     baseline_environment_id BIGINT NULL REFERENCES environments(id) ON DELETE SET NULL,
@@ -495,7 +501,42 @@ DROP CONSTRAINT IF EXISTS chk_environments_commit_sha,
 DROP COLUMN IF EXISTS kind,
 DROP COLUMN IF EXISTS immutable;
 
+ALTER TABLE environments
+ADD COLUMN IF NOT EXISTS immutable BOOLEAN NOT NULL DEFAULT FALSE;
+
 ALTER TABLE environment_versions
 DROP CONSTRAINT IF EXISTS chk_environment_versions_kind,
 DROP COLUMN IF EXISTS kind,
 DROP COLUMN IF EXISTS immutable;
+
+ALTER TABLE environment_versions
+ADD COLUMN IF NOT EXISTS immutable BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS environment_onboarding_drafts (
+    id UUID PRIMARY KEY,
+    project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    slug TEXT NOT NULL DEFAULT '',
+    git_branch TEXT,
+    git_commit_sha TEXT,
+    use_latest_commit BOOLEAN NOT NULL DEFAULT TRUE,
+    auto_deploy BOOLEAN NOT NULL DEFAULT TRUE,
+    immutable BOOLEAN NOT NULL DEFAULT FALSE,
+    adapter_type TEXT,
+    schema_name TEXT,
+    threads INTEGER,
+    profile_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    profile_secrets JSONB NOT NULL DEFAULT '{}'::jsonb,
+    branch_options JSONB NOT NULL DEFAULT '[]'::jsonb,
+    commit_options JSONB NOT NULL DEFAULT '[]'::jsonb,
+    validation_error TEXT,
+    status TEXT NOT NULL DEFAULT 'loading_git',
+    validation_invocation_id UUID NULL REFERENCES invocations(invocation_id) ON DELETE SET NULL,
+    validated_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_environment_onboarding_drafts_status
+        CHECK (status IN ('loading_git', 'ready', 'validating', 'validated', 'failed'))
+);
+
+ALTER TABLE invocations
+ADD COLUMN IF NOT EXISTS environment_draft_id UUID NULL REFERENCES environment_onboarding_drafts(id) ON DELETE CASCADE;

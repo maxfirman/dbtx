@@ -8,10 +8,10 @@ use crate::api::{
     InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
     InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
     InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
-    InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse, ProjectDraftCreateApiRequest,
-    ProjectDraftResponse, ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest,
-    ProjectsResponse, QueueStatusResponse, QueuesResponse, ReadyResponse, WorkerStatusResponse,
-    WorkersResponse,
+    InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse, ProjectDeleteResponse,
+    ProjectDraftCreateApiRequest, ProjectDraftResponse, ProjectDraftValidateResponse,
+    ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse, QueueStatusResponse,
+    QueuesResponse, ReadyResponse, WorkerStatusResponse, WorkersResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{
@@ -321,7 +321,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/projects", get(projects_list))
         .route(
             "/v1/projects/{project_id}",
-            patch(project_update).get(project_get),
+            patch(project_update).get(project_get).delete(project_delete),
         )
         .route("/v1/project-drafts", post(project_draft_create))
         .route("/v1/project-drafts/{draft_id}", get(project_draft_get))
@@ -429,6 +429,7 @@ struct InvocationEventsQuery {
         projects_list,
         project_get,
         project_update,
+        project_delete,
         environment_create,
         environment_list,
         environment_get,
@@ -686,6 +687,31 @@ async fn project_update(
 }
 
 #[utoipa::path(
+    delete,
+    path = "/v1/projects/{project_id}",
+    tag = "projects",
+    params(
+        ("project_id" = String, Path, description = "Project identifier")
+    ),
+    responses(
+        (status = 200, description = "Deleted project", body = ProjectDeleteResponse),
+        (status = 404, description = "Project not found", body = ApiErrorResponse),
+        (status = 409, description = "Project deletion blocked", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn project_delete(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ProjectDeleteResponse>, ApiError> {
+    ProjectService::new(&state.db)
+        .delete(project_id.clone())
+        .await?;
+    info!(project_id = %project_id, "deleted project");
+    Ok(Json(ProjectDeleteResponse { deleted_project_id: project_id }))
+}
+
+#[utoipa::path(
     post,
     path = "/v1/project-drafts",
     tag = "projects",
@@ -760,6 +786,7 @@ async fn project_draft_validate(
             project_id: None,
             environment_id: None,
             project_draft_id: Some(prepared.draft.id),
+            environment_draft_id: None,
             command: InvocationCommand::ProjectValidate.as_str().to_string(),
             execution_mode: InvocationExecutionModeApi::Server,
             worker_queue: prepared.worker_queue,
@@ -770,9 +797,9 @@ async fn project_draft_validate(
             promote_base_manifest: false,
             claim_deadline_at: Some(
                 Utc::now()
-                    + chrono::Duration::from_std(
-                        claim_startup_timeout(InvocationExecutionModeApi::Server),
-                    )
+                    + chrono::Duration::from_std(claim_startup_timeout(
+                        InvocationExecutionModeApi::Server,
+                    ))
                     .expect("duration"),
             ),
         })
@@ -818,7 +845,9 @@ async fn project_draft_confirm(
     State(state): State<AppState>,
     Path(draft_id): Path<Uuid>,
 ) -> Result<Json<ProjectResponse>, ApiError> {
-    let project = ProjectService::new(&state.db).confirm_draft(draft_id).await?;
+    let project = ProjectService::new(&state.db)
+        .confirm_draft(draft_id)
+        .await?;
     Ok(Json(ProjectResponse { project }))
 }
 
@@ -1234,10 +1263,27 @@ async fn invocation_create(
                 git_branch: spec.git_branch,
             }
         }
-        PreparedExecutionSpec::ProjectValidation(spec) => InvocationExecutionSpecApi::ProjectValidation {
-            repo_url: spec.repo_url,
-            project_root: spec.project_root,
-        },
+        PreparedExecutionSpec::ProjectValidation(spec) => {
+            InvocationExecutionSpecApi::ProjectValidation {
+                repo_url: spec.repo_url,
+                project_root: spec.project_root,
+            }
+        }
+        PreparedExecutionSpec::EnvironmentPrepare(spec) => {
+            InvocationExecutionSpecApi::EnvironmentPrepare {
+                repo_url: spec.repo_url,
+                selected_branch: spec.selected_branch,
+            }
+        }
+        PreparedExecutionSpec::EnvironmentValidate(spec) => {
+            InvocationExecutionSpecApi::EnvironmentValidate {
+                repo_url: spec.repo_url,
+                commit_sha: spec.commit_sha,
+                project_root: spec.project_root,
+                selected_branch: spec.selected_branch,
+                profiles_yml: spec.profiles_yml,
+            }
+        }
     };
     let worker_queue = request
         .worker_queue
@@ -1257,6 +1303,7 @@ async fn invocation_create(
             project_id: prepared.project_id,
             environment_id: prepared.environment_id,
             project_draft_id: prepared.project_draft_id,
+            environment_draft_id: prepared.environment_draft_id,
             command: map_invocation_command(request.command).as_str().to_string(),
             execution_mode: request.execution_mode,
             worker_queue: worker_queue.clone(),
@@ -1685,6 +1732,8 @@ fn map_invocation_command(command: InvocationCommandApi) -> InvocationCommand {
         InvocationCommandApi::Seed => InvocationCommand::Seed,
         InvocationCommandApi::Release => InvocationCommand::Release,
         InvocationCommandApi::ProjectValidate => InvocationCommand::ProjectValidate,
+        InvocationCommandApi::EnvironmentPrepare => InvocationCommand::EnvironmentPrepare,
+        InvocationCommandApi::EnvironmentValidate => InvocationCommand::EnvironmentValidate,
     }
 }
 
@@ -1725,6 +1774,7 @@ impl IntoResponse for ApiError {
             AppError::EnvironmentAlreadyExists(_, _) | AppError::ProjectIdAlreadyConfigured(_) => {
                 StatusCode::CONFLICT
             }
+            AppError::ProjectDeleteBlocked(_) => StatusCode::CONFLICT,
             AppError::InvocationAlreadyClaimed(_) => StatusCode::CONFLICT,
             AppError::InvocationNotClaimable(_) => StatusCode::BAD_REQUEST,
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,

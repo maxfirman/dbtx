@@ -66,6 +66,31 @@ pub struct ProjectDraftRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentDraftRecord {
+    pub id: Uuid,
+    pub project_id: i64,
+    pub slug: String,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
+    pub use_latest_commit: bool,
+    pub auto_deploy: bool,
+    pub immutable: bool,
+    pub adapter_type: Option<String>,
+    pub schema_name: Option<String>,
+    pub threads: Option<i32>,
+    pub profile_config: Value,
+    pub profile_secrets: Value,
+    pub branch_options: Value,
+    pub commit_options: Value,
+    pub status: String,
+    pub validation_error: Option<String>,
+    pub validation_invocation_id: Option<Uuid>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub validated_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentRecord {
     pub id: i64,
     pub project_id: i64,
@@ -78,6 +103,9 @@ pub struct EnvironmentRecord {
     pub baseline_environment_slug: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
+    pub use_latest_commit: bool,
+    pub auto_deploy: bool,
+    pub immutable: bool,
     pub pr_number: Option<i32>,
     pub status: String,
     pub adapter_type: String,
@@ -98,6 +126,9 @@ pub struct EnvironmentVersionRecord {
     pub reason: String,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
+    pub use_latest_commit: bool,
+    pub auto_deploy: bool,
+    pub immutable: bool,
     pub baseline_environment_id: Option<i64>,
     pub metadata: Value,
 }
@@ -127,6 +158,9 @@ pub struct CreateEnvironmentInput {
     pub baseline_slug: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
+    pub use_latest_commit: bool,
+    pub auto_deploy: bool,
+    pub immutable: bool,
     pub pr_number: Option<i32>,
     pub status: String,
     pub adapter_type: String,
@@ -144,6 +178,9 @@ pub struct UpdateEnvironmentInput {
     pub baseline_slug: Option<String>,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
+    pub use_latest_commit: Option<bool>,
+    pub auto_deploy: Option<bool>,
+    pub immutable: Option<bool>,
     pub pr_number: Option<i32>,
     pub status: Option<String>,
     pub adapter_type: Option<String>,
@@ -162,6 +199,27 @@ pub struct EnvironmentReleaseInput {
     pub slug: String,
     pub git_branch: Option<String>,
     pub git_commit_sha: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateEnvironmentDraftInput {
+    pub project_id: i64,
+    pub default_branch: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateEnvironmentDraftInput {
+    pub slug: String,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
+    pub use_latest_commit: bool,
+    pub auto_deploy: bool,
+    pub immutable: bool,
+    pub adapter_type: Option<String>,
+    pub schema_name: Option<String>,
+    pub threads: Option<i32>,
+    pub profile_config: Value,
+    pub profile_secrets: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +259,7 @@ pub(crate) struct CreateInvocationInput {
     pub(crate) project_id: Option<i64>,
     pub(crate) environment_id: Option<i64>,
     pub(crate) project_draft_id: Option<Uuid>,
+    pub(crate) environment_draft_id: Option<Uuid>,
     pub(crate) command: String,
     pub(crate) execution_mode: InvocationExecutionModeApi,
     pub(crate) worker_queue: String,
@@ -215,6 +274,7 @@ pub(crate) struct InvocationPersistenceRecord {
     pub(crate) project_id: Option<i64>,
     pub(crate) environment_id: Option<i64>,
     pub(crate) project_draft_id: Option<Uuid>,
+    pub(crate) environment_draft_id: Option<Uuid>,
     pub(crate) command: String,
     pub(crate) promote_base_manifest: bool,
 }
@@ -465,14 +525,227 @@ impl Db {
         .bind(draft_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("project draft '{draft_id}' was not found"),
-        )))?;
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("project draft '{draft_id}' was not found"),
+            ))
+        })?;
         Ok(project_draft_record_from_row(&row))
     }
 
-    pub async fn mark_project_draft_validating(&self, draft_id: Uuid) -> AppResult<ProjectDraftRecord> {
+    pub async fn create_environment_draft(
+        &self,
+        input: CreateEnvironmentDraftInput,
+    ) -> AppResult<EnvironmentDraftRecord> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO environment_onboarding_drafts (
+                id, project_id, git_branch, status
+            )
+            VALUES ($1, $2, $3, 'loading_git')
+            RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
+                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                profile_secrets, branch_options, commit_options, status, validation_error,
+                validation_invocation_id, created_at, updated_at, validated_at
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(input.project_id)
+        .bind(input.default_branch.as_deref())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(environment_draft_record_from_row(&row))
+    }
+
+    pub async fn get_environment_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentDraftRecord> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
+                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                profile_secrets, branch_options, commit_options, status, validation_error,
+                validation_invocation_id, created_at, updated_at, validated_at
+            FROM environment_onboarding_drafts
+            WHERE id = $1
+            "#,
+        )
+        .bind(draft_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("environment draft '{draft_id}' was not found"),
+            ))
+        })?;
+        Ok(environment_draft_record_from_row(&row))
+    }
+
+    pub async fn update_environment_draft(
+        &self,
+        draft_id: Uuid,
+        input: UpdateEnvironmentDraftInput,
+    ) -> AppResult<EnvironmentDraftRecord> {
+        let encrypted_secrets = crate::profile::encrypt_json(&input.profile_secrets)?;
+        let row = sqlx::query(
+            r#"
+            UPDATE environment_onboarding_drafts
+            SET slug = $2,
+                git_branch = $3,
+                git_commit_sha = $4,
+                use_latest_commit = $5,
+                auto_deploy = $6,
+                immutable = $7,
+                adapter_type = $8,
+                schema_name = $9,
+                threads = $10,
+                profile_config = $11,
+                profile_secrets = $12,
+                validation_error = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
+                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                profile_secrets, branch_options, commit_options, status, validation_error,
+                validation_invocation_id, created_at, updated_at, validated_at
+            "#,
+        )
+        .bind(draft_id)
+        .bind(&input.slug)
+        .bind(input.git_branch.as_deref())
+        .bind(input.git_commit_sha.as_deref())
+        .bind(input.use_latest_commit)
+        .bind(input.auto_deploy)
+        .bind(input.immutable)
+        .bind(input.adapter_type.as_deref())
+        .bind(input.schema_name.as_deref())
+        .bind(input.threads)
+        .bind(&input.profile_config)
+        .bind(&encrypted_secrets)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("environment draft '{draft_id}' was not found"),
+            ))
+        })?;
+        Ok(environment_draft_record_from_row(&row))
+    }
+
+    pub async fn mark_environment_draft_loading_git(
+        &self,
+        draft_id: Uuid,
+    ) -> AppResult<EnvironmentDraftRecord> {
+        let row = sqlx::query(
+            r#"
+            UPDATE environment_onboarding_drafts
+            SET status = 'loading_git',
+                validation_error = NULL,
+                validation_invocation_id = NULL,
+                validated_at = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
+                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                profile_secrets, branch_options, commit_options, status, validation_error,
+                validation_invocation_id, created_at, updated_at, validated_at
+            "#
+        )
+        .bind(draft_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, format!("environment draft '{draft_id}' was not found"))))?;
+        Ok(environment_draft_record_from_row(&row))
+    }
+
+    pub async fn mark_environment_draft_validating(
+        &self,
+        draft_id: Uuid,
+    ) -> AppResult<EnvironmentDraftRecord> {
+        let row = sqlx::query(
+            r#"
+            UPDATE environment_onboarding_drafts
+            SET status = 'validating',
+                validation_error = NULL,
+                validation_invocation_id = NULL,
+                validated_at = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
+                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                profile_secrets, branch_options, commit_options, status, validation_error,
+                validation_invocation_id, created_at, updated_at, validated_at
+            "#
+        )
+        .bind(draft_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, format!("environment draft '{draft_id}' was not found"))))?;
+        Ok(environment_draft_record_from_row(&row))
+    }
+
+    pub async fn attach_environment_draft_invocation(
+        &self,
+        draft_id: Uuid,
+        invocation_id: Uuid,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE environment_onboarding_drafts
+            SET validation_invocation_id = $2,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(draft_id)
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn confirm_environment_draft(
+        &self,
+        draft_id: Uuid,
+    ) -> AppResult<EnvironmentRecord> {
+        let draft = self.get_environment_draft(draft_id).await?;
+        if draft.status != "validated" {
+            return Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "environment draft must be validated before confirmation",
+            )));
+        }
+        let project = self.get_project_by_id(draft.project_id).await?;
+        let project_ref = project.project_id.clone();
+        let slug = draft.slug.clone();
+        let profile_name = project.project_name.clone();
+        self.create_environment(CreateEnvironmentInput {
+            project: project_ref.clone(),
+            slug: slug.clone(),
+            profile_name,
+            target_name: slug,
+            baseline_slug: None,
+            git_branch: draft.git_branch.clone(),
+            git_commit_sha: draft.git_commit_sha.clone(),
+            use_latest_commit: draft.use_latest_commit,
+            auto_deploy: draft.auto_deploy,
+            immutable: draft.immutable,
+            pr_number: None,
+            status: "active".to_string(),
+            adapter_type: draft.adapter_type.clone().ok_or_else(|| AppError::InvalidProfileConfig("adapter type is required".to_string()))?,
+            worker_queue: None,
+            schema_name: draft.schema_name.clone(),
+            threads: draft.threads,
+            profile_config: draft.profile_config.clone(),
+            profile_secrets: crate::profile::decrypt_json(&draft.profile_secrets)?,
+        }).await
+    }
+
+    pub async fn mark_project_draft_validating(
+        &self,
+        draft_id: Uuid,
+    ) -> AppResult<ProjectDraftRecord> {
         let row = sqlx::query(
             r#"
             UPDATE project_onboarding_drafts
@@ -491,10 +764,12 @@ impl Db {
         .bind(draft_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("project draft '{draft_id}' was not found"),
-        )))?;
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("project draft '{draft_id}' was not found"),
+            ))
+        })?;
         Ok(project_draft_record_from_row(&row))
     }
 
@@ -559,6 +834,37 @@ impl Db {
         Ok(project_record_from_row(&row))
     }
 
+    pub async fn get_project_by_id(&self, id: i64) -> AppResult<ProjectRecord> {
+        let row = sqlx::query(
+            "SELECT id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata FROM projects WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::ProjectIdNotFound(id.to_string()))?;
+        Ok(project_record_from_row(&row))
+    }
+
+    pub async fn delete_project(&self, project_id: &str) -> AppResult<()> {
+        let result = sqlx::query("DELETE FROM projects WHERE project_id = $1")
+            .bind(project_id)
+            .execute(&self.pool)
+            .await;
+
+        match result {
+            Ok(done) => {
+                if done.rows_affected() == 0 {
+                    return Err(AppError::ProjectIdNotFound(project_id.to_string()));
+                }
+                Ok(())
+            }
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23503") => {
+                Err(AppError::ProjectDeleteBlocked(project_id.to_string()))
+            }
+            Err(err) => Err(AppError::Sqlx(err)),
+        }
+    }
+
     pub async fn create_environment(
         &self,
         input: CreateEnvironmentInput,
@@ -590,10 +896,10 @@ impl Db {
             r#"
             INSERT INTO environments (
                 project_id, slug, profile_name, target_name, baseline_environment_id, git_branch, git_commit_sha,
-                pr_number, status, adapter_type, worker_queue, schema_name, threads,
-                profile_config, profile_secrets
+                use_latest_commit, auto_deploy, immutable, pr_number, status, adapter_type,
+                worker_queue, schema_name, threads, profile_config, profile_secrets
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             RETURNING id
             "#,
         )
@@ -604,6 +910,9 @@ impl Db {
         .bind(baseline.as_ref().map(|env| env.id))
         .bind(input.git_branch.as_deref())
         .bind(input.git_commit_sha.as_deref())
+        .bind(input.use_latest_commit)
+        .bind(input.auto_deploy)
+        .bind(input.immutable)
         .bind(input.pr_number)
         .bind(&input.status)
         .bind(&input.adapter_type)
@@ -653,6 +962,9 @@ impl Db {
         };
         let git_branch = input.git_branch.or(existing.git_branch.clone());
         let git_commit_sha = input.git_commit_sha.or(existing.git_commit_sha.clone());
+        let use_latest_commit = input.use_latest_commit.unwrap_or(existing.use_latest_commit);
+        let auto_deploy = input.auto_deploy.unwrap_or(existing.auto_deploy);
+        let immutable = input.immutable.unwrap_or(existing.immutable);
         validate_environment_git_metadata(&project, &existing.slug, git_commit_sha.as_deref())?;
         let adapter_type = input
             .adapter_type
@@ -703,16 +1015,19 @@ impl Db {
             SET baseline_environment_id = $3,
                 git_branch = $4,
                 git_commit_sha = $5,
-                pr_number = $6,
-                status = $7,
-                adapter_type = $8,
-                worker_queue = $9,
-                profile_name = $10,
-                target_name = $11,
-                schema_name = $12,
-                threads = $13,
-                profile_config = $14,
-                profile_secrets = $15
+                use_latest_commit = $6,
+                auto_deploy = $7,
+                immutable = $8,
+                pr_number = $9,
+                status = $10,
+                adapter_type = $11,
+                worker_queue = $12,
+                profile_name = $13,
+                target_name = $14,
+                schema_name = $15,
+                threads = $16,
+                profile_config = $17,
+                profile_secrets = $18
             WHERE id = $1 AND project_id = $2
             "#,
         )
@@ -721,6 +1036,9 @@ impl Db {
         .bind(baseline_environment_id)
         .bind(git_branch.as_deref())
         .bind(git_commit_sha.as_deref())
+        .bind(use_latest_commit)
+        .bind(auto_deploy)
+        .bind(immutable)
         .bind(input.pr_number.or(existing.pr_number))
         .bind(&status)
         .bind(&adapter_type)
@@ -758,6 +1076,13 @@ impl Db {
         let existing = self
             .get_environment_by_project_id(project.id, &project.project_id, &input.slug)
             .await?;
+
+        if existing.immutable {
+            return Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("environment '{}' is immutable and cannot be released", existing.slug),
+            )));
+        }
 
         validate_environment_git_metadata(&project, &existing.slug, Some(&input.git_commit_sha))?;
 
@@ -802,6 +1127,9 @@ impl Db {
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
+                e.use_latest_commit,
+                e.auto_deploy,
+                e.immutable,
                 e.pr_number,
                 e.status,
                 e.adapter_type,
@@ -836,7 +1164,7 @@ impl Db {
         let rows = sqlx::query(
             r#"
             SELECT id, environment_id, project_id, recorded_at, reason, git_branch, git_commit_sha,
-                   baseline_environment_id, metadata
+                   use_latest_commit, auto_deploy, immutable, baseline_environment_id, metadata
             FROM environment_versions
             WHERE environment_id = $1
             ORDER BY id DESC
@@ -864,7 +1192,7 @@ impl Db {
         let version = sqlx::query(
             r#"
             SELECT id, environment_id, project_id, recorded_at, reason, git_branch, git_commit_sha,
-                   baseline_environment_id, metadata
+                   use_latest_commit, auto_deploy, immutable, baseline_environment_id, metadata
             FROM environment_versions
             WHERE id = $1 AND environment_id = $2
             "#,
@@ -927,10 +1255,10 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO invocations (
-                invocation_id, run_id, project_id, environment_id, project_draft_id, command, execution_mode,
-                worker_queue, status, execution_spec, promote_base_manifest, claim_deadline_at
+                invocation_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id,
+                command, execution_mode, worker_queue, status, execution_spec, promote_base_manifest, claim_deadline_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'running', $10, $11, $12)
             RETURNING invocation_id, execution_mode, worker_queue, status, exit_code, error,
                 started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
                 cancel_requested, claimed_by
@@ -941,6 +1269,7 @@ impl Db {
         .bind(input.project_id)
         .bind(input.environment_id)
         .bind(input.project_draft_id)
+        .bind(input.environment_draft_id)
         .bind(&input.command)
         .bind(match input.execution_mode {
             InvocationExecutionModeApi::Server => "server",
@@ -1372,7 +1701,7 @@ impl Db {
     ) -> AppResult<InvocationPersistenceRecord> {
         let row = sqlx::query(
             r#"
-            SELECT run_id, project_id, environment_id, project_draft_id, command, promote_base_manifest
+            SELECT run_id, project_id, environment_id, project_draft_id, environment_draft_id, command, promote_base_manifest
             FROM invocations
             WHERE invocation_id = $1
               AND ($2::TEXT IS NULL OR claimed_by = $2)
@@ -1395,6 +1724,7 @@ impl Db {
             project_id: row.get("project_id"),
             environment_id: row.get("environment_id"),
             project_draft_id: row.get("project_draft_id"),
+            environment_draft_id: row.get("environment_draft_id"),
             command: row.get("command"),
             promote_base_manifest: row.get("promote_base_manifest"),
         })
@@ -1488,8 +1818,16 @@ impl Db {
                 &mut tx,
                 RunFinalization {
                     run_id,
-                    project_id: persistence.project_id.ok_or_else(|| AppError::Io(std::io::Error::other("run invocation missing project scope")))?,
-                    environment_id: persistence.environment_id.ok_or_else(|| AppError::Io(std::io::Error::other("run invocation missing environment scope")))?,
+                    project_id: persistence.project_id.ok_or_else(|| {
+                        AppError::Io(std::io::Error::other(
+                            "run invocation missing project scope",
+                        ))
+                    })?,
+                    environment_id: persistence.environment_id.ok_or_else(|| {
+                        AppError::Io(std::io::Error::other(
+                            "run invocation missing environment scope",
+                        ))
+                    })?,
                     subcommand: &persistence.command,
                     dbt_version: completion.dbt_version.as_deref(),
                     exit_code: completion.exit_code,
@@ -1512,8 +1850,16 @@ impl Db {
         {
             self.apply_release_completion_in_tx(
                 &mut tx,
-                persistence.project_id.ok_or_else(|| AppError::Io(std::io::Error::other("release invocation missing project scope")))?,
-                persistence.environment_id.ok_or_else(|| AppError::Io(std::io::Error::other("release invocation missing environment scope")))?,
+                persistence.project_id.ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "release invocation missing project scope",
+                    ))
+                })?,
+                persistence.environment_id.ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "release invocation missing environment scope",
+                    ))
+                })?,
                 completion.result.as_ref(),
             )
             .await?;
@@ -1522,7 +1868,37 @@ impl Db {
         if persistence.command == "project_validate" {
             self.apply_project_validation_completion_in_tx(
                 &mut tx,
-                persistence.project_draft_id.ok_or_else(|| AppError::Io(std::io::Error::other("project validation invocation missing draft scope")))?,
+                persistence.project_draft_id.ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "project validation invocation missing draft scope",
+                    ))
+                })?,
+                completion,
+            )
+            .await?;
+        }
+
+        if persistence.command == "environment_prepare" {
+            self.apply_environment_prepare_completion_in_tx(
+                &mut tx,
+                persistence.environment_draft_id.ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "environment prepare invocation missing draft scope",
+                    ))
+                })?,
+                completion,
+            )
+            .await?;
+        }
+
+        if persistence.command == "environment_validate" {
+            self.apply_environment_validation_completion_in_tx(
+                &mut tx,
+                persistence.environment_draft_id.ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "environment validation invocation missing draft scope",
+                    ))
+                })?,
                 completion,
             )
             .await?;
@@ -1570,11 +1946,19 @@ impl Db {
                 let project_name = result
                     .get("project_name")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| AppError::Io(std::io::Error::other("project validation missing project_name")))?;
+                    .ok_or_else(|| {
+                        AppError::Io(std::io::Error::other(
+                            "project validation missing project_name",
+                        ))
+                    })?;
                 let default_branch = result
                     .get("default_branch")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| AppError::Io(std::io::Error::other("project validation missing default_branch")))?;
+                    .ok_or_else(|| {
+                        AppError::Io(std::io::Error::other(
+                            "project validation missing default_branch",
+                        ))
+                    })?;
                 sqlx::query(
                     r#"
                     UPDATE project_onboarding_drafts
@@ -1605,7 +1989,12 @@ impl Db {
                     "#,
                 )
                 .bind(draft_id)
-                .bind(completion.error.as_deref().unwrap_or("project validation failed"))
+                .bind(
+                    completion
+                        .error
+                        .as_deref()
+                        .unwrap_or("project validation failed"),
+                )
                 .execute(&mut **tx)
                 .await?;
             }
@@ -1658,6 +2047,137 @@ impl Db {
         let environment = self.get_environment_by_id_in_tx(tx, environment_id).await?;
         self.record_environment_version_in_tx(tx, &environment, "released")
             .await?;
+        Ok(())
+    }
+
+    async fn apply_environment_prepare_completion_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        draft_id: Uuid,
+        completion: &crate::execution::ExecutionCompletion,
+    ) -> AppResult<()> {
+        match completion.status {
+            InvocationLifecycleStatus::Succeeded => {
+                let result = completion.result.as_ref().ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "environment prepare completed without metadata",
+                    ))
+                })?;
+                let selected_branch = result
+                    .get("selected_branch")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+                let latest_commit_sha = result
+                    .get("latest_commit_sha")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+                let branches = result
+                    .get("branches")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new()));
+                let commits = result
+                    .get("commits")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new()));
+                sqlx::query(
+                    r#"
+                    UPDATE environment_onboarding_drafts
+                    SET status = 'ready',
+                        validation_error = NULL,
+                        git_branch = COALESCE($2, git_branch),
+                        git_commit_sha = COALESCE($3, git_commit_sha),
+                        branch_options = $4,
+                        commit_options = $5,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(draft_id)
+                .bind(selected_branch)
+                .bind(latest_commit_sha)
+                .bind(branches)
+                .bind(commits)
+                .execute(&mut **tx)
+                .await?;
+            }
+            _ => {
+                sqlx::query(
+                    r#"
+                    UPDATE environment_onboarding_drafts
+                    SET status = 'failed',
+                        validation_error = $2,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(draft_id)
+                .bind(completion.error.as_deref().unwrap_or("environment preparation failed"))
+                .execute(&mut **tx)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_environment_validation_completion_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        draft_id: Uuid,
+        completion: &crate::execution::ExecutionCompletion,
+    ) -> AppResult<()> {
+        match completion.status {
+            InvocationLifecycleStatus::Succeeded => {
+                let result = completion.result.as_ref().ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "environment validation completed without metadata",
+                    ))
+                })?;
+                let resolved_commit_sha = result
+                    .get("resolved_commit_sha")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        AppError::Io(std::io::Error::other(
+                            "environment validation missing resolved_commit_sha",
+                        ))
+                    })?;
+                let selected_branch = result
+                    .get("selected_branch")
+                    .and_then(Value::as_str);
+                sqlx::query(
+                    r#"
+                    UPDATE environment_onboarding_drafts
+                    SET status = 'validated',
+                        validation_error = NULL,
+                        git_branch = COALESCE($2, git_branch),
+                        git_commit_sha = $3,
+                        validated_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(draft_id)
+                .bind(selected_branch)
+                .bind(resolved_commit_sha)
+                .execute(&mut **tx)
+                .await?;
+            }
+            _ => {
+                sqlx::query(
+                    r#"
+                    UPDATE environment_onboarding_drafts
+                    SET status = 'failed',
+                        validation_error = $2,
+                        validated_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(draft_id)
+                .bind(completion.error.as_deref().unwrap_or("environment validation failed"))
+                .execute(&mut **tx)
+                .await?;
+            }
+        }
         Ok(())
     }
 
@@ -1931,9 +2451,9 @@ impl Db {
             r#"
             INSERT INTO environment_versions (
                 environment_id, project_id, reason, git_branch, git_commit_sha,
-                baseline_environment_id, metadata
+                use_latest_commit, auto_deploy, immutable, baseline_environment_id, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(environment.id)
@@ -1941,6 +2461,9 @@ impl Db {
         .bind(reason)
         .bind(environment.git_branch.as_deref())
         .bind(environment.git_commit_sha.as_deref())
+        .bind(environment.use_latest_commit)
+        .bind(environment.auto_deploy)
+        .bind(environment.immutable)
         .bind(environment.baseline_environment_id)
         .bind(sqlx::types::Json(serde_json::json!({
             "environment_slug": environment.slug,
@@ -2025,6 +2548,9 @@ impl Db {
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
+                e.use_latest_commit,
+                e.auto_deploy,
+                e.immutable,
                 e.pr_number,
                 e.status,
                 e.adapter_type,
@@ -2066,6 +2592,9 @@ impl Db {
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
+                e.use_latest_commit,
+                e.auto_deploy,
+                e.immutable,
                 e.pr_number,
                 e.status,
                 e.adapter_type,
@@ -2106,6 +2635,9 @@ impl Db {
                 be.slug AS baseline_environment_slug,
                 e.git_branch,
                 e.git_commit_sha,
+                e.use_latest_commit,
+                e.auto_deploy,
+                e.immutable,
                 e.pr_number,
                 e.status,
                 e.adapter_type,
@@ -2840,6 +3372,32 @@ fn project_draft_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectDraftRec
     }
 }
 
+fn environment_draft_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentDraftRecord {
+    EnvironmentDraftRecord {
+        id: row.get("id"),
+        project_id: row.get("project_id"),
+        slug: row.get("slug"),
+        git_branch: row.get("git_branch"),
+        git_commit_sha: row.get("git_commit_sha"),
+        use_latest_commit: row.get("use_latest_commit"),
+        auto_deploy: row.get("auto_deploy"),
+        immutable: row.get("immutable"),
+        adapter_type: row.get("adapter_type"),
+        schema_name: row.get("schema_name"),
+        threads: row.get("threads"),
+        profile_config: row.get::<sqlx::types::Json<Value>, _>("profile_config").0,
+        profile_secrets: row.get::<sqlx::types::Json<Value>, _>("profile_secrets").0,
+        branch_options: row.get::<sqlx::types::Json<Value>, _>("branch_options").0,
+        commit_options: row.get::<sqlx::types::Json<Value>, _>("commit_options").0,
+        status: row.get("status"),
+        validation_error: row.get("validation_error"),
+        validation_invocation_id: row.get("validation_invocation_id"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        validated_at: row.get("validated_at"),
+    }
+}
+
 fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord {
     let metadata: sqlx::types::Json<Value> = row.get("metadata");
     let profile_config: sqlx::types::Json<Value> = row.get("profile_config");
@@ -2856,6 +3414,9 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         baseline_environment_slug: row.get("baseline_environment_slug"),
         git_branch: row.get("git_branch"),
         git_commit_sha: row.get("git_commit_sha"),
+        use_latest_commit: row.get("use_latest_commit"),
+        auto_deploy: row.get("auto_deploy"),
+        immutable: row.get("immutable"),
         pr_number: row.get("pr_number"),
         status: row.get("status"),
         adapter_type: row.get("adapter_type"),
@@ -2877,6 +3438,9 @@ fn environment_version_record_from_row(row: &sqlx::postgres::PgRow) -> Environme
         reason: row.get("reason"),
         git_branch: row.get("git_branch"),
         git_commit_sha: row.get("git_commit_sha"),
+        use_latest_commit: row.get("use_latest_commit"),
+        auto_deploy: row.get("auto_deploy"),
+        immutable: row.get("immutable"),
         baseline_environment_id: row.get("baseline_environment_id"),
         metadata: row.get::<sqlx::types::Json<Value>, _>("metadata").0,
     }

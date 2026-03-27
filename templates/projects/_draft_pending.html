@@ -1,8 +1,12 @@
 <div
   class="rounded-xl border border-sky-200 bg-sky-50 px-4 py-4 text-sm text-sky-900"
+  x-init="$dispatch('project-draft-state', { status: 'validating' })"
+  {% if draft.has_validation_stream %}
+  x-data="projectValidationProgress('{{ draft.validation_sse_url }}', '{{ draft.status_url }}')"
+  {% endif %}
   {% if should_poll %}
-  hx-get="/ui/project-drafts/{{ draft.id }}"
-  hx-trigger="load delay:1s"
+  hx-get="{{ draft.status_url }}"
+  hx-trigger="load delay:2s"
   hx-swap="outerHTML"
   {% endif %}
 >
@@ -12,5 +16,34 @@
       <div class="mt-1 text-sky-800">{{ draft.git_repo_url }} · {{ draft.project_root }}</div>
     </div>
     <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ draft.status_class }}">{{ draft.status }}</span>
+  </div>
+  <div class="mt-4 rounded-lg border border-sky-200 bg-white/70 px-4 py-4">
+    <div class="text-xs font-medium uppercase tracking-wide text-sky-700">Validation Steps</div>
+    <div class="mt-3 space-y-2">
+      <template x-for="step in steps" :key="step.key">
+        <div class="flex items-center justify-between gap-4 rounded-lg border px-3 py-2 text-sm"
+             :class="stepClasses(step.state)">
+          <div class="flex items-center gap-3">
+            <span class="inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold"
+                  :class="stepIconClasses(step.state)"
+                  x-text="stepGlyph(step.state)"></span>
+            <div>
+              <div class="font-medium" x-text="step.label"></div>
+              <div class="text-xs text-slate-500" x-text="step.hint"></div>
+            </div>
+          </div>
+          <div class="text-xs font-medium uppercase tracking-wide" x-text="step.state"></div>
+        </div>
+      </template>
+    </div>
+  </div>
+  <div class="mt-4 rounded-lg border border-sky-200 bg-white/70">
+    <div class="border-b border-sky-200 px-3 py-2 text-xs font-medium uppercase tracking-wide text-sky-700">
+      Validation Progress
+    </div>
+    <pre
+      x-ref="log"
+      class="max-h-56 overflow-y-auto whitespace-pre-wrap px-3 py-3 font-mono text-xs leading-5 text-slate-800"
+    >Waiting for worker validation output…</pre>
   </div>
 </div>

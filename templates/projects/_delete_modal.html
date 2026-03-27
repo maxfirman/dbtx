@@ -1,0 +1,47 @@
+<div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
+  <div class="w-full max-w-xl rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div class="flex items-start justify-between border-b border-slate-200 px-6 py-4">
+      <div>
+        <h2 class="text-xl font-semibold tracking-tight text-slate-900">Delete Project</h2>
+        <p class="mt-1 text-sm text-slate-600">This permanently deletes the project and its project-owned data.</p>
+      </div>
+      <button class="rounded-md px-2 py-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900" onclick="document.getElementById('modal-root').innerHTML = ''">✕</button>
+    </div>
+    <form
+      x-data="projectDeleteConfirm('{{ project.project_id }}')"
+      @submit="submitting = true"
+      class="space-y-5 px-6 py-5"
+      hx-post="{{ project.delete_url }}"
+      hx-target="body"
+      hx-swap="innerHTML"
+    >
+      <div class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-900">
+        <div class="font-medium">{{ project.project_name }}</div>
+        <div class="mt-1 text-rose-800">{{ project.project_id }}</div>
+      </div>
+      <label class="block">
+        <span class="mb-2 block text-sm font-medium text-slate-700">Type the project id to confirm</span>
+        <input
+          x-model="typed"
+          type="text"
+          class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+          placeholder="{{ project.project_id }}"
+          autocomplete="off"
+        >
+      </label>
+      {% if error.is_some() %}
+      <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+        {{ error.as_deref().unwrap_or("") }}
+      </div>
+      {% endif %}
+      <div class="flex items-center justify-end gap-3">
+        <button type="button" class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="document.getElementById('modal-root').innerHTML = ''">Cancel</button>
+        <button
+          type="submit"
+          :disabled="!matches || submitting"
+          :class="buttonClasses()"
+        >Delete Project</button>
+      </div>
+    </form>
+  </div>
+</div>

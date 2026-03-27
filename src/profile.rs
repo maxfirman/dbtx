@@ -347,6 +347,15 @@ pub fn validate_resolved_profile(adapter_type: &str, resolved: &Value) -> AppRes
 }
 
 pub fn encrypt_json(value: &Value) -> AppResult<Value> {
+    if value.is_null() {
+        return Ok(json!({}));
+    }
+    if let Some(object) = value.as_object()
+        && object.is_empty()
+    {
+        return Ok(json!({}));
+    }
+
     let key = derive_key()?;
     let cipher =
         Aes256GcmSiv::new_from_slice(&key).map_err(|err| AppError::Encryption(err.to_string()))?;

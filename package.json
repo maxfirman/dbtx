@@ -1,0 +1,12 @@
+{
+  "name": "dbtx-ui-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.2",
+    "testcontainers": "^11.7.1"
+  }
+}

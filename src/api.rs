@@ -28,6 +28,11 @@ pub struct ProjectResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProjectDeleteResponse {
+    pub deleted_project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProjectsResponse {
     pub projects: Vec<ProjectRecord>,
 }
@@ -140,6 +145,8 @@ pub enum InvocationCommandApi {
     Seed,
     Release,
     ProjectValidate,
+    EnvironmentPrepare,
+    EnvironmentValidate,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -209,6 +216,17 @@ pub enum InvocationExecutionSpecApi {
     ProjectValidation {
         repo_url: String,
         project_root: String,
+    },
+    EnvironmentPrepare {
+        repo_url: String,
+        selected_branch: Option<String>,
+    },
+    EnvironmentValidate {
+        repo_url: String,
+        commit_sha: String,
+        project_root: String,
+        selected_branch: Option<String>,
+        profiles_yml: String,
     },
 }
 

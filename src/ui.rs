@@ -5,16 +5,20 @@ use crate::api::{
 use crate::db::{EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
 use crate::error::{AppError, AppResult};
 use crate::server::AppState;
-use crate::services::{ProjectCreateRequest, ProjectService};
+use crate::services::{
+    EnvironmentDraftUpdateRequest, EnvironmentService, InvocationCommand, ProjectCreateRequest,
+    ProjectService,
+};
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Duration;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -22,11 +26,35 @@ pub fn router() -> Router<AppState> {
         .route("/", get(dashboard))
         .route("/ui/projects", get(projects_index))
         .route("/ui/projects/new", get(project_create_modal))
+        .route(
+            "/ui/projects/{project_id}/environments/new",
+            get(environment_create_modal),
+        )
+        .route(
+            "/ui/projects/{project_id}/delete",
+            get(project_delete_modal).post(project_delete),
+        )
         .route("/ui/project-drafts", post(project_draft_create))
         .route("/ui/project-drafts/{draft_id}", get(project_draft_status))
         .route(
             "/ui/project-drafts/{draft_id}/confirm",
             post(project_draft_confirm),
+        )
+        .route(
+            "/ui/environment-drafts/{draft_id}",
+            get(environment_draft_status),
+        )
+        .route(
+            "/ui/environment-drafts/{draft_id}/branch",
+            post(environment_draft_branch_refresh),
+        )
+        .route(
+            "/ui/environment-drafts/{draft_id}/validate",
+            post(environment_draft_validate),
+        )
+        .route(
+            "/ui/environment-drafts/{draft_id}/confirm",
+            post(environment_draft_confirm),
         )
         .route("/ui/invocations", get(invocations_index))
         .route("/ui/invocations/{id}", get(invocation_detail))
@@ -62,6 +90,7 @@ impl IntoResponse for UiError {
             AppError::ProjectIdNotFound(_)
             | AppError::EnvironmentNotFound(_, _)
             | AppError::EnvironmentVersionNotFound(_, _, _) => (StatusCode::NOT_FOUND, "Not Found"),
+            AppError::ProjectDeleteBlocked(_) => (StatusCode::CONFLICT, "Conflict"),
             AppError::Io(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 (StatusCode::NOT_FOUND, "Not Found")
             }
@@ -148,11 +177,101 @@ struct ProjectDraftForm {
     project_root: String,
 }
 
+#[derive(Debug, Default, Deserialize, Clone)]
+struct EnvironmentDraftForm {
+    slug: String,
+    git_branch: String,
+    git_commit_sha: String,
+    use_latest_commit: Option<String>,
+    auto_deploy: Option<String>,
+    immutable: Option<String>,
+    adapter_type: String,
+    schema_name: String,
+    threads: Option<i32>,
+    profile_config_json: Option<String>,
+    profile_secrets_json: Option<String>,
+}
+
 async fn project_create_modal() -> Result<Html<String>, UiError> {
     render_template(&ProjectCreateModalTemplate {
         draft: ProjectDraftForm::default(),
         error: None,
     })
+}
+
+async fn environment_create_modal(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Html<String>, UiError> {
+    let service = EnvironmentService::new(state.db());
+    let draft = service.create_draft(project_id).await?;
+    start_environment_draft_prepare(&state, draft.id).await?;
+    render_environment_draft_modal(state.db(), &service.get_draft(draft.id).await?).await
+}
+
+async fn project_delete_modal(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Html<String>, UiError> {
+    let project = ProjectService::new(state.db()).show(project_id).await?;
+    render_template(&ProjectDeleteModalTemplate {
+        project: project_summary_view(&project),
+        error: None,
+    })
+}
+
+async fn environment_draft_status(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+) -> Result<Html<String>, UiError> {
+    render_environment_draft_modal(state.db(), &EnvironmentService::new(state.db()).get_draft(draft_id).await?).await
+}
+
+async fn environment_draft_branch_refresh(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+    Form(form): Form<EnvironmentDraftForm>,
+) -> Result<Html<String>, UiError> {
+    let service = EnvironmentService::new(state.db());
+    let prepared = service
+        .refresh_draft_branch(draft_id, environment_draft_update_request(form)?)
+        .await?;
+    start_environment_draft_prepared(&state, prepared).await?;
+    render_environment_draft_modal(state.db(), &service.get_draft(draft_id).await?).await
+}
+
+async fn environment_draft_validate(
+    State(state): State<AppState>,
+    Path(draft_id): Path<Uuid>,
+    Form(form): Form<EnvironmentDraftForm>,
+) -> Result<Html<String>, UiError> {
+    let service = EnvironmentService::new(state.db());
+    let prepared = service
+        .prepare_draft_validation(draft_id, environment_draft_update_request(form)?)
+        .await?;
+    start_environment_draft_validation(&state, prepared).await?;
+    render_environment_draft_modal(state.db(), &service.get_draft(draft_id).await?).await
+}
+
+async fn environment_draft_confirm(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(draft_id): Path<Uuid>,
+) -> Result<impl IntoResponse, UiError> {
+    let environment = EnvironmentService::new(state.db()).confirm_draft(draft_id).await?;
+    let redirect = format!(
+        "/ui/projects/{}/environments/{}",
+        environment.project_ref, environment.slug
+    );
+    if is_htmx(&headers) {
+        let mut response = Html(String::new()).into_response();
+        response
+            .headers_mut()
+            .insert("HX-Redirect", HeaderValue::from_str(&redirect).unwrap());
+        Ok(response)
+    } else {
+        Ok(Redirect::to(&redirect).into_response())
+    }
 }
 
 async fn project_draft_create(
@@ -168,13 +287,18 @@ async fn project_draft_create(
         .await
     {
         Ok(draft) => draft,
-        Err(err) => return render_template(&ProjectDraftFailedTemplate { error: err.to_string() }),
+        Err(err) => {
+            return render_template(&ProjectDraftFailedTemplate {
+                error: err.to_string(),
+            });
+        }
     };
     if let Err(err) = start_project_draft_validation(&state, draft.id).await {
         return render_template(&ProjectDraftFailedTemplate {
             error: err.0.to_string(),
         });
     }
+    let draft = service.get_draft(draft.id).await?;
     render_project_draft_fragment(&draft, None, true)
 }
 
@@ -183,21 +307,58 @@ async fn project_draft_status(
     Path(draft_id): Path<Uuid>,
 ) -> Result<Html<String>, UiError> {
     let draft = ProjectService::new(state.db()).get_draft(draft_id).await?;
-    render_project_draft_fragment(&draft, None, false)
+    render_project_draft_fragment(
+        &draft,
+        None,
+        !is_terminal_project_draft_status(&draft.status),
+    )
 }
 
 async fn project_draft_confirm(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(draft_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, UiError> {
-    ProjectService::new(state.db()).confirm_draft(draft_id).await?;
-    Ok(Redirect::to("/ui/projects"))
+    ProjectService::new(state.db())
+        .confirm_draft(draft_id)
+        .await?;
+    if is_htmx(&headers) {
+        let mut response = Html(String::new()).into_response();
+        response
+            .headers_mut()
+            .insert("HX-Redirect", HeaderValue::from_static("/ui/projects"));
+        Ok(response)
+    } else {
+        Ok(Redirect::to("/ui/projects").into_response())
+    }
 }
 
-async fn start_project_draft_validation(
-    state: &AppState,
-    draft_id: Uuid,
-) -> Result<(), UiError> {
+async fn project_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, UiError> {
+    let service = ProjectService::new(state.db());
+    if let Err(err) = service.delete(project_id.clone()).await {
+        let project = service.show(project_id).await?;
+        return Ok(render_template(&ProjectDeleteModalTemplate {
+            project: project_summary_view(&project),
+            error: Some(err.to_string()),
+        })?
+        .into_response());
+    }
+    if is_htmx(&headers) {
+        let mut response = Html(String::new()).into_response();
+        response
+            .headers_mut()
+            .insert("HX-Redirect", HeaderValue::from_static("/ui/projects"));
+        Ok(response)
+    } else {
+        Ok(Redirect::to("/ui/projects").into_response())
+    }
+}
+
+async fn start_project_draft_validation(state: &AppState, draft_id: Uuid) -> Result<(), UiError> {
     let prepared = ProjectService::new(state.db())
         .prepare_draft_validation(draft_id)
         .await?;
@@ -210,6 +371,7 @@ async fn start_project_draft_validation(
             project_id: None,
             environment_id: None,
             project_draft_id: Some(prepared.draft.id),
+            environment_draft_id: None,
             command: crate::services::InvocationCommand::ProjectValidate
                 .as_str()
                 .to_string(),
@@ -254,6 +416,128 @@ async fn start_project_draft_validation(
     Ok(())
 }
 
+async fn start_environment_draft_prepare(state: &AppState, draft_id: Uuid) -> Result<(), UiError> {
+    let prepared = EnvironmentService::new(state.db())
+        .prepare_draft_git_metadata(draft_id)
+        .await?;
+    start_environment_draft_prepared(state, prepared).await
+}
+
+async fn start_environment_draft_prepared(
+    state: &AppState,
+    prepared: crate::services::EnvironmentDraftCreatePrepared,
+) -> Result<(), UiError> {
+    let invocation_id = prepared.invocation_id;
+    state
+        .db()
+        .create_invocation(crate::db::CreateInvocationInput {
+            invocation_id,
+            run_id: None,
+            project_id: None,
+            environment_id: None,
+            project_draft_id: None,
+            environment_draft_id: Some(prepared.draft.id),
+            command: InvocationCommand::EnvironmentPrepare.as_str().to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: prepared.worker_queue,
+            execution_spec: Some(crate::api::InvocationExecutionSpecApi::EnvironmentPrepare {
+                repo_url: prepared.spec.repo_url,
+                selected_branch: prepared.spec.selected_branch,
+            }),
+            promote_base_manifest: false,
+            claim_deadline_at: Some(
+                Utc::now()
+                    + Duration::from_std(crate::execution::claim_startup_timeout(
+                        InvocationExecutionModeApi::Server,
+                    ))
+                    .expect("duration"),
+            ),
+        })
+        .await?;
+    state
+        .db()
+        .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
+        .await?;
+    let started_event = crate::api::InvocationEvent {
+        event_type: "invocation.started".to_string(),
+        timestamp: Utc::now(),
+        text: None,
+        stream: None,
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        exit_code: None,
+        error: None,
+    };
+    let seq = state
+        .db()
+        .append_invocation_event(invocation_id, &started_event)
+        .await?;
+    state
+        .publish_invocation_event(invocation_id, seq, started_event)
+        .await;
+    Ok(())
+}
+
+async fn start_environment_draft_validation(
+    state: &AppState,
+    prepared: crate::services::EnvironmentDraftValidationPrepared,
+) -> Result<(), UiError> {
+    let invocation_id = prepared.invocation_id;
+    state
+        .db()
+        .create_invocation(crate::db::CreateInvocationInput {
+            invocation_id,
+            run_id: None,
+            project_id: None,
+            environment_id: None,
+            project_draft_id: None,
+            environment_draft_id: Some(prepared.draft.id),
+            command: InvocationCommand::EnvironmentValidate.as_str().to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: prepared.worker_queue,
+            execution_spec: Some(crate::api::InvocationExecutionSpecApi::EnvironmentValidate {
+                repo_url: prepared.spec.repo_url,
+                commit_sha: prepared.spec.commit_sha,
+                project_root: prepared.spec.project_root,
+                selected_branch: prepared.spec.selected_branch,
+                profiles_yml: prepared.spec.profiles_yml,
+            }),
+            promote_base_manifest: false,
+            claim_deadline_at: Some(
+                Utc::now()
+                    + Duration::from_std(crate::execution::claim_startup_timeout(
+                        InvocationExecutionModeApi::Server,
+                    ))
+                    .expect("duration"),
+            ),
+        })
+        .await?;
+    state
+        .db()
+        .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
+        .await?;
+    let started_event = crate::api::InvocationEvent {
+        event_type: "invocation.started".to_string(),
+        timestamp: Utc::now(),
+        text: None,
+        stream: None,
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        exit_code: None,
+        error: None,
+    };
+    let seq = state
+        .db()
+        .append_invocation_event(invocation_id, &started_event)
+        .await?;
+    state
+        .publish_invocation_event(invocation_id, seq, started_event)
+        .await;
+    Ok(())
+}
+
 fn render_project_draft_fragment(
     draft: &crate::db::ProjectDraftRecord,
     error: Option<String>,
@@ -264,13 +548,64 @@ fn render_project_draft_fragment(
             draft: project_draft_view(draft),
         }),
         "failed" => render_template(&ProjectDraftFailedTemplate {
-            error: error.or_else(|| draft.validation_error.clone()).unwrap_or_default(),
+            error: error
+                .or_else(|| draft.validation_error.clone())
+                .unwrap_or_default(),
         }),
         _ => render_template(&ProjectDraftPendingTemplate {
             draft: project_draft_view(draft),
             should_poll,
         }),
     }
+}
+
+fn environment_draft_update_request(form: EnvironmentDraftForm) -> Result<EnvironmentDraftUpdateRequest, UiError> {
+    let profile_config = parse_json_object(form.profile_config_json.as_deref().unwrap_or("{}"))?;
+    let profile_secrets = parse_json_object(form.profile_secrets_json.as_deref().unwrap_or("{}"))?;
+    Ok(EnvironmentDraftUpdateRequest {
+        project: String::new(),
+        slug: form.slug,
+        git_branch: if form.git_branch.trim().is_empty() { None } else { Some(form.git_branch) },
+        git_commit_sha: if form.git_commit_sha.trim().is_empty() { None } else { Some(form.git_commit_sha) },
+        use_latest_commit: form.use_latest_commit.is_some(),
+        auto_deploy: form.auto_deploy.is_some(),
+        immutable: form.immutable.is_some(),
+        adapter_type: form.adapter_type,
+        schema_name: form.schema_name,
+        threads: form.threads,
+        profile_config,
+        profile_secrets,
+    })
+}
+
+fn parse_json_object(input: &str) -> Result<Value, UiError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    let value: Value = serde_json::from_str(trimmed)
+        .map_err(AppError::from)
+        .map_err(UiError::from)?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(UiError(AppError::InvalidProfileConfig("expected object".to_string())))
+    }
+}
+
+async fn render_environment_draft_modal(
+    db: &crate::db::Db,
+    draft: &crate::db::EnvironmentDraftRecord,
+) -> Result<Html<String>, UiError> {
+    let project = db.get_project_by_id(draft.project_id).await.map_err(UiError)?;
+    render_template(&EnvironmentCreateModalTemplate {
+        project: project_summary_view(&project),
+        draft: environment_draft_view(&project, draft)?,
+    })
+}
+
+fn is_terminal_project_draft_status(status: &str) -> bool {
+    matches!(status, "validated" | "failed")
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -599,6 +934,8 @@ struct ProjectSummaryView {
     mode: String,
     git_repo_url: String,
     project_root: String,
+    delete_url: String,
+    create_environment_url: String,
 }
 
 #[derive(Clone)]
@@ -616,6 +953,59 @@ struct ProjectDraftView {
     status_class: &'static str,
     project_name: String,
     default_branch: String,
+    has_validation_stream: bool,
+    validation_sse_url: String,
+    status_url: String,
+}
+
+#[derive(Clone, Serialize)]
+struct EnvironmentDraftPairView {
+    key: String,
+    value: String,
+}
+
+#[derive(Clone)]
+struct EnvironmentDraftBranchOptionView {
+    name: String,
+    selected: bool,
+}
+
+#[derive(Clone)]
+struct EnvironmentDraftCommitOptionView {
+    sha: String,
+    short_sha: String,
+    summary: String,
+    committed_at: String,
+    selected: bool,
+}
+
+#[derive(Clone)]
+struct EnvironmentDraftView {
+    status: String,
+    slug: String,
+    git_branch: String,
+    git_commit_sha: String,
+    latest_commit_sha: String,
+    use_latest_commit: bool,
+    auto_deploy: bool,
+    immutable: bool,
+    adapter_type: String,
+    schema_name: String,
+    threads: String,
+    branch_options: Vec<EnvironmentDraftBranchOptionView>,
+    commit_options: Vec<EnvironmentDraftCommitOptionView>,
+    status_url: String,
+    branch_refresh_url: String,
+    validate_url: String,
+    confirm_url: String,
+    validation_error: String,
+    validation_sse_url: String,
+    profile_config_pairs_json: String,
+    profile_secret_pairs_json: String,
+    is_loading: bool,
+    is_validating: bool,
+    is_validated: bool,
+    is_failed: bool,
 }
 
 #[derive(Clone)]
@@ -719,6 +1109,8 @@ fn project_summary_view(project: &ProjectRecord) -> ProjectSummaryView {
         mode: project.mode.clone(),
         git_repo_url: project.git_repo_url.clone().unwrap_or_default(),
         project_root: project.project_root.clone().unwrap_or_default(),
+        delete_url: format!("/ui/projects/{}/delete", project.project_id),
+        create_environment_url: format!("/ui/projects/{}/environments/new", project.project_id),
     }
 }
 
@@ -737,6 +1129,10 @@ fn environment_link_view(environment: &EnvironmentRecord) -> EnvironmentLinkView
 }
 
 fn project_draft_view(draft: &crate::db::ProjectDraftRecord) -> ProjectDraftView {
+    let validation_sse_url = draft
+        .validation_invocation_id
+        .map(|id| format!("/v1/invocations/{id}/events"))
+        .unwrap_or_default();
     ProjectDraftView {
         id: draft.id.to_string(),
         git_repo_url: draft.git_repo_url.clone(),
@@ -745,7 +1141,118 @@ fn project_draft_view(draft: &crate::db::ProjectDraftRecord) -> ProjectDraftView
         status: draft.status.clone(),
         project_name: draft.project_name.clone().unwrap_or_default(),
         default_branch: draft.default_branch.clone().unwrap_or_default(),
+        has_validation_stream: !validation_sse_url.is_empty(),
+        validation_sse_url,
+        status_url: format!("/ui/project-drafts/{}", draft.id),
     }
+}
+
+fn environment_draft_view(
+    _project: &ProjectRecord,
+    draft: &crate::db::EnvironmentDraftRecord,
+) -> Result<EnvironmentDraftView, UiError> {
+    let config_pairs = json_object_pairs(&draft.profile_config);
+    let decrypted_secrets =
+        crate::profile::decrypt_json(&draft.profile_secrets).map_err(UiError)?;
+    let secret_pairs = json_object_pairs(&decrypted_secrets);
+    let branch_options = draft
+        .branch_options
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| {
+            value.as_str().map(|name| EnvironmentDraftBranchOptionView {
+                name: name.to_string(),
+                selected: draft.git_branch.as_deref() == Some(name),
+            })
+        })
+        .collect::<Vec<_>>();
+    let commit_options = draft
+        .commit_options
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| EnvironmentDraftCommitOptionView {
+            sha: value
+                .get("sha")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            short_sha: value
+                .get("short_sha")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            summary: value
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            committed_at: value
+                .get("committed_at")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            selected: value
+                .get("sha")
+                .and_then(Value::as_str)
+                == draft.git_commit_sha.as_deref(),
+        })
+        .collect::<Vec<_>>();
+    Ok(EnvironmentDraftView {
+        status: draft.status.clone(),
+        slug: draft.slug.clone(),
+        git_branch: draft.git_branch.clone().unwrap_or_default(),
+        git_commit_sha: draft.git_commit_sha.clone().unwrap_or_default(),
+        latest_commit_sha: draft.git_commit_sha.clone().unwrap_or_default(),
+        use_latest_commit: draft.use_latest_commit,
+        auto_deploy: draft.auto_deploy,
+        immutable: draft.immutable,
+        adapter_type: draft.adapter_type.clone().unwrap_or_else(|| "postgres".to_string()),
+        schema_name: draft.schema_name.clone().unwrap_or_default(),
+        threads: draft.threads.map(|v| v.to_string()).unwrap_or_default(),
+        branch_options,
+        commit_options,
+        status_url: format!("/ui/environment-drafts/{}", draft.id),
+        branch_refresh_url: format!("/ui/environment-drafts/{}/branch", draft.id),
+        validate_url: format!("/ui/environment-drafts/{}/validate", draft.id),
+        confirm_url: format!("/ui/environment-drafts/{}/confirm", draft.id),
+        validation_error: draft.validation_error.clone().unwrap_or_default(),
+        validation_sse_url: draft
+            .validation_invocation_id
+            .map(|id| format!("/v1/invocations/{id}/events"))
+            .unwrap_or_default(),
+        profile_config_pairs_json: serde_json::to_string(&config_pairs)
+            .map_err(AppError::from)
+            .map_err(UiError::from)?,
+        profile_secret_pairs_json: serde_json::to_string(&secret_pairs)
+            .map_err(AppError::from)
+            .map_err(UiError::from)?,
+        is_loading: draft.status == "loading_git",
+        is_validating: draft.status == "validating",
+        is_validated: draft.status == "validated",
+        is_failed: draft.status == "failed",
+    })
+}
+
+fn json_object_pairs(value: &Value) -> Vec<EnvironmentDraftPairView> {
+    value
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .map(|(key, value)| EnvironmentDraftPairView {
+                    key: key.clone(),
+                    value: value
+                        .as_str()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| value.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn invocation_summary_view(invocation: &InvocationStatusResponse) -> InvocationSummaryView {
@@ -860,6 +1367,20 @@ struct ProjectCreateModalTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "projects/_delete_modal.html")]
+struct ProjectDeleteModalTemplate {
+    project: ProjectSummaryView,
+    error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "environments/_create_modal.html")]
+struct EnvironmentCreateModalTemplate {
+    project: ProjectSummaryView,
+    draft: EnvironmentDraftView,
+}
+
+#[derive(Template)]
 #[template(path = "projects/_draft_pending.html")]
 struct ProjectDraftPendingTemplate {
     draft: ProjectDraftView,
@@ -938,4 +1459,50 @@ struct EnvironmentPanelTemplate {
 struct ErrorTemplate<'a> {
     title: &'a str,
     message: &'a str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn draft(
+        status: &str,
+        validation_invocation_id: Option<Uuid>,
+    ) -> crate::db::ProjectDraftRecord {
+        crate::db::ProjectDraftRecord {
+            id: Uuid::new_v4(),
+            git_repo_url: "git@github.com:org/repo.git".to_string(),
+            project_root: "analytics/jaffle_shop".to_string(),
+            status: status.to_string(),
+            validation_error: None,
+            project_name: Some("jaffle_shop".to_string()),
+            default_branch: Some("main".to_string()),
+            validation_invocation_id,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            validated_at: None,
+        }
+    }
+
+    #[test]
+    fn pending_draft_fragment_includes_polling_and_sse_progress() {
+        let draft = draft("validating", Some(Uuid::nil()));
+        let rendered = render_project_draft_fragment(&draft, None, true)
+            .expect("render pending draft")
+            .0;
+
+        assert!(rendered.contains("hx-trigger=\"load delay:2s\""));
+        assert!(rendered.contains("/ui/project-drafts/"));
+        assert!(rendered.contains("/v1/invocations/00000000-0000-0000-0000-000000000000/events"));
+        assert!(rendered.contains("Validation Progress"));
+    }
+
+    #[test]
+    fn terminal_project_draft_statuses_are_detected() {
+        assert!(is_terminal_project_draft_status("validated"));
+        assert!(is_terminal_project_draft_status("failed"));
+        assert!(!is_terminal_project_draft_status("draft"));
+        assert!(!is_terminal_project_draft_status("validating"));
+    }
 }

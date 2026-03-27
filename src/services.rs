@@ -1,8 +1,9 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
-    CreateEnvironmentInput, CreateProjectDraftInput, CreateProjectInput, Db, EnvironmentRecord,
-    EnvironmentReleaseInput, EnvironmentVersionRecord, GitState, LocalEnvironmentUpsertInput,
-    ProjectDraftRecord, ProjectRecord, RunFinalization, RunStart, UpdateEnvironmentInput,
+    CreateEnvironmentDraftInput, CreateEnvironmentInput, CreateProjectDraftInput,
+    CreateProjectInput, Db, EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput,
+    EnvironmentVersionRecord, GitState, LocalEnvironmentUpsertInput, ProjectDraftRecord,
+    ProjectRecord, RunFinalization, RunStart, UpdateEnvironmentInput, UpdateEnvironmentDraftInput,
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
     read_dbt_project_name, read_git_state, spawn_dbt_child,
 };
@@ -10,7 +11,7 @@ use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
-use crate::profile::LocalTargetProfile;
+use crate::profile::{EnvironmentProfileRecord, LocalTargetProfile, resolve_runtime_profile, validate_environment_profile};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -34,6 +35,8 @@ pub enum InvocationCommand {
     Seed,
     Release,
     ProjectValidate,
+    EnvironmentPrepare,
+    EnvironmentValidate,
 }
 
 impl InvocationCommand {
@@ -46,11 +49,13 @@ impl InvocationCommand {
             Self::Seed => "seed",
             Self::Release => "release",
             Self::ProjectValidate => "project_validate",
+            Self::EnvironmentPrepare => "environment_prepare",
+            Self::EnvironmentValidate => "environment_validate",
         }
     }
 
     pub fn persists_state(self) -> bool {
-        !matches!(self, Self::Ls | Self::Release | Self::ProjectValidate)
+        !matches!(self, Self::Ls | Self::Release | Self::ProjectValidate | Self::EnvironmentPrepare | Self::EnvironmentValidate)
     }
 }
 
@@ -104,11 +109,28 @@ pub struct ProjectValidationSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct EnvironmentPrepareSpec {
+    pub repo_url: String,
+    pub selected_branch: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentValidationSpec {
+    pub repo_url: String,
+    pub commit_sha: String,
+    pub project_root: String,
+    pub selected_branch: Option<String>,
+    pub profiles_yml: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum PreparedExecutionSpec {
     Local(LocalExecutionSpec),
     Remote(RemoteExecutionSpec),
     ReleaseValidation(ReleaseValidationSpec),
     ProjectValidation(ProjectValidationSpec),
+    EnvironmentPrepare(EnvironmentPrepareSpec),
+    EnvironmentValidate(EnvironmentValidationSpec),
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +141,7 @@ pub struct LocalExecutionPrepared {
     pub project_id: Option<i64>,
     pub environment_id: Option<i64>,
     pub project_draft_id: Option<Uuid>,
+    pub environment_draft_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +165,38 @@ pub struct ProjectDraftValidationPrepared {
     pub invocation_id: Uuid,
     pub spec: ProjectValidationSpec,
     pub worker_queue: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentDraftCreatePrepared {
+    pub draft: EnvironmentDraftRecord,
+    pub invocation_id: Uuid,
+    pub spec: EnvironmentPrepareSpec,
+    pub worker_queue: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentDraftValidationPrepared {
+    pub draft: EnvironmentDraftRecord,
+    pub invocation_id: Uuid,
+    pub spec: EnvironmentValidationSpec,
+    pub worker_queue: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentDraftUpdateRequest {
+    pub project: String,
+    pub slug: String,
+    pub git_branch: Option<String>,
+    pub git_commit_sha: Option<String>,
+    pub use_latest_commit: bool,
+    pub auto_deploy: bool,
+    pub immutable: bool,
+    pub adapter_type: String,
+    pub schema_name: String,
+    pub threads: Option<i32>,
+    pub profile_config: Value,
+    pub profile_secrets: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -226,7 +281,10 @@ impl<'a> ProjectService<'a> {
         Self { db }
     }
 
-    pub async fn create_draft(&self, request: ProjectCreateRequest) -> AppResult<ProjectDraftRecord> {
+    pub async fn create_draft(
+        &self,
+        request: ProjectCreateRequest,
+    ) -> AppResult<ProjectDraftRecord> {
         self.db.require_current_schema().await?;
         self.db
             .create_project_draft(CreateProjectDraftInput {
@@ -242,10 +300,7 @@ impl<'a> ProjectService<'a> {
     ) -> AppResult<ProjectDraftValidationPrepared> {
         self.db.require_current_schema().await?;
         let invocation_id = Uuid::new_v4();
-        let draft = self
-            .db
-            .mark_project_draft_validating(draft_id)
-            .await?;
+        let draft = self.db.mark_project_draft_validating(draft_id).await?;
         Ok(ProjectDraftValidationPrepared {
             spec: ProjectValidationSpec {
                 repo_url: draft.git_repo_url.clone(),
@@ -304,6 +359,11 @@ impl<'a> ProjectService<'a> {
         self.db.require_current_schema().await?;
         self.db.get_project_by_project_id(&project).await
     }
+
+    pub async fn delete(&self, project: String) -> AppResult<()> {
+        self.db.require_current_schema().await?;
+        self.db.delete_project(&project).await
+    }
 }
 
 pub struct EnvironmentService<'a> {
@@ -337,6 +397,9 @@ impl<'a> EnvironmentService<'a> {
                 baseline_slug: request.baseline,
                 git_branch: request.git_branch,
                 git_commit_sha: request.git_commit_sha,
+                use_latest_commit: true,
+                auto_deploy: true,
+                immutable: false,
                 pr_number: request.pr_number,
                 status: request.status,
                 adapter_type: local_profile.adapter_type,
@@ -361,6 +424,9 @@ impl<'a> EnvironmentService<'a> {
                 baseline_slug: request.baseline,
                 git_branch: request.git_branch,
                 git_commit_sha: request.git_commit_sha,
+                use_latest_commit: None,
+                auto_deploy: None,
+                immutable: None,
                 pr_number: request.pr_number,
                 status: request.status,
                 adapter_type: request.adapter_type,
@@ -373,6 +439,163 @@ impl<'a> EnvironmentService<'a> {
                 profile_secrets: None,
             })
             .await
+    }
+
+    pub async fn create_draft(&self, project: String) -> AppResult<EnvironmentDraftRecord> {
+        self.db.require_current_schema().await?;
+        let project = self.db.get_project_by_project_id(&project).await?;
+        if project.mode != "remote" {
+            return Err(AppError::RemoteExecutionRequiresRemoteProject(
+                project.project_id,
+                project.mode,
+            ));
+        }
+        self.db
+            .create_environment_draft(CreateEnvironmentDraftInput {
+                project_id: project.id,
+                default_branch: project.default_branch,
+            })
+            .await
+    }
+
+    pub async fn get_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentDraftRecord> {
+        self.db.require_current_schema().await?;
+        self.db.get_environment_draft(draft_id).await
+    }
+
+    pub async fn update_draft(
+        &self,
+        draft_id: Uuid,
+        request: EnvironmentDraftUpdateRequest,
+    ) -> AppResult<EnvironmentDraftRecord> {
+        self.db.require_current_schema().await?;
+        self.db
+            .update_environment_draft(
+                draft_id,
+                UpdateEnvironmentDraftInput {
+                    slug: request.slug,
+                    git_branch: request.git_branch,
+                    git_commit_sha: request.git_commit_sha,
+                    use_latest_commit: request.use_latest_commit,
+                    auto_deploy: request.auto_deploy,
+                    immutable: request.immutable,
+                    adapter_type: Some(request.adapter_type),
+                    schema_name: Some(request.schema_name),
+                    threads: request.threads,
+                    profile_config: request.profile_config,
+                    profile_secrets: request.profile_secrets,
+                },
+            )
+            .await
+    }
+
+    pub async fn prepare_draft_git_metadata(
+        &self,
+        draft_id: Uuid,
+    ) -> AppResult<EnvironmentDraftCreatePrepared> {
+        self.db.require_current_schema().await?;
+        let invocation_id = Uuid::new_v4();
+        let draft = self.db.mark_environment_draft_loading_git(draft_id).await?;
+        let project = self.db.get_project_by_id(draft.project_id).await?;
+        let repo_url = project
+            .git_repo_url
+            .ok_or_else(|| AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone()))?;
+        Ok(EnvironmentDraftCreatePrepared {
+            draft,
+            invocation_id,
+            spec: EnvironmentPrepareSpec {
+                repo_url,
+                selected_branch: None,
+            },
+            worker_queue: "generic".to_string(),
+        })
+    }
+
+    pub async fn refresh_draft_branch(
+        &self,
+        draft_id: Uuid,
+        request: EnvironmentDraftUpdateRequest,
+    ) -> AppResult<EnvironmentDraftCreatePrepared> {
+        let draft = self.update_draft(draft_id, request).await?;
+        let invocation_id = Uuid::new_v4();
+        let draft = self.db.mark_environment_draft_loading_git(draft.id).await?;
+        let project = self.db.get_project_by_id(draft.project_id).await?;
+        let repo_url = project
+            .git_repo_url
+            .ok_or_else(|| AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone()))?;
+        Ok(EnvironmentDraftCreatePrepared {
+            draft: draft.clone(),
+            invocation_id,
+            spec: EnvironmentPrepareSpec {
+                repo_url,
+                selected_branch: draft.git_branch.clone(),
+            },
+            worker_queue: "generic".to_string(),
+        })
+    }
+
+    pub async fn prepare_draft_validation(
+        &self,
+        draft_id: Uuid,
+        request: EnvironmentDraftUpdateRequest,
+    ) -> AppResult<EnvironmentDraftValidationPrepared> {
+        let draft = self.update_draft(draft_id, request).await?;
+        validate_environment_profile(
+            draft.adapter_type.as_deref().unwrap_or_default(),
+            draft.schema_name.as_deref().unwrap_or_default(),
+            draft.threads,
+            &draft.profile_config,
+            &crate::profile::decrypt_json(&draft.profile_secrets)?,
+            false,
+        )?;
+        let invocation_id = Uuid::new_v4();
+        let draft = self.db.mark_environment_draft_validating(draft.id).await?;
+        let project = self.db.get_project_by_id(draft.project_id).await?;
+        let repo_url = project
+            .git_repo_url
+            .ok_or_else(|| AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone()))?;
+        let project_root = project
+            .project_root
+            .ok_or_else(|| AppError::RemoteExecutionRequiresProjectRoot(project.project_id.clone()))?;
+        let profile_record = EnvironmentProfileRecord {
+            adapter_type: draft
+                .adapter_type
+                .clone()
+                .ok_or_else(|| AppError::InvalidProfileConfig("adapter type is required".to_string()))?,
+            schema_name: draft
+                .schema_name
+                .clone()
+                .ok_or_else(|| AppError::InvalidProfileConfig("schema is required".to_string()))?,
+            threads: draft.threads,
+            profile_config: draft.profile_config.clone(),
+            profile_secrets: draft.profile_secrets.clone(),
+        };
+        let profile_name = project.project_name.clone();
+        let resolved = resolve_runtime_profile(&profile_name, &draft.slug, &profile_record)?;
+        let generated = resolved.generate()?;
+        let profiles_yml = std::fs::read_to_string(generated.temp_dir.path().join("profiles.yml"))?;
+        let commit_sha = draft
+            .git_commit_sha
+            .clone()
+            .ok_or_else(|| AppError::RemoteExecutionRequiresCommitSha(project.project_id.clone(), draft.slug.clone()))?;
+        let selected_branch = draft.git_branch.clone();
+        Ok(EnvironmentDraftValidationPrepared {
+            draft,
+            invocation_id,
+            spec: EnvironmentValidationSpec {
+                repo_url,
+                commit_sha,
+                project_root,
+                selected_branch,
+                profiles_yml,
+            },
+            worker_queue: "generic".to_string(),
+        })
+    }
+
+    pub async fn confirm_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentRecord> {
+        self.db.require_current_schema().await?;
+        self.db.confirm_environment_draft(draft_id).await
     }
 
     pub async fn release(
@@ -672,6 +895,7 @@ impl<'a> InvocationService<'a> {
             project_id: Some(project.id),
             environment_id: Some(environment.id),
             project_draft_id: None,
+            environment_draft_id: None,
         })
     }
 
@@ -796,6 +1020,7 @@ impl<'a> InvocationService<'a> {
             project_id: Some(project.id),
             environment_id: Some(environment.id),
             project_draft_id: None,
+            environment_draft_id: None,
         })
     }
 
@@ -835,6 +1060,7 @@ impl<'a> InvocationService<'a> {
             project_id: Some(project.id),
             environment_id: Some(environment.id),
             project_draft_id: None,
+            environment_draft_id: None,
         })
     }
 

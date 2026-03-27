@@ -2,3 +2,6 @@
 .env
 .sqlx
 warehouse.duckdb
+node_modules/
+test-results/
+playwright-report/

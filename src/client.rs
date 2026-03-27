@@ -6,9 +6,9 @@ use crate::api::{
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
     InvocationEvent, InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest,
     InvocationHeartbeatResponse, InvocationListApiRequest, InvocationStatusResponse,
-    InvocationsResponse, MigrateResponse, ProjectDraftCreateApiRequest, ProjectDraftResponse,
-    ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse,
-    QueuesResponse, WorkersResponse,
+    InvocationsResponse, MigrateResponse, ProjectDeleteResponse, ProjectDraftCreateApiRequest,
+    ProjectDraftResponse, ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest,
+    ProjectsResponse, QueuesResponse, WorkersResponse,
 };
 use crate::error::{AppError, AppResult};
 use futures_util::StreamExt;
@@ -59,12 +59,24 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn project_delete(&self, project_id: &str) -> AppResult<ProjectDeleteResponse> {
+        self.send(
+            self.http
+                .delete(self.url(&format!("/v1/projects/{project_id}"))),
+        )
+        .await
+    }
+
     pub async fn project_draft_create(
         &self,
         request: ProjectDraftCreateApiRequest,
     ) -> AppResult<ProjectDraftResponse> {
-        self.send(self.http.post(self.url("/v1/project-drafts")).json(&request))
-            .await
+        self.send(
+            self.http
+                .post(self.url("/v1/project-drafts"))
+                .json(&request),
+        )
+        .await
     }
 
     pub async fn project_draft_get(&self, draft_id: Uuid) -> AppResult<ProjectDraftResponse> {

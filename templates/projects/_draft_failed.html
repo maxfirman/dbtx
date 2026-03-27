@@ -1,5 +1,48 @@
-<div class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-800">
-  <div class="font-medium">Validation failed</div>
-  <div class="mt-1">{{ error }}</div>
-  <div class="mt-3 text-rose-700">Edit the repository or project path above and try again.</div>
+<div
+  class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-900"
+  data-validation-status="failed"
+  x-data="projectValidationFailure($el.dataset.stepSnapshot, $el.dataset.logSnapshot)"
+  x-init="$dispatch('project-draft-state', { status: 'failed', confirmUrl: '' })"
+>
+  <div class="flex items-center justify-between gap-4">
+    <div>
+      <div class="font-medium">Validation failed</div>
+      <div class="mt-1 text-rose-800">The repository or project path could not be validated.</div>
+    </div>
+    <span class="rounded-full bg-rose-100 px-2.5 py-1 text-xs font-medium text-rose-800">failed</span>
+  </div>
+  <div class="mt-4 rounded-lg border border-rose-200 bg-white/70 px-4 py-4">
+    <div class="text-xs font-medium uppercase tracking-wide text-rose-700">Validation Steps</div>
+    <div class="mt-3 space-y-2">
+      <template x-for="step in steps" :key="step.key">
+        <div class="flex items-center justify-between gap-4 rounded-lg border px-3 py-2 text-sm"
+             :class="stepClasses(step.state)">
+          <div class="flex items-center gap-3">
+            <span class="inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold"
+                  :class="stepIconClasses(step.state)"
+                  x-text="stepGlyph(step.state)"></span>
+            <div>
+              <div class="font-medium" x-text="step.label"></div>
+              <div class="text-xs text-slate-500" x-text="step.hint"></div>
+            </div>
+          </div>
+          <div class="text-xs font-medium uppercase tracking-wide" x-text="step.state"></div>
+        </div>
+      </template>
+    </div>
+  </div>
+  <div class="mt-4 rounded-lg border border-rose-200 bg-white/70">
+    <div class="border-b border-rose-200 px-3 py-2 text-xs font-medium uppercase tracking-wide text-rose-700">
+      Validation Progress
+    </div>
+    <pre
+      class="max-h-56 overflow-y-auto whitespace-pre-wrap px-3 py-3 font-mono text-xs leading-5 text-slate-800"
+      x-text="logText || 'No worker output was captured.'"
+    ></pre>
+  </div>
+  <div class="mt-4 rounded-lg border border-rose-200 bg-white/70 px-4 py-3 text-sm text-rose-800">
+    <div class="font-medium">Validation error</div>
+    <div class="mt-1">{{ error }}</div>
+    <div class="mt-3">Fix the repository or project path above, then click <span class="font-semibold">Create Project</span> again to retry validation.</div>
+  </div>
 </div>
