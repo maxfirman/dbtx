@@ -1165,11 +1165,26 @@ async fn invocation_create(
     let runtime_config = state.runtime_config.clone();
     let db = state.db.clone();
     let service = InvocationService::new(&db);
-    let execution_mode = match request.execution_mode {
+    let derived_execution_mode = if let Some(project_id) = request.project_id.as_deref() {
+        let environment_slug = request
+            .environment_slug
+            .as_deref()
+            .ok_or(AppError::RemoteExecutionRequiresEnvironmentSlug)?;
+        let environment = db.get_environment(project_id, environment_slug).await?;
+        let project = db.get_project_by_project_id(&environment.project_ref).await?;
+        match project.mode.as_str() {
+            "remote" => InvocationExecutionModeApi::Server,
+            "local" => InvocationExecutionModeApi::Local,
+            other => return Err(ApiError(AppError::InvalidProjectMode(other.to_string()))),
+        }
+    } else {
+        InvocationExecutionModeApi::Local
+    };
+    let execution_mode = match derived_execution_mode {
         crate::api::InvocationExecutionModeApi::Server => ExecutionMode::Server,
         crate::api::InvocationExecutionModeApi::Local => ExecutionMode::Local,
     };
-    let prepared = match request.execution_mode {
+    let prepared = match derived_execution_mode {
         crate::api::InvocationExecutionModeApi::Local => {
             if matches!(request.command, InvocationCommandApi::Release) {
                 return Err(ApiError(AppError::UnsupportedLocalExecution(
@@ -1305,7 +1320,7 @@ async fn invocation_create(
             project_draft_id: prepared.project_draft_id,
             environment_draft_id: prepared.environment_draft_id,
             command: map_invocation_command(request.command).as_str().to_string(),
-            execution_mode: request.execution_mode,
+            execution_mode: derived_execution_mode,
             worker_queue: worker_queue.clone(),
             execution_spec: Some(execution_spec),
             promote_base_manifest: persistence
@@ -1314,7 +1329,7 @@ async fn invocation_create(
                 .unwrap_or(false),
             claim_deadline_at: Some(
                 Utc::now()
-                    + chrono::Duration::from_std(claim_startup_timeout(request.execution_mode))
+                    + chrono::Duration::from_std(claim_startup_timeout(derived_execution_mode))
                         .expect("duration"),
             ),
         })
@@ -1343,12 +1358,12 @@ async fn invocation_create(
     }
     info!(
         invocation_id = %invocation_id,
-        execution_mode = ?request.execution_mode,
+        execution_mode = ?derived_execution_mode,
         "created worker-claimable invocation"
     );
     Ok(Json(InvocationCreateResponse {
         invocation_id,
-        execution_mode: request.execution_mode,
+        execution_mode: derived_execution_mode,
         worker_queue,
     }))
 }

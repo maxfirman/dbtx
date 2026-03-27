@@ -1763,7 +1763,6 @@ fn local_invocation_request(
         current_dir: Some(project_dir.display().to_string()),
         project_id: None,
         environment_slug: environment_slug.map(ToString::to_string),
-        execution_mode: InvocationExecutionModeApi::Local,
         worker_queue: worker_queue.map(ToString::to_string),
     }
 }
@@ -1780,7 +1779,6 @@ fn remote_invocation_request(
         current_dir: None,
         project_id: Some(project_id.to_string()),
         environment_slug: Some(environment_slug.to_string()),
-        execution_mode: InvocationExecutionModeApi::Server,
         worker_queue: worker_queue.map(ToString::to_string),
     }
 }

@@ -387,7 +387,6 @@ async fn handle_environment_command(
                     current_dir: None,
                     project_id: Some(project.clone()),
                     environment_slug: Some(slug.clone()),
-                    execution_mode: InvocationExecutionModeApi::Server,
                     worker_queue: None,
                 })
                 .await?;
@@ -583,7 +582,6 @@ async fn invoke_via_daemon(
         command,
         args,
         ctx,
-        InvocationExecutionModeApi::Server,
         None,
     )
     .await?;
@@ -803,7 +801,6 @@ async fn invoke_via_local_worker(
         command,
         args,
         ctx,
-        InvocationExecutionModeApi::Local,
         Some(queue.clone()),
     )
     .await?;
@@ -861,7 +858,6 @@ async fn create_invocation(
     command: InvocationCommand,
     args: Vec<OsString>,
     ctx: &config::InvocationContext,
-    execution_mode: InvocationExecutionModeApi,
     worker_queue: Option<String>,
 ) -> AppResult<api::InvocationCreateResponse> {
     let client = client::DaemonClient::new(service_url);
@@ -885,7 +881,6 @@ async fn create_invocation(
             current_dir: Some(ctx.project_dir.display().to_string()),
             project_id: None,
             environment_slug: Some(ctx.target_name.clone().unwrap_or_default()),
-            execution_mode,
             worker_queue,
         })
         .await

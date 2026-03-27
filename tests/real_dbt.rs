@@ -1,8 +1,7 @@
 #![allow(clippy::await_holding_lock)]
 
 use dbtx::api::{
-    InvocationCommandApi, InvocationCreateApiRequest, InvocationExecutionModeApi,
-    InvocationLifecycleStatus,
+    InvocationCommandApi, InvocationCreateApiRequest, InvocationLifecycleStatus,
 };
 use dbtx::client::DaemonClient;
 use dbtx::services::{infer_local_project_defaults, infer_remote_project_defaults};
@@ -327,7 +326,6 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
             current_dir: None,
             project_id: Some(project.remote_project_id()),
             environment_slug: Some("remote".to_string()),
-            execution_mode: InvocationExecutionModeApi::Server,
             worker_queue: None,
         })
         .await
