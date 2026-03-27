@@ -26,81 +26,7 @@ const ENVIRONMENT_SLUG: &str = "dev";
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn dbtx_environment_uses_stored_target_name_when_slug_differs() {
-    let _guard = integration_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
-
-    let project = RealProject::new();
-    let marker_model = project
-        .path()
-        .join("models")
-        .join("marts")
-        .join("target_name_marker.sql");
-    fs::write(
-        &marker_model,
-        "{{ config(materialized='table') }}\nselect '{{ target.name }}' as target_name\n",
-    )
-    .expect("write marker model");
-
-    assert_success(&run_dbtx(db.service_url(), &project, &["project", "init"]));
-    assert_success(&run_dbtx(
-        db.service_url(),
-        &project,
-        &[
-            "environment",
-            "create",
-            "--slug",
-            "staging",
-            "--target",
-            "dev",
-        ],
-    ));
-
-    let output = run_dbtx_with_environment_slug(
-        db.service_url(),
-        &project,
-        "staging",
-        &[
-            "run",
-            "--project-dir",
-            project.path_str(),
-            "--profiles-dir",
-            project.path_str(),
-            "--select",
-            "target_name_marker",
-        ],
-    );
-    assert_success(&output);
-
-    let query = Command::new("duckdb")
-        .args([
-            project
-                .path()
-                .join("warehouse.duckdb")
-                .to_str()
-                .expect("utf8 db"),
-            "-csv",
-            "-c",
-            "select target_name from main.target_name_marker",
-        ])
-        .output()
-        .expect("query duckdb");
-    assert_success(&query);
-    let value = String::from_utf8_lossy(&query.stdout)
-        .lines()
-        .nth(1)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    assert_eq!(value, "dev");
-}
-
-#[tokio::test]
-#[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn dbtx_ls_requires_project_init() {
+async fn dbtx_ls_opportunistically_creates_local_project_state() {
     let _guard = integration_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -278,45 +204,18 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
     let project = RealProject::new();
     project.seed();
 
-    assert_success(&run_dbtx(
-        db.service_url(),
+    bootstrap_remote_project_and_env(
+        db.pool(),
         &project,
-        &["project", "init", "--mode", "remote"],
-    ));
-    assert_success(&run_dbtx(
-        db.service_url(),
-        &project,
-        &[
-            "environment",
-            "create",
-            "--slug",
-            "remote",
-            "--target",
-            "dev",
-            "--git-branch",
-            "main",
-            "--git-commit-sha",
-            &project.head_sha(),
-        ],
-    ));
-    sqlx::query("UPDATE environments SET profile_config = jsonb_set(profile_config, '{path}', to_jsonb($2::text)) WHERE slug = 'remote' AND project_id = (SELECT id FROM projects WHERE project_id = $1)")
-        .bind(project.remote_project_id())
-        .bind(
-            project
-                .path()
-                .join("warehouse.duckdb")
-                .to_string_lossy()
-                .to_string(),
-        )
-        .execute(db.pool())
-        .await
-        .expect("update remote duckdb path");
-    sqlx::query("UPDATE projects SET git_repo_url = $2, project_root = '.' WHERE project_id = $1")
-        .bind(project.remote_project_id())
-        .bind(project.path_str())
-        .execute(db.pool())
-        .await
-        .expect("update project for remote execution");
+        "remote",
+        &project.head_sha(),
+        project
+            .path()
+            .join("warehouse.duckdb")
+            .to_string_lossy()
+            .as_ref(),
+    )
+    .await;
 
     let client = DaemonClient::new(db.service_url().to_string());
     let invocation = client
@@ -739,71 +638,6 @@ async fn dbtx_ls_state_modified_without_prior_state_returns_all_node_types() {
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn project_init_and_force_reset_state_modified_baseline() {
-    let _guard = integration_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
-
-    let project = RealProject::new();
-
-    let init_output = run_dbtx(db.service_url(), &project, &["project", "init"]);
-    assert_success(&init_output);
-
-    let initial_all = listed_unique_ids(db.service_url(), &project);
-    let initial_modified = modified_unique_ids(db.service_url(), &project);
-    assert_eq!(
-        initial_modified, initial_all,
-        "expected state:modified to match dbtx ls immediately after project init"
-    );
-
-    let build_output = run_dbtx(
-        db.service_url(),
-        &project,
-        &[
-            "build",
-            "--project-dir",
-            project.path_str(),
-            "--profiles-dir",
-            project.path_str(),
-        ],
-    );
-    assert_success(&build_output);
-
-    let modified_after_build = modified_unique_ids(db.service_url(), &project);
-    let seed_statuses = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT status FROM node_executions ne JOIN runs r ON r.run_id = ne.run_id WHERE r.command = 'build' AND ne.resource_type = 'seed' ORDER BY status",
-    )
-    .fetch_all(db.pool())
-    .await
-    .expect("seed statuses");
-    let promoted_seed_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM promoted_manifest_nodes WHERE unique_id LIKE 'seed.%'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("promoted seed count");
-    assert!(
-        modified_after_build.is_empty(),
-        "expected state:modified to be empty after full build, got: {modified_after_build:?}; seed_statuses={seed_statuses:?}; promoted_seed_count={promoted_seed_count}"
-    );
-
-    let init_again = run_dbtx(db.service_url(), &project, &["project", "init"]);
-    assert_success(&init_again);
-
-    let force_output = run_dbtx(db.service_url(), &project, &["project", "init", "--force"]);
-    assert_success(&force_output);
-
-    let forced_modified = modified_unique_ids(db.service_url(), &project);
-    assert_eq!(
-        forced_modified, modified_after_build,
-        "expected project init to leave the local modified baseline unchanged"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires local dbt fusion, duckdb, and docker"]
 async fn dbtx_full_run_clears_state_modified() {
     let _guard = integration_lock()
         .lock()
@@ -890,69 +724,6 @@ async fn dbtx_build_state_modified_clears_modified_set() {
     assert!(
         modified_after.is_empty(),
         "expected state:modified to be empty after build -s state:modified, got: {modified_after:?}"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn seeded_environment_starts_with_empty_state_modified() {
-    let _guard = integration_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
-
-    let project = RealProject::new();
-    project.seed();
-    let project_id = project.init_dbtx_project(db.service_url());
-
-    assert_success(&run_dbtx(
-        db.service_url(),
-        &project,
-        &[
-            "environment",
-            "create",
-            "--project",
-            &project_id,
-            "--slug",
-            "staging",
-        ],
-    ));
-
-    assert_success(&run_dbtx_with_environment_slug(
-        db.service_url(),
-        &project,
-        "staging",
-        &[
-            "run",
-            "--project-dir",
-            project.path_str(),
-            "--profiles-dir",
-            project.path_str(),
-        ],
-    ));
-
-    assert_success(&run_dbtx(
-        db.service_url(),
-        &project,
-        &[
-            "environment",
-            "create",
-            "--project",
-            &project_id,
-            "--slug",
-            "pr-123",
-            "--baseline",
-            "staging",
-            "--pr-number",
-            "123",
-        ],
-    ));
-
-    let modified = modified_unique_ids_for_env(db.service_url(), &project, "pr-123");
-    assert!(
-        modified.is_empty(),
-        "expected seeded environment to start with empty state:modified, got: {modified:?}"
     );
 }
 
@@ -1138,8 +909,7 @@ impl RealProject {
     }
 
     fn init_dbtx_project(&self, service_url: &str) -> String {
-        let output = run_dbtx(service_url, self, &["project", "init"]);
-        assert_success(&output);
+        let _ = service_url;
         self.project_id()
     }
 
@@ -1160,6 +930,84 @@ impl RealProject {
         );
         fs::write(path, updated).expect("write file");
     }
+}
+
+async fn bootstrap_remote_project_and_env(
+    pool: &PgPool,
+    project: &RealProject,
+    environment_slug: &str,
+    commit_sha: &str,
+    duckdb_path: &str,
+) {
+    let project_name = fs::read_to_string(project.path().join("dbt_project.yml"))
+        .expect("read dbt_project")
+        .lines()
+        .find_map(|line| line.strip_prefix("name: ").map(str::to_string))
+        .expect("project name");
+
+    let project_row = sqlx::query(
+        r#"
+        INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata)
+        VALUES ($1, $2, 'remote', $3, 'main', '.', '{}'::jsonb)
+        ON CONFLICT (project_id) DO UPDATE
+        SET project_name = EXCLUDED.project_name,
+            mode = EXCLUDED.mode,
+            git_repo_url = EXCLUDED.git_repo_url,
+            default_branch = EXCLUDED.default_branch,
+            project_root = EXCLUDED.project_root
+        RETURNING id
+        "#,
+    )
+    .bind(project.remote_project_id())
+    .bind(&project_name)
+    .bind(project.path_str())
+    .fetch_one(pool)
+    .await
+    .expect("upsert remote project");
+    let project_pk: i64 = project_row.get("id");
+
+    let environment_row = sqlx::query(
+        r#"
+        INSERT INTO environments (
+            project_id, slug, profile_name, target_name, git_branch, git_commit_sha,
+            use_latest_commit, auto_deploy, immutable, status, adapter_type, worker_queue,
+            schema_name, threads, profile_config, profile_secrets, metadata
+        )
+        VALUES ($1, $2, $3, 'dev', 'main', $4, false, true, false, 'active', 'duckdb', 'generic',
+                'main', 4, jsonb_build_object('path', $5::text), '{}'::jsonb, '{}'::jsonb)
+        ON CONFLICT (project_id, slug) DO UPDATE
+        SET git_branch = EXCLUDED.git_branch,
+            git_commit_sha = EXCLUDED.git_commit_sha,
+            profile_config = EXCLUDED.profile_config
+        RETURNING id
+        "#,
+    )
+    .bind(project_pk)
+    .bind(environment_slug)
+    .bind(&project_name)
+    .bind(commit_sha)
+    .bind(duckdb_path)
+    .fetch_one(pool)
+    .await
+    .expect("upsert remote environment");
+    let environment_pk: i64 = environment_row.get("id");
+
+    sqlx::query(
+        r#"
+        INSERT INTO environment_versions (
+            environment_id, project_id, reason, git_branch, git_commit_sha,
+            use_latest_commit, auto_deploy, immutable, baseline_environment_id, metadata
+        )
+        VALUES ($1, $2, 'created', 'main', $3, false, true, false, NULL, '{}'::jsonb)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(environment_pk)
+    .bind(project_pk)
+    .bind(commit_sha)
+    .execute(pool)
+    .await
+    .expect("insert environment version");
 }
 
 struct TestDatabase {
@@ -1386,13 +1234,6 @@ fn modified_unique_ids(
     modified_unique_ids_for_env(service_url, project, ENVIRONMENT_SLUG)
 }
 
-fn listed_unique_ids(
-    service_url: &str,
-    project: &RealProject,
-) -> std::collections::BTreeSet<String> {
-    listed_unique_ids_for_env(service_url, project, ENVIRONMENT_SLUG)
-}
-
 fn modified_unique_ids_for_env(
     service_url: &str,
     project: &RealProject,
@@ -1403,19 +1244,6 @@ fn modified_unique_ids_for_env(
         project,
         environment_slug,
         &["-s", "state:modified", "--output", "json"],
-    )
-}
-
-fn listed_unique_ids_for_env(
-    service_url: &str,
-    project: &RealProject,
-    environment_slug: &str,
-) -> std::collections::BTreeSet<String> {
-    listed_unique_ids_for_env_impl(
-        service_url,
-        project,
-        environment_slug,
-        &["--output", "json"],
     )
 }
 
