@@ -1,18 +1,16 @@
 use clap::Parser;
+use dbtx::cli_entry::{
+    execute_state_migrate, handle_passthrough_command, handle_persisting_command,
+};
 use dbtx::cli::{
     Cli, Command, StateCommand,
 };
-use dbtx::cli_output::print_migration_summary;
 use dbtx::cli_runtime::{
     handle_environment_command, handle_invocation_command, handle_project_command,
-    handle_queue_command, handle_worker_command, invoke_via_daemon,
+    handle_queue_command, handle_worker_command,
 };
-use dbtx::client;
-use dbtx::config::{self, resolve_service_url};
 use dbtx::error::{AppError, AppResult};
 use dbtx::services::InvocationCommand;
-use std::ffi::OsString;
-use std::process::Command as StdCommand;
 
 #[tokio::main]
 async fn main() {
@@ -29,14 +27,7 @@ async fn run() -> AppResult<()> {
 
     match cli.command {
         Command::State(state_command) => match state_command {
-            StateCommand::Migrate => {
-                let current_dir = std::env::current_dir()?;
-                let service_url = resolve_service_url(cli.service_url, Some(&current_dir))?
-                    .ok_or(AppError::MissingServiceUrl)?;
-                let client = client::DaemonClient::new(service_url);
-                let response = client.migrate().await?;
-                print_migration_summary(&response.applied);
-            }
+            StateCommand::Migrate => execute_state_migrate(cli.service_url).await?,
         },
         Command::Project(project_command) => {
             handle_project_command(project_command, cli.service_url).await?
@@ -68,50 +59,6 @@ async fn run() -> AppResult<()> {
         }
     }
 
-    Ok(())
-}
-
-fn is_help_request(args: &[OsString]) -> bool {
-    args.iter().any(|arg| arg == "--help" || arg == "-h")
-}
-
-fn exit_with_dbt_help(subcommand: &str) -> AppResult<()> {
-    let dbt_path = std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
-    let status = StdCommand::new(dbt_path)
-        .arg(subcommand)
-        .arg("--help")
-        .status()?;
-    std::process::exit(status.code().unwrap_or(0));
-}
-
-async fn handle_persisting_command(
-    command: InvocationCommand,
-    args: Vec<OsString>,
-    service_url_override: Option<String>,
-) -> AppResult<()> {
-    if is_help_request(&args) {
-        exit_with_dbt_help(command.as_str())?;
-    }
-    let ctx = config::InvocationContext::from_args(&args, false)?;
-    let project_dir = ctx.project_dir.clone();
-    let service_url = resolve_service_url(service_url_override, Some(&project_dir))?
-        .ok_or(AppError::MissingServiceUrl)?;
-    invoke_via_daemon(service_url, command, args, &ctx).await?;
-    Ok(())
-}
-
-async fn handle_passthrough_command(
-    args: Vec<OsString>,
-    service_url_override: Option<String>,
-) -> AppResult<()> {
-    if is_help_request(&args) {
-        exit_with_dbt_help(InvocationCommand::Ls.as_str())?;
-    }
-    let ctx = config::InvocationContext::from_args(&args, false)?;
-    let project_dir = ctx.project_dir.clone();
-    let service_url = resolve_service_url(service_url_override, Some(&project_dir))?
-        .ok_or(AppError::MissingServiceUrl)?;
-    invoke_via_daemon(service_url, InvocationCommand::Ls, args, &ctx).await?;
     Ok(())
 }
 

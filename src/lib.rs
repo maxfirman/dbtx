@@ -1,5 +1,6 @@
 pub mod api;
 pub mod cli;
+pub mod cli_entry;
 pub mod cli_output;
 pub mod cli_runtime;
 pub mod client;
@@ -8,6 +9,7 @@ pub mod db;
 pub mod error;
 pub mod event;
 pub mod execution;
+pub mod invocation_bootstrap;
 pub mod manifest;
 pub mod profile;
 pub mod server;
