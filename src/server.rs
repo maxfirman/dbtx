@@ -94,11 +94,34 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(crate::ui::router())
+        .merge(system_routes())
+        .merge(project_routes())
+        .merge(environment_routes())
+        .merge(invocation_routes())
+        .merge(operator_routes())
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+                info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    uri = %request.uri(),
+                )
+            }),
+        )
+        .with_state(state)
+}
+
+fn system_routes() -> Router<AppState> {
+    Router::new()
         .route("/openapi.json", get(openapi_json))
         .route("/docs", get(swagger_docs))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/state/migrate", post(migrate))
+}
+
+fn project_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/projects", get(projects_list))
         .route(
             "/v1/projects/{project_id}",
@@ -114,6 +137,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/project-drafts/{draft_id}/confirm",
             post(project_draft_confirm),
         )
+}
+
+fn environment_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/v1/projects/{project_id}/environment-drafts",
             post(environment_draft_create),
@@ -151,12 +178,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/projects/{project_id}/environments/{slug}/rollback",
             post(environment_rollback),
         )
+}
+
+fn invocation_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/v1/invocations",
             get(invocation_list).post(invocation_create),
         )
-        .route("/v1/workers", get(worker_list))
-        .route("/v1/queues", get(queue_list))
         .route("/v1/invocations/cleanup", post(invocation_cleanup))
         .route("/v1/invocations/claim-next", post(invocation_claim_next))
         .route("/v1/invocations/{id}", get(invocation_status))
@@ -168,16 +197,12 @@ pub fn router(state: AppState) -> Router {
             post(invocation_append_events),
         )
         .route("/v1/invocations/{id}/events", get(invocation_events))
-        .layer(
-            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
-                info_span!(
-                    "http_request",
-                    method = %request.method(),
-                    uri = %request.uri(),
-                )
-            }),
-        )
-        .with_state(state)
+}
+
+fn operator_routes() -> Router<AppState> {
+    Router::new()
+        .route("/v1/workers", get(worker_list))
+        .route("/v1/queues", get(queue_list))
 }
 
 async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
