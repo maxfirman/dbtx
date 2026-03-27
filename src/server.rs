@@ -17,11 +17,10 @@ use crate::api::{
 use crate::config::RuntimeConfig;
 use crate::db::{
     AppliedMigration, CreateInvocationInput, Db, EnvironmentRecord, EnvironmentVersionRecord,
-    InvocationCancellationRecord, InvocationPersistenceRecord, ProjectRecord,
+    InvocationCancellationRecord, ProjectRecord,
     TimedOutInvocationRecord,
 };
 use crate::error::{AppError, AppResult};
-use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
 use crate::execution::{
     ExecutionCompletion, ExecutionEvent, ExecutionEventKind, heartbeat_stale_timeout,
@@ -31,12 +30,15 @@ use crate::invocation_bootstrap::{
     start_environment_draft_prepare_invocation, start_environment_draft_validation_invocation,
     start_project_draft_validation_invocation,
 };
+use crate::invocation_runtime::{
+    InvocationManager, InvocationPersistence, InvocationRecorder, event_stream,
+    started_invocation_event,
+};
 use crate::services::{
     EnvironmentReleaseRequest, EnvironmentRollbackRequest, EnvironmentService, InvocationCommand,
     InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectCreateRequest,
     ProjectService, ProjectUpdateRequest,
 };
-use async_stream::stream;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -45,13 +47,9 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use futures_util::Stream;
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
-use tokio::time::{Duration, sleep};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, info_span};
 use utoipa::OpenApi;
@@ -90,246 +88,6 @@ impl AppState {
             .await?;
         runtime.push_event(sequence, started_event).await;
         Ok(())
-    }
-}
-
-#[derive(Clone, Default)]
-struct InvocationManager {
-    inner: Arc<Mutex<HashMap<Uuid, Arc<InvocationRuntime>>>>,
-}
-
-#[derive(Debug, Clone)]
-struct SequencedInvocationEvent {
-    sequence: u64,
-    event: InvocationEvent,
-}
-
-#[derive(Default)]
-struct InvocationHistory {
-    items: Vec<SequencedInvocationEvent>,
-}
-
-struct InvocationRuntime {
-    history: Mutex<InvocationHistory>,
-    tx: broadcast::Sender<SequencedInvocationEvent>,
-    persistence: Mutex<Option<InvocationPersistence>>,
-}
-
-#[derive(Clone)]
-struct InvocationRecorder {
-    db: Db,
-    invocation_id: Uuid,
-    runtime: Arc<InvocationRuntime>,
-}
-
-#[derive(Clone)]
-pub(crate) struct InvocationPersistence {
-    run_id: Uuid,
-    project_id: i64,
-    environment_id: i64,
-    promote_base_manifest: bool,
-}
-
-impl InvocationPersistence {
-    fn from_record(record: InvocationPersistenceRecord) -> Option<Self> {
-        Some(Self {
-            run_id: record.run_id?,
-            project_id: record.project_id?,
-            environment_id: record.environment_id?,
-            promote_base_manifest: record.promote_base_manifest,
-        })
-    }
-
-    async fn persist_log_event(
-        &self,
-        db: &Db,
-        run_id: Uuid,
-        project_id: i64,
-        environment_id: i64,
-        sequence: i64,
-        log_event: &LogEvent,
-    ) -> AppResult<()> {
-        db.persist_log_event(run_id, project_id, environment_id, sequence, log_event)
-            .await
-    }
-
-    async fn persist_raw_line(
-        &self,
-        db: &Db,
-        run_id: Uuid,
-        sequence: i64,
-        raw_line: &str,
-    ) -> AppResult<()> {
-        db.persist_raw_line(run_id, sequence, raw_line).await
-    }
-}
-
-impl InvocationManager {
-    async fn get_or_create(
-        &self,
-        invocation_id: Uuid,
-        persistence: Option<InvocationPersistence>,
-    ) -> Arc<InvocationRuntime> {
-        let mut guard = self.inner.lock().await;
-        if let Some(runtime) = guard.get(&invocation_id) {
-            if persistence.is_some() {
-                *runtime.persistence.lock().await = persistence;
-            }
-            return runtime.clone();
-        }
-        let (tx, _) = broadcast::channel(1024);
-        let runtime = Arc::new(InvocationRuntime {
-            history: Mutex::new(InvocationHistory::default()),
-            tx,
-            persistence: Mutex::new(persistence),
-        });
-        guard.insert(invocation_id, runtime.clone());
-        runtime
-    }
-
-    fn schedule_cleanup(&self, invocation_id: Uuid) {
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            sleep(Duration::from_secs(300)).await;
-            inner.lock().await.remove(&invocation_id);
-        });
-    }
-}
-
-impl InvocationRuntime {
-    pub(crate) async fn push_event(&self, sequence: u64, event: InvocationEvent) {
-        let sequenced = {
-            let mut history = self.history.lock().await;
-            let sequenced = SequencedInvocationEvent { sequence, event };
-            history.items.push(sequenced.clone());
-            sequenced
-        };
-        let _ = self.tx.send(sequenced);
-    }
-}
-
-impl InvocationRecorder {
-    async fn record(&self, event: ExecutionEvent) -> AppResult<()> {
-        let sse_event = InvocationEvent {
-            event_type: match event.kind {
-                ExecutionEventKind::StdoutLine => "stdout.line".to_string(),
-                ExecutionEventKind::StderrLine => "stderr.line".to_string(),
-                ExecutionEventKind::DbtLog => "dbt.log".to_string(),
-            },
-            timestamp: event.occurred_at,
-            text: event.text.clone(),
-            stream: match event.kind {
-                ExecutionEventKind::StdoutLine | ExecutionEventKind::DbtLog => {
-                    Some("stdout".to_string())
-                }
-                ExecutionEventKind::StderrLine => Some("stderr".to_string()),
-            },
-            dbt_event_name: event.dbt_event_name.clone(),
-            node_unique_id: event.node_unique_id.clone(),
-            level: event.level.clone(),
-            exit_code: None,
-            error: event.error.clone(),
-        };
-        let sequence = self
-            .db
-            .append_invocation_event(self.invocation_id, &sse_event)
-            .await? as i64;
-        self.runtime.push_event(sequence as u64, sse_event).await;
-        if let Some(persistence) = self.persistence().await? {
-            match event.kind {
-                ExecutionEventKind::DbtLog => {
-                    if let Some(raw_line) = event.raw_line.as_deref()
-                        && let Some(log_event) = LogEvent::parse(raw_line)
-                    {
-                        persistence
-                            .persist_log_event(
-                                &self.db,
-                                persistence.run_id,
-                                persistence.project_id,
-                                persistence.environment_id,
-                                sequence,
-                                &log_event,
-                            )
-                            .await?;
-                    }
-                }
-                ExecutionEventKind::StdoutLine => {
-                    if let Some(raw_line) = event.raw_line.as_deref().or(event.text.as_deref()) {
-                        persistence
-                            .persist_raw_line(&self.db, persistence.run_id, sequence, raw_line)
-                            .await?;
-                    }
-                }
-                ExecutionEventKind::StderrLine => {}
-            }
-        }
-        Ok(())
-    }
-
-    async fn complete(
-        &self,
-        worker_id: &str,
-        lease_token: Uuid,
-        completion: ExecutionCompletion,
-    ) -> AppResult<()> {
-        self.db
-            .complete_invocation(self.invocation_id, worker_id, lease_token, &completion)
-            .await?;
-        let completed_event = InvocationEvent {
-            event_type: "invocation.completed".to_string(),
-            timestamp: Utc::now(),
-            text: None,
-            stream: None,
-            dbt_event_name: None,
-            node_unique_id: None,
-            level: None,
-            exit_code: Some(completion.exit_code),
-            error: completion.error.clone(),
-        };
-        let sequence = self
-            .db
-            .append_invocation_event(self.invocation_id, &completed_event)
-            .await;
-        if let Ok(sequence) = sequence {
-            self.runtime.push_event(sequence, completed_event).await;
-        }
-        Ok(())
-    }
-
-    async fn is_running(&self) -> bool {
-        matches!(
-            self.db.get_invocation_status(self.invocation_id).await,
-            Ok(InvocationStatusResponse {
-                status: InvocationLifecycleStatus::Running,
-                ..
-            })
-        )
-    }
-
-    async fn persistence(&self) -> AppResult<Option<InvocationPersistence>> {
-        let mut guard = self.runtime.persistence.lock().await;
-        if guard.is_none() {
-            let loaded = self
-                .db
-                .get_invocation_persistence(self.invocation_id, None, None)
-                .await?;
-            *guard = InvocationPersistence::from_record(loaded);
-        }
-        Ok(guard.clone())
-    }
-}
-
-fn started_invocation_event() -> InvocationEvent {
-    InvocationEvent {
-        event_type: "invocation.started".to_string(),
-        timestamp: Utc::now(),
-        text: None,
-        stream: None,
-        dbt_event_name: None,
-        node_unique_id: None,
-        level: None,
-        exit_code: None,
-        error: None,
     }
 }
 
@@ -1630,11 +1388,7 @@ async fn invocation_append_events(
 ) -> Result<StatusCode, ApiError> {
     reconcile_timed_out_invocations(&state).await?;
     let runtime = state.invocations.get_or_create(id, None).await;
-    let recorder = InvocationRecorder {
-        db: state.db.clone(),
-        invocation_id: id,
-        runtime,
-    };
+    let recorder = InvocationRecorder::new(state.db.clone(), id, runtime);
     if !recorder.is_running().await {
         return Err(ApiError(AppError::Io(std::io::Error::other(
             "invocation is already completed",
@@ -1673,11 +1427,7 @@ async fn invocation_complete(
 ) -> Result<StatusCode, ApiError> {
     reconcile_timed_out_invocations(&state).await?;
     let runtime = state.invocations.get_or_create(id, None).await;
-    let recorder = InvocationRecorder {
-        db: state.db.clone(),
-        invocation_id: id,
-        runtime,
-    };
+    let recorder = InvocationRecorder::new(state.db.clone(), id, runtime);
     state
         .db
         .get_invocation_persistence(id, Some(&request.worker_id), Some(request.lease_token))
@@ -1711,7 +1461,7 @@ async fn invocation_events(
     headers: axum::http::HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let runtime = state.invocations.get_or_create(id, None).await;
-    let rx = runtime.tx.subscribe();
+    let rx = runtime.subscribe();
     let header_resume = headers
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
@@ -1726,45 +1476,13 @@ async fn invocation_events(
     let stream = event_stream(
         history
             .into_iter()
-            .map(|(sequence, event)| SequencedInvocationEvent { sequence, event })
+            .map(|(sequence, event)| crate::invocation_runtime::SequencedInvocationEvent { sequence, event })
             .collect(),
         last_sequence,
         rx,
     );
     info!(invocation_id = %id, buffered_events, "subscribed to invocation event stream");
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
-fn event_stream(
-    history: Vec<SequencedInvocationEvent>,
-    last_history_sequence: u64,
-    mut rx: broadcast::Receiver<SequencedInvocationEvent>,
-) -> impl Stream<Item = Result<Event, Infallible>> {
-    stream! {
-        let mut last_seen_sequence = last_history_sequence;
-        for item in history {
-            last_seen_sequence = item.sequence;
-            yield Ok(to_sse_event(&item));
-        }
-        loop {
-            match rx.recv().await {
-                Ok(item) if item.sequence > last_seen_sequence => {
-                    last_seen_sequence = item.sequence;
-                    yield Ok(to_sse_event(&item))
-                }
-                Ok(_) => continue,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    }
-}
-
-fn to_sse_event(item: &SequencedInvocationEvent) -> Event {
-    Event::default()
-        .event(item.event.event_type.clone())
-        .id(item.sequence.to_string())
-        .data(serde_json::to_string(&item.event).unwrap_or_else(|_| "{}".to_string()))
 }
 
 fn map_invocation_command(command: InvocationCommandApi) -> InvocationCommand {
@@ -1839,11 +1557,13 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiDoc, InvocationEvent, SequencedInvocationEvent, event_stream};
+    use super::ApiDoc;
+    use crate::api::InvocationEvent;
+    use crate::invocation_runtime::{SequencedInvocationEvent, event_stream};
     use chrono::Utc;
     use futures_util::StreamExt;
-    use utoipa::OpenApi;
     use tokio::sync::broadcast;
+    use utoipa::OpenApi;
 
     fn sample_event(text: &str) -> InvocationEvent {
         InvocationEvent {
