@@ -71,14 +71,19 @@ impl AppState {
         &self.db
     }
 
-    pub(crate) async fn publish_invocation_event(
+    pub(crate) async fn bootstrap_invocation_started(
         &self,
         invocation_id: Uuid,
-        sequence: u64,
-        event: InvocationEvent,
-    ) {
-        let runtime = self.invocations.get_or_create(invocation_id, None).await;
-        runtime.push_event(sequence, event).await;
+        persistence: Option<InvocationPersistence>,
+    ) -> AppResult<()> {
+        let runtime = self.invocations.get_or_create(invocation_id, persistence).await;
+        let started_event = started_invocation_event();
+        let sequence = self
+            .db
+            .append_invocation_event(invocation_id, &started_event)
+            .await?;
+        runtime.push_event(sequence, started_event).await;
+        Ok(())
     }
 }
 
@@ -112,7 +117,7 @@ struct InvocationRecorder {
 }
 
 #[derive(Clone)]
-struct InvocationPersistence {
+pub(crate) struct InvocationPersistence {
     run_id: Uuid,
     project_id: i64,
     environment_id: i64,
@@ -305,6 +310,27 @@ impl InvocationRecorder {
             *guard = InvocationPersistence::from_record(loaded);
         }
         Ok(guard.clone())
+    }
+}
+
+pub(crate) fn invocation_claim_deadline_at(
+    execution_mode: InvocationExecutionModeApi,
+) -> chrono::DateTime<Utc> {
+    Utc::now()
+        + chrono::Duration::from_std(claim_startup_timeout(execution_mode)).expect("duration")
+}
+
+fn started_invocation_event() -> InvocationEvent {
+    InvocationEvent {
+        event_type: "invocation.started".to_string(),
+        timestamp: Utc::now(),
+        text: None,
+        stream: None,
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        exit_code: None,
+        error: None,
     }
 }
 
@@ -788,32 +814,12 @@ async fn project_draft_validate(
                 project_root: prepared.spec.project_root,
             }),
             promote_base_manifest: false,
-            claim_deadline_at: Some(
-                Utc::now()
-                    + chrono::Duration::from_std(claim_startup_timeout(
-                        InvocationExecutionModeApi::Server,
-                    ))
-                    .expect("duration"),
-            ),
+            claim_deadline_at: Some(invocation_claim_deadline_at(
+                InvocationExecutionModeApi::Server,
+            )),
         })
         .await?;
-    let runtime = state.invocations.get_or_create(invocation_id, None).await;
-    let started_event = InvocationEvent {
-        event_type: "invocation.started".to_string(),
-        timestamp: Utc::now(),
-        text: None,
-        stream: None,
-        dbt_event_name: None,
-        node_unique_id: None,
-        level: None,
-        exit_code: None,
-        error: None,
-    };
-    let started_sequence = state
-        .db
-        .append_invocation_event(invocation_id, &started_event)
-        .await?;
-    runtime.push_event(started_sequence, started_event).await;
+    state.bootstrap_invocation_started(invocation_id, None).await?;
     Ok(Json(ProjectDraftValidateResponse {
         draft: prepared.draft,
         invocation_id,
@@ -1221,35 +1227,12 @@ async fn invocation_create(
                 .as_ref()
                 .map(|p| p.promote_base_manifest)
                 .unwrap_or(false),
-            claim_deadline_at: Some(
-                Utc::now()
-                    + chrono::Duration::from_std(claim_startup_timeout(derived_execution_mode))
-                        .expect("duration"),
-            ),
+            claim_deadline_at: Some(invocation_claim_deadline_at(derived_execution_mode)),
         })
         .await?;
-    let runtime = state
-        .invocations
-        .get_or_create(invocation_id, persistence)
-        .await;
-    let started_event = InvocationEvent {
-        event_type: "invocation.started".to_string(),
-        timestamp: Utc::now(),
-        text: None,
-        stream: None,
-        dbt_event_name: None,
-        node_unique_id: None,
-        level: None,
-        exit_code: None,
-        error: None,
-    };
-    let started_sequence = state
-        .db
-        .append_invocation_event(invocation_id, &started_event)
-        .await;
-    if let Ok(sequence) = started_sequence {
-        runtime.push_event(sequence, started_event).await;
-    }
+    state
+        .bootstrap_invocation_started(invocation_id, persistence)
+        .await?;
     info!(
         invocation_id = %invocation_id,
         execution_mode = ?derived_execution_mode,

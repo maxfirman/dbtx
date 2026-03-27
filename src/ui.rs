@@ -4,7 +4,7 @@ use crate::api::{
 };
 use crate::db::{EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
 use crate::error::{AppError, AppResult};
-use crate::server::AppState;
+use crate::server::{AppState, invocation_claim_deadline_at};
 use crate::services::{
     EnvironmentDraftUpdateRequest, EnvironmentService, InvocationCommand, ProjectCreateRequest,
     ProjectService,
@@ -15,7 +15,6 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use chrono::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -382,37 +381,16 @@ async fn start_project_draft_validation(state: &AppState, draft_id: Uuid) -> Res
                 project_root: prepared.spec.project_root,
             }),
             promote_base_manifest: false,
-            claim_deadline_at: Some(
-                Utc::now()
-                    + Duration::from_std(crate::execution::claim_startup_timeout(
-                        InvocationExecutionModeApi::Server,
-                    ))
-                    .expect("duration"),
-            ),
+            claim_deadline_at: Some(invocation_claim_deadline_at(
+                InvocationExecutionModeApi::Server,
+            )),
         })
         .await?;
     state
         .db()
         .attach_project_draft_invocation(prepared.draft.id, invocation_id)
         .await?;
-    let started_event = crate::api::InvocationEvent {
-        event_type: "invocation.started".to_string(),
-        timestamp: Utc::now(),
-        text: None,
-        stream: None,
-        dbt_event_name: None,
-        node_unique_id: None,
-        level: None,
-        exit_code: None,
-        error: None,
-    };
-    let seq = state
-        .db()
-        .append_invocation_event(invocation_id, &started_event)
-        .await?;
-    state
-        .publish_invocation_event(invocation_id, seq, started_event)
-        .await;
+    state.bootstrap_invocation_started(invocation_id, None).await?;
     Ok(())
 }
 
@@ -445,37 +423,16 @@ async fn start_environment_draft_prepared(
                 selected_branch: prepared.spec.selected_branch,
             }),
             promote_base_manifest: false,
-            claim_deadline_at: Some(
-                Utc::now()
-                    + Duration::from_std(crate::execution::claim_startup_timeout(
-                        InvocationExecutionModeApi::Server,
-                    ))
-                    .expect("duration"),
-            ),
+            claim_deadline_at: Some(invocation_claim_deadline_at(
+                InvocationExecutionModeApi::Server,
+            )),
         })
         .await?;
     state
         .db()
         .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
         .await?;
-    let started_event = crate::api::InvocationEvent {
-        event_type: "invocation.started".to_string(),
-        timestamp: Utc::now(),
-        text: None,
-        stream: None,
-        dbt_event_name: None,
-        node_unique_id: None,
-        level: None,
-        exit_code: None,
-        error: None,
-    };
-    let seq = state
-        .db()
-        .append_invocation_event(invocation_id, &started_event)
-        .await?;
-    state
-        .publish_invocation_event(invocation_id, seq, started_event)
-        .await;
+    state.bootstrap_invocation_started(invocation_id, None).await?;
     Ok(())
 }
 
@@ -504,37 +461,16 @@ async fn start_environment_draft_validation(
                 profiles_yml: prepared.spec.profiles_yml,
             }),
             promote_base_manifest: false,
-            claim_deadline_at: Some(
-                Utc::now()
-                    + Duration::from_std(crate::execution::claim_startup_timeout(
-                        InvocationExecutionModeApi::Server,
-                    ))
-                    .expect("duration"),
-            ),
+            claim_deadline_at: Some(invocation_claim_deadline_at(
+                InvocationExecutionModeApi::Server,
+            )),
         })
         .await?;
     state
         .db()
         .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
         .await?;
-    let started_event = crate::api::InvocationEvent {
-        event_type: "invocation.started".to_string(),
-        timestamp: Utc::now(),
-        text: None,
-        stream: None,
-        dbt_event_name: None,
-        node_unique_id: None,
-        level: None,
-        exit_code: None,
-        error: None,
-    };
-    let seq = state
-        .db()
-        .append_invocation_event(invocation_id, &started_event)
-        .await?;
-    state
-        .publish_invocation_event(invocation_id, seq, started_event)
-        .await;
+    state.bootstrap_invocation_started(invocation_id, None).await?;
     Ok(())
 }
 
