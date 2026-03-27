@@ -1,5 +1,6 @@
 pub mod api;
 pub mod cli;
+pub mod cli_output;
 pub mod client;
 pub mod config;
 pub mod db;
