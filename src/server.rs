@@ -1300,10 +1300,6 @@ async fn invocation_create(
             }
         }
     };
-    let worker_queue = request
-        .worker_queue
-        .clone()
-        .unwrap_or_else(|| prepared.worker_queue.clone());
     let persistence = prepared.persistence.map(|p| InvocationPersistence {
         run_id: p.run_id,
         project_id: p.project_id,
@@ -1321,7 +1317,7 @@ async fn invocation_create(
             environment_draft_id: prepared.environment_draft_id,
             command: map_invocation_command(request.command).as_str().to_string(),
             execution_mode: derived_execution_mode,
-            worker_queue: worker_queue.clone(),
+            worker_queue: prepared.worker_queue.clone(),
             execution_spec: Some(execution_spec),
             promote_base_manifest: persistence
                 .as_ref()
@@ -1364,7 +1360,7 @@ async fn invocation_create(
     Ok(Json(InvocationCreateResponse {
         invocation_id,
         execution_mode: derived_execution_mode,
-        worker_queue,
+        worker_queue: prepared.worker_queue,
     }))
 }
 

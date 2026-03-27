@@ -1072,6 +1072,7 @@ impl<'a> InvocationService<'a> {
         let project = self.load_or_create_inferred_project(project_dir).await?;
         let local_profile = LocalTargetProfile::from_local_project(project_dir, target_override)?;
         let profile_secrets = local_profile.encrypted_secrets()?;
+        let worker_queue = infer_local_worker_queue(project_dir)?;
         let environment = self
             .db
             .upsert_local_environment(LocalEnvironmentUpsertInput {
@@ -1079,6 +1080,7 @@ impl<'a> InvocationService<'a> {
                 profile_name: &local_profile.profile_name,
                 target_name: &local_profile.target_name,
                 adapter_type: &local_profile.adapter_type,
+                worker_queue: &worker_queue,
                 schema_name: &local_profile.schema_name,
                 threads: local_profile.threads,
                 profile_config: &local_profile.profile_config,
@@ -1360,14 +1362,8 @@ pub fn infer_local_project_defaults(
 ) -> AppResult<InferredProjectInput> {
     let project_name = read_dbt_project_name_from_root(current_dir)?;
     let canonical_project_dir = current_dir.canonicalize()?;
-    let machine_scope = local_machine_scope()?;
-    let project_id = format!(
-        "prj_local_{}",
-        short_hash(&format!(
-            "{machine_scope}\n{}\n{project_name}",
-            canonical_project_dir.display()
-        ))
-    );
+    let identity_hash = infer_local_identity_hash(current_dir, &project_name)?;
+    let project_id = format!("prj_local_{identity_hash}");
     let git_state = read_git_state(current_dir);
 
     Ok(InferredProjectInput {
@@ -1380,6 +1376,12 @@ pub fn infer_local_project_defaults(
             .map(ToString::to_string)
             .or_else(|| Some(canonical_project_dir.display().to_string())),
     })
+}
+
+pub fn infer_local_worker_queue(current_dir: &Path) -> AppResult<String> {
+    let project_name = read_dbt_project_name_from_root(current_dir)?;
+    let identity_hash = infer_local_identity_hash(current_dir, &project_name)?;
+    Ok(format!("local-{identity_hash}"))
 }
 
 pub fn infer_remote_project_defaults(
@@ -1554,6 +1556,15 @@ fn local_machine_scope() -> AppResult<String> {
 
     Err(AppError::Io(std::io::Error::other(
         "failed to determine local machine scope",
+    )))
+}
+
+fn infer_local_identity_hash(current_dir: &Path, project_name: &str) -> AppResult<String> {
+    let canonical_project_dir = current_dir.canonicalize()?;
+    let machine_scope = local_machine_scope()?;
+    Ok(short_hash(&format!(
+        "{machine_scope}\n{}\n{project_name}",
+        canonical_project_dir.display()
     )))
 }
 

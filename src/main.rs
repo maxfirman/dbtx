@@ -387,7 +387,6 @@ async fn handle_environment_command(
                     current_dir: None,
                     project_id: Some(project.clone()),
                     environment_slug: Some(slug.clone()),
-                    worker_queue: None,
                 })
                 .await?;
             client
@@ -582,7 +581,6 @@ async fn invoke_via_daemon(
         command,
         args,
         ctx,
-        None,
     )
     .await?;
     let client = client::DaemonClient::new(service_url.clone());
@@ -795,15 +793,7 @@ async fn invoke_via_local_worker(
     args: Vec<OsString>,
     ctx: &config::InvocationContext,
 ) -> AppResult<()> {
-    let queue = format!("local-{}", uuid::Uuid::new_v4().simple());
-    let response = create_invocation(
-        service_url.clone(),
-        command,
-        args,
-        ctx,
-        Some(queue.clone()),
-    )
-    .await?;
+    let response = create_invocation(service_url.clone(), command, args, ctx).await?;
     let _ = command;
     let _ = ctx;
 
@@ -815,7 +805,7 @@ async fn invoke_via_local_worker(
         .arg("local")
         .arg("--once")
         .arg("--queue")
-        .arg(queue)
+        .arg(&response.worker_queue)
         .env(
             "RUST_LOG",
             std::env::var("DBTX_ONE_SHOT_WORKER_LOG").unwrap_or_else(|_| "dbtx=warn".to_string()),
@@ -858,7 +848,6 @@ async fn create_invocation(
     command: InvocationCommand,
     args: Vec<OsString>,
     ctx: &config::InvocationContext,
-    worker_queue: Option<String>,
 ) -> AppResult<api::InvocationCreateResponse> {
     let client = client::DaemonClient::new(service_url);
     client
@@ -881,7 +870,6 @@ async fn create_invocation(
             current_dir: Some(ctx.project_dir.display().to_string()),
             project_id: None,
             environment_slug: Some(ctx.target_name.clone().unwrap_or_default()),
-            worker_queue,
         })
         .await
 }

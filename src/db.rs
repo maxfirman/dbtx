@@ -285,6 +285,7 @@ pub(crate) struct LocalEnvironmentUpsertInput<'a> {
     pub(crate) profile_name: &'a str,
     pub(crate) target_name: &'a str,
     pub(crate) adapter_type: &'a str,
+    pub(crate) worker_queue: &'a str,
     pub(crate) schema_name: &'a str,
     pub(crate) threads: Option<i32>,
     pub(crate) profile_config: &'a Value,
@@ -2335,6 +2336,7 @@ impl Db {
             profile_name,
             target_name,
             adapter_type,
+            worker_queue,
             schema_name,
             threads,
             profile_config,
@@ -2355,12 +2357,13 @@ impl Db {
                 project_id, slug, profile_name, target_name, status, adapter_type,
                 worker_queue, schema_name, threads, profile_config, profile_secrets
             )
-            VALUES ($1, $2, $3, $4, 'active', $5, 'generic', $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10)
             ON CONFLICT (project_id, slug) DO UPDATE
             SET slug = EXCLUDED.slug,
                 profile_name = EXCLUDED.profile_name,
                 target_name = EXCLUDED.target_name,
                 adapter_type = EXCLUDED.adapter_type,
+                worker_queue = EXCLUDED.worker_queue,
                 schema_name = EXCLUDED.schema_name,
                 threads = EXCLUDED.threads,
                 profile_config = EXCLUDED.profile_config,
@@ -2373,6 +2376,7 @@ impl Db {
         .bind(profile_name)
         .bind(target_name)
         .bind(adapter_type)
+        .bind(worker_queue)
         .bind(schema_name)
         .bind(threads)
         .bind(sqlx::types::Json(profile_config))

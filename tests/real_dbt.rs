@@ -326,7 +326,6 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
             current_dir: None,
             project_id: Some(project.remote_project_id()),
             environment_slug: Some("remote".to_string()),
-            worker_queue: None,
         })
         .await
         .expect("create remote invocation");

@@ -131,7 +131,6 @@ pub struct InvocationCreateApiRequest {
     pub current_dir: Option<String>,
     pub project_id: Option<String>,
     pub environment_slug: Option<String>,
-    pub worker_queue: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
