@@ -4,10 +4,12 @@ use crate::api::{
 };
 use crate::db::{EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
 use crate::error::{AppError, AppResult};
-use crate::server::{AppState, invocation_claim_deadline_at};
+use crate::server::{
+    AppState, start_environment_draft_prepare_invocation,
+    start_environment_draft_validation_invocation, start_project_draft_validation_invocation,
+};
 use crate::services::{
-    EnvironmentDraftUpdateRequest, EnvironmentService, InvocationCommand, ProjectCreateRequest,
-    ProjectService,
+    EnvironmentDraftUpdateRequest, EnvironmentService, ProjectCreateRequest, ProjectService,
 };
 use askama::Template;
 use axum::Router;
@@ -361,36 +363,9 @@ async fn start_project_draft_validation(state: &AppState, draft_id: Uuid) -> Res
     let prepared = ProjectService::new(state.db())
         .prepare_draft_validation(draft_id)
         .await?;
-    let invocation_id = prepared.invocation_id;
-    state
-        .db()
-        .create_invocation(crate::db::CreateInvocationInput {
-            invocation_id,
-            run_id: None,
-            project_id: None,
-            environment_id: None,
-            project_draft_id: Some(prepared.draft.id),
-            environment_draft_id: None,
-            command: crate::services::InvocationCommand::ProjectValidate
-                .as_str()
-                .to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: prepared.worker_queue,
-            execution_spec: Some(crate::api::InvocationExecutionSpecApi::ProjectValidation {
-                repo_url: prepared.spec.repo_url,
-                project_root: prepared.spec.project_root,
-            }),
-            promote_base_manifest: false,
-            claim_deadline_at: Some(invocation_claim_deadline_at(
-                InvocationExecutionModeApi::Server,
-            )),
-        })
-        .await?;
-    state
-        .db()
-        .attach_project_draft_invocation(prepared.draft.id, invocation_id)
-        .await?;
-    state.bootstrap_invocation_started(invocation_id, None).await?;
+    start_project_draft_validation_invocation(state, prepared)
+        .await
+        .map_err(UiError::from)?;
     Ok(())
 }
 
@@ -405,34 +380,9 @@ async fn start_environment_draft_prepared(
     state: &AppState,
     prepared: crate::services::EnvironmentDraftCreatePrepared,
 ) -> Result<(), UiError> {
-    let invocation_id = prepared.invocation_id;
-    state
-        .db()
-        .create_invocation(crate::db::CreateInvocationInput {
-            invocation_id,
-            run_id: None,
-            project_id: None,
-            environment_id: None,
-            project_draft_id: None,
-            environment_draft_id: Some(prepared.draft.id),
-            command: InvocationCommand::EnvironmentPrepare.as_str().to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: prepared.worker_queue,
-            execution_spec: Some(crate::api::InvocationExecutionSpecApi::EnvironmentPrepare {
-                repo_url: prepared.spec.repo_url,
-                selected_branch: prepared.spec.selected_branch,
-            }),
-            promote_base_manifest: false,
-            claim_deadline_at: Some(invocation_claim_deadline_at(
-                InvocationExecutionModeApi::Server,
-            )),
-        })
-        .await?;
-    state
-        .db()
-        .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
-        .await?;
-    state.bootstrap_invocation_started(invocation_id, None).await?;
+    start_environment_draft_prepare_invocation(state, prepared)
+        .await
+        .map_err(UiError::from)?;
     Ok(())
 }
 
@@ -440,37 +390,9 @@ async fn start_environment_draft_validation(
     state: &AppState,
     prepared: crate::services::EnvironmentDraftValidationPrepared,
 ) -> Result<(), UiError> {
-    let invocation_id = prepared.invocation_id;
-    state
-        .db()
-        .create_invocation(crate::db::CreateInvocationInput {
-            invocation_id,
-            run_id: None,
-            project_id: None,
-            environment_id: None,
-            project_draft_id: None,
-            environment_draft_id: Some(prepared.draft.id),
-            command: InvocationCommand::EnvironmentValidate.as_str().to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: prepared.worker_queue,
-            execution_spec: Some(crate::api::InvocationExecutionSpecApi::EnvironmentValidate {
-                repo_url: prepared.spec.repo_url,
-                commit_sha: prepared.spec.commit_sha,
-                project_root: prepared.spec.project_root,
-                selected_branch: prepared.spec.selected_branch,
-                profiles_yml: prepared.spec.profiles_yml,
-            }),
-            promote_base_manifest: false,
-            claim_deadline_at: Some(invocation_claim_deadline_at(
-                InvocationExecutionModeApi::Server,
-            )),
-        })
-        .await?;
-    state
-        .db()
-        .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
-        .await?;
-    state.bootstrap_invocation_started(invocation_id, None).await?;
+    start_environment_draft_validation_invocation(state, prepared)
+        .await
+        .map_err(UiError::from)?;
     Ok(())
 }
 

@@ -823,32 +823,9 @@ async fn project_draft_validate(
     let prepared = ProjectService::new(&state.db)
         .prepare_draft_validation(draft_id)
         .await?;
-    let invocation_id = prepared.invocation_id;
-    state
-        .db
-        .create_invocation(CreateInvocationInput {
-            invocation_id,
-            run_id: None,
-            project_id: None,
-            environment_id: None,
-            project_draft_id: Some(prepared.draft.id),
-            environment_draft_id: None,
-            command: InvocationCommand::ProjectValidate.as_str().to_string(),
-            execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: prepared.worker_queue,
-            execution_spec: Some(InvocationExecutionSpecApi::ProjectValidation {
-                repo_url: prepared.spec.repo_url,
-                project_root: prepared.spec.project_root,
-            }),
-            promote_base_manifest: false,
-            claim_deadline_at: Some(invocation_claim_deadline_at(
-                InvocationExecutionModeApi::Server,
-            )),
-        })
-        .await?;
-    state.bootstrap_invocation_started(invocation_id, None).await?;
+    let invocation_id = start_project_draft_validation_invocation(&state, prepared).await?;
     Ok(Json(ProjectDraftValidateResponse {
-        draft: prepared.draft,
+        draft: ProjectService::new(&state.db).get_draft(draft_id).await?,
         invocation_id,
     }))
 }
@@ -1028,10 +1005,41 @@ fn environment_draft_update_request(
     }
 }
 
-async fn start_environment_draft_prepare_invocation(
+pub(crate) async fn start_project_draft_validation_invocation(
+    state: &AppState,
+    prepared: crate::services::ProjectDraftValidationPrepared,
+) -> AppResult<Uuid> {
+    let invocation_id = prepared.invocation_id;
+    state
+        .db
+        .create_invocation(CreateInvocationInput {
+            invocation_id,
+            run_id: None,
+            project_id: None,
+            environment_id: None,
+            project_draft_id: Some(prepared.draft.id),
+            environment_draft_id: None,
+            command: InvocationCommand::ProjectValidate.as_str().to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: prepared.worker_queue,
+            execution_spec: Some(InvocationExecutionSpecApi::ProjectValidation {
+                repo_url: prepared.spec.repo_url,
+                project_root: prepared.spec.project_root,
+            }),
+            promote_base_manifest: false,
+            claim_deadline_at: Some(invocation_claim_deadline_at(
+                InvocationExecutionModeApi::Server,
+            )),
+        })
+        .await?;
+    state.bootstrap_invocation_started(invocation_id, None).await?;
+    Ok(invocation_id)
+}
+
+pub(crate) async fn start_environment_draft_prepare_invocation(
     state: &AppState,
     prepared: crate::services::EnvironmentDraftCreatePrepared,
-) -> Result<Uuid, ApiError> {
+) -> AppResult<Uuid> {
     let invocation_id = prepared.invocation_id;
     state
         .db
@@ -1063,10 +1071,10 @@ async fn start_environment_draft_prepare_invocation(
     Ok(invocation_id)
 }
 
-async fn start_environment_draft_validation_invocation(
+pub(crate) async fn start_environment_draft_validation_invocation(
     state: &AppState,
     prepared: crate::services::EnvironmentDraftValidationPrepared,
-) -> Result<Uuid, ApiError> {
+) -> AppResult<Uuid> {
     let invocation_id = prepared.invocation_id;
     state
         .db
