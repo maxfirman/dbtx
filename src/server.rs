@@ -1,6 +1,5 @@
 use crate::api::{
-    ApiErrorResponse, EnvironmentCreateApiRequest, EnvironmentReleaseApiRequest,
-    EnvironmentResponse, EnvironmentRollbackApiRequest, EnvironmentUpdateApiRequest,
+    ApiErrorResponse, EnvironmentReleaseApiRequest, EnvironmentResponse, EnvironmentRollbackApiRequest,
     EnvironmentVersionsResponse, EnvironmentsResponse, HealthResponse, InvocationCancelApiRequest,
     InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationClaimResponse,
     InvocationCleanupApiRequest, InvocationCleanupResponse, InvocationCommandApi,
@@ -27,10 +26,9 @@ use crate::execution::{
     heartbeat_stale_timeout,
 };
 use crate::services::{
-    EnvironmentCreateRequest, EnvironmentReleaseRequest, EnvironmentRollbackRequest,
-    EnvironmentService, EnvironmentUpdateRequest, InvocationCommand, InvocationRequest,
-    InvocationService, PreparedExecutionSpec, ProjectCreateRequest, ProjectService,
-    ProjectUpdateRequest,
+    EnvironmentReleaseRequest, EnvironmentRollbackRequest, EnvironmentService, InvocationCommand,
+    InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectCreateRequest,
+    ProjectService, ProjectUpdateRequest,
 };
 use async_stream::stream;
 use axum::extract::{Path, Query, State};
@@ -333,14 +331,13 @@ pub fn router(state: AppState) -> Router {
             "/v1/project-drafts/{draft_id}/confirm",
             post(project_draft_confirm),
         )
-        .route("/v1/environments", post(environment_create))
         .route(
             "/v1/projects/{project_id}/environments",
             get(environment_list),
         )
         .route(
             "/v1/projects/{project_id}/environments/{slug}",
-            get(environment_get).patch(environment_update),
+            get(environment_get),
         )
         .route(
             "/v1/projects/{project_id}/environments/{slug}/release",
@@ -430,10 +427,8 @@ struct InvocationEventsQuery {
         project_get,
         project_update,
         project_delete,
-        environment_create,
         environment_list,
         environment_get,
-        environment_update,
         environment_release,
         environment_history,
         environment_rollback,
@@ -463,8 +458,6 @@ struct InvocationEventsQuery {
             EnvironmentResponse,
             EnvironmentsResponse,
             EnvironmentVersionsResponse,
-            EnvironmentCreateApiRequest,
-            EnvironmentUpdateApiRequest,
             EnvironmentReleaseApiRequest,
             EnvironmentRollbackApiRequest,
             InvocationCreateApiRequest,
@@ -890,95 +883,6 @@ async fn project_get(
 }
 
 #[utoipa::path(
-    post,
-    path = "/v1/environments",
-    tag = "environments",
-    request_body = EnvironmentCreateApiRequest,
-    responses(
-        (status = 200, description = "Created environment", body = EnvironmentResponse),
-        (status = 400, description = "Invalid request", body = ApiErrorResponse),
-        (status = 404, description = "Project not found", body = ApiErrorResponse),
-        (status = 409, description = "Environment already exists", body = ApiErrorResponse),
-        (status = 500, description = "Server error", body = ApiErrorResponse)
-    )
-)]
-async fn environment_create(
-    State(state): State<AppState>,
-    Json(request): Json<EnvironmentCreateApiRequest>,
-) -> Result<Json<EnvironmentResponse>, ApiError> {
-    let service = EnvironmentService::new(&state.db);
-    let environment = service
-        .create(EnvironmentCreateRequest {
-            current_dir: PathBuf::from(request.current_dir),
-            project: request.project,
-            slug: request.slug,
-            target: request.target,
-            baseline: request.baseline,
-            git_branch: request.git_branch,
-            git_commit_sha: request.git_commit_sha,
-            pr_number: request.pr_number,
-            status: request.status,
-            worker_queue: request.worker_queue,
-            schema_name: request.schema_name,
-        })
-        .await?;
-    info!(
-        project_id = %environment.project_ref,
-        environment = %environment.slug,
-        target_name = %environment.target_name,
-        "created environment"
-    );
-    Ok(Json(EnvironmentResponse { environment }))
-}
-
-#[utoipa::path(
-    patch,
-    path = "/v1/projects/{project_id}/environments/{slug}",
-    tag = "environments",
-    params(
-        ("project_id" = String, Path, description = "Project identifier"),
-        ("slug" = String, Path, description = "Environment slug")
-    ),
-    request_body = EnvironmentUpdateApiRequest,
-    responses(
-        (status = 200, description = "Updated environment", body = EnvironmentResponse),
-        (status = 400, description = "Invalid request", body = ApiErrorResponse),
-        (status = 404, description = "Environment not found", body = ApiErrorResponse),
-        (status = 500, description = "Server error", body = ApiErrorResponse)
-    )
-)]
-async fn environment_update(
-    State(state): State<AppState>,
-    Path((_project_id, _slug)): Path<(String, String)>,
-    Json(request): Json<EnvironmentUpdateApiRequest>,
-) -> Result<Json<EnvironmentResponse>, ApiError> {
-    let service = EnvironmentService::new(&state.db);
-    let environment = service
-        .update(EnvironmentUpdateRequest {
-            current_dir: PathBuf::from(request.current_dir),
-            project: request.project,
-            slug: request.slug,
-            baseline: request.baseline,
-            git_branch: request.git_branch,
-            git_commit_sha: request.git_commit_sha,
-            pr_number: request.pr_number,
-            status: request.status,
-            adapter_type: request.adapter_type,
-            worker_queue: request.worker_queue,
-            schema_name: request.schema_name,
-            threads: request.threads,
-        })
-        .await?;
-    info!(
-        project_id = %environment.project_ref,
-        environment = %environment.slug,
-        target_name = %environment.target_name,
-        "updated environment"
-    );
-    Ok(Json(EnvironmentResponse { environment }))
-}
-
-#[utoipa::path(
     get,
     path = "/v1/projects/{project_id}/environments",
     tag = "environments",
@@ -996,7 +900,7 @@ async fn environment_list(
     Path(project_id): Path<String>,
 ) -> Result<Json<EnvironmentsResponse>, ApiError> {
     let service = EnvironmentService::new(&state.db);
-    let environments = service.list(std::path::Path::new("."), project_id).await?;
+    let environments = service.list(project_id).await?;
     info!(count = environments.len(), "listed environments");
     Ok(Json(EnvironmentsResponse { environments }))
 }
@@ -1020,9 +924,7 @@ async fn environment_get(
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Json<EnvironmentResponse>, ApiError> {
     let service = EnvironmentService::new(&state.db);
-    let environment = service
-        .show(std::path::Path::new("."), project_id, slug)
-        .await?;
+    let environment = service.show(project_id, slug).await?;
     info!(
         project_id = %environment.project_ref,
         environment = %environment.slug,
@@ -1049,15 +951,14 @@ async fn environment_get(
 )]
 async fn environment_release(
     State(state): State<AppState>,
-    Path((_project_id, _slug)): Path<(String, String)>,
+    Path((project_id, slug)): Path<(String, String)>,
     Json(request): Json<EnvironmentReleaseApiRequest>,
 ) -> Result<Json<EnvironmentResponse>, ApiError> {
     let service = EnvironmentService::new(&state.db);
     let environment = service
         .release(EnvironmentReleaseRequest {
-            current_dir: PathBuf::from(request.current_dir),
-            project: request.project,
-            slug: request.slug,
+            project: project_id,
+            slug,
             git_branch: request.git_branch,
             git_commit_sha: request.git_commit_sha,
             git_ref: request.git_ref,
@@ -1091,9 +992,7 @@ async fn environment_history(
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Json<EnvironmentVersionsResponse>, ApiError> {
     let service = EnvironmentService::new(&state.db);
-    let versions = service
-        .history(std::path::Path::new("."), project_id, slug)
-        .await?;
+    let versions = service.history(project_id, slug).await?;
     Ok(Json(EnvironmentVersionsResponse { versions }))
 }
 
@@ -1115,15 +1014,14 @@ async fn environment_history(
 )]
 async fn environment_rollback(
     State(state): State<AppState>,
-    Path((_project_id, _slug)): Path<(String, String)>,
+    Path((project_id, slug)): Path<(String, String)>,
     Json(request): Json<EnvironmentRollbackApiRequest>,
 ) -> Result<Json<EnvironmentResponse>, ApiError> {
     let service = EnvironmentService::new(&state.db);
     let environment = service
         .rollback(EnvironmentRollbackRequest {
-            current_dir: PathBuf::from(request.current_dir),
-            project: request.project,
-            slug: request.slug,
+            project: project_id,
+            slug,
             version_id: request.version_id,
         })
         .await?;

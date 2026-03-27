@@ -267,72 +267,6 @@ async fn handle_environment_command(
     let current_dir = std::env::current_dir()?;
     let client = daemon_client(&current_dir, service_url_override)?;
     match command {
-        EnvironmentCommand::Create {
-            project,
-            slug,
-            target,
-            baseline,
-            git_branch,
-            git_commit_sha,
-            pr_number,
-            status,
-            worker_queue,
-            schema_name,
-        } => {
-            let environment = client
-                .environment_create(api::EnvironmentCreateApiRequest {
-                    current_dir: current_dir.display().to_string(),
-                    project,
-                    slug,
-                    target,
-                    baseline,
-                    git_branch,
-                    git_commit_sha,
-                    pr_number,
-                    status,
-                    worker_queue,
-                    schema_name,
-                })
-                .await?
-                .environment;
-            print_environment(&environment);
-        }
-        EnvironmentCommand::Update {
-            project,
-            slug,
-            baseline,
-            git_branch,
-            git_commit_sha,
-            pr_number,
-            status,
-            adapter_type,
-            worker_queue,
-            schema_name,
-            threads,
-        } => {
-            let environment = client
-                .environment_update(
-                    &project,
-                    &slug,
-                    api::EnvironmentUpdateApiRequest {
-                        current_dir: current_dir.display().to_string(),
-                        project: project.clone(),
-                        slug: slug.clone(),
-                        baseline,
-                        git_branch,
-                        git_commit_sha,
-                        pr_number,
-                        status,
-                        adapter_type,
-                        worker_queue,
-                        schema_name,
-                        threads,
-                    },
-                )
-                .await?
-                .environment;
-            print_environment(&environment);
-        }
         EnvironmentCommand::List { project } => {
             for environment in client.environment_list(&project).await?.environments {
                 print_environment(&environment);
@@ -432,12 +366,7 @@ async fn handle_environment_command(
                 .environment_rollback(
                     &project,
                     &slug,
-                    api::EnvironmentRollbackApiRequest {
-                        current_dir: current_dir.display().to_string(),
-                        project: project.clone(),
-                        slug: slug.clone(),
-                        version_id,
-                    },
+                    api::EnvironmentRollbackApiRequest { version_id },
                 )
                 .await?
                 .environment;

@@ -106,54 +106,6 @@ pub enum ProjectCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum EnvironmentCommand {
-    #[command(about = "Create a registered dbtx environment")]
-    Create {
-        #[arg(long)]
-        project: Option<String>,
-        #[arg(long)]
-        slug: Option<String>,
-        #[arg(long)]
-        target: Option<String>,
-        #[arg(long)]
-        baseline: Option<String>,
-        #[arg(long)]
-        git_branch: Option<String>,
-        #[arg(long)]
-        git_commit_sha: Option<String>,
-        #[arg(long)]
-        pr_number: Option<i32>,
-        #[arg(long, default_value = "active")]
-        status: String,
-        #[arg(long)]
-        worker_queue: Option<String>,
-        #[arg(long)]
-        schema_name: Option<String>,
-    },
-    #[command(about = "Update a registered dbtx environment")]
-    Update {
-        #[arg(long)]
-        project: String,
-        #[arg(long)]
-        slug: String,
-        #[arg(long)]
-        baseline: Option<String>,
-        #[arg(long)]
-        git_branch: Option<String>,
-        #[arg(long)]
-        git_commit_sha: Option<String>,
-        #[arg(long)]
-        pr_number: Option<i32>,
-        #[arg(long)]
-        status: Option<String>,
-        #[arg(long)]
-        adapter_type: Option<String>,
-        #[arg(long)]
-        worker_queue: Option<String>,
-        #[arg(long)]
-        schema_name: Option<String>,
-        #[arg(long)]
-        threads: Option<i32>,
-    },
     #[command(about = "List registered dbtx environments for a project")]
     List {
         #[arg(long)]
@@ -529,40 +481,6 @@ mod tests {
                 assert_eq!(project, "proj");
             }
             _ => panic!("expected project show command"),
-        }
-    }
-
-    #[test]
-    fn environment_update_parses() {
-        let cli = Cli::parse_from([
-            "dbtx",
-            "environment",
-            "update",
-            "--project",
-            "prj_123",
-            "--slug",
-            "ci-main",
-            "--git-branch",
-            "main",
-            "--git-commit-sha",
-            "abc123",
-        ]);
-        match cli.command {
-            Command::Environment(EnvironmentCommand::Update {
-                project,
-                slug,
-                baseline,
-                git_branch,
-                git_commit_sha,
-                ..
-            }) => {
-                assert_eq!(project, "prj_123");
-                assert_eq!(slug, "ci-main");
-                assert!(baseline.is_none());
-                assert_eq!(git_branch.as_deref(), Some("main"));
-                assert_eq!(git_commit_sha.as_deref(), Some("abc123"));
-            }
-            _ => panic!("expected environment update command"),
         }
     }
 

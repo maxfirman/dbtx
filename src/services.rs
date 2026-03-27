@@ -1,9 +1,9 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
-    CreateEnvironmentDraftInput, CreateEnvironmentInput, CreateProjectDraftInput,
-    CreateProjectInput, Db, EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput,
-    EnvironmentVersionRecord, GitState, LocalEnvironmentUpsertInput, ProjectDraftRecord,
-    ProjectRecord, RunFinalization, RunStart, UpdateEnvironmentInput, UpdateEnvironmentDraftInput,
+    CreateEnvironmentDraftInput, CreateProjectDraftInput, CreateProjectInput, Db,
+    EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput, EnvironmentVersionRecord,
+    GitState, LocalEnvironmentUpsertInput, ProjectDraftRecord, ProjectRecord, RunFinalization,
+    RunStart, UpdateEnvironmentDraftInput,
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
     read_dbt_project_name, read_git_state, spawn_dbt_child,
 };
@@ -207,39 +207,7 @@ pub struct ProjectUpdateRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct EnvironmentCreateRequest {
-    pub current_dir: PathBuf,
-    pub project: Option<String>,
-    pub slug: Option<String>,
-    pub target: Option<String>,
-    pub baseline: Option<String>,
-    pub git_branch: Option<String>,
-    pub git_commit_sha: Option<String>,
-    pub pr_number: Option<i32>,
-    pub status: String,
-    pub worker_queue: Option<String>,
-    pub schema_name: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EnvironmentUpdateRequest {
-    pub current_dir: PathBuf,
-    pub project: String,
-    pub slug: String,
-    pub baseline: Option<String>,
-    pub git_branch: Option<String>,
-    pub git_commit_sha: Option<String>,
-    pub pr_number: Option<i32>,
-    pub status: Option<String>,
-    pub adapter_type: Option<String>,
-    pub worker_queue: Option<String>,
-    pub schema_name: Option<String>,
-    pub threads: Option<i32>,
-}
-
-#[derive(Debug, Clone)]
 pub struct EnvironmentReleaseRequest {
-    pub current_dir: PathBuf,
     pub project: String,
     pub slug: String,
     pub git_branch: Option<String>,
@@ -249,7 +217,6 @@ pub struct EnvironmentReleaseRequest {
 
 #[derive(Debug, Clone)]
 pub struct EnvironmentRollbackRequest {
-    pub current_dir: PathBuf,
     pub project: String,
     pub slug: String,
     pub version_id: i64,
@@ -306,7 +273,7 @@ impl<'a> ProjectService<'a> {
                 repo_url: draft.git_repo_url.clone(),
                 project_root: draft.project_root.clone(),
             },
-            worker_queue: "generic".to_string(),
+            worker_queue: validation_worker_queue(),
             draft,
             invocation_id,
         })
@@ -375,72 +342,6 @@ impl<'a> EnvironmentService<'a> {
         Self { db }
     }
 
-    pub async fn create(&self, request: EnvironmentCreateRequest) -> AppResult<EnvironmentRecord> {
-        self.db.require_current_schema().await?;
-        let project = self
-            .resolve_project_identifier(request.project, &request.current_dir)
-            .await?;
-        let local_profile = LocalTargetProfile::from_local_project(
-            &request.current_dir,
-            request.target.as_deref(),
-        )?;
-        let profile_secrets = local_profile.encrypted_secrets()?;
-        let slug = request
-            .slug
-            .unwrap_or_else(|| local_profile.target_name.clone());
-        self.db
-            .create_environment(CreateEnvironmentInput {
-                project: project.project_id,
-                slug,
-                profile_name: local_profile.profile_name,
-                target_name: local_profile.target_name,
-                baseline_slug: request.baseline,
-                git_branch: request.git_branch,
-                git_commit_sha: request.git_commit_sha,
-                use_latest_commit: true,
-                auto_deploy: true,
-                immutable: false,
-                pr_number: request.pr_number,
-                status: request.status,
-                adapter_type: local_profile.adapter_type,
-                worker_queue: request.worker_queue,
-                schema_name: request.schema_name.or(Some(local_profile.schema_name)),
-                threads: local_profile.threads,
-                profile_config: local_profile.profile_config,
-                profile_secrets,
-            })
-            .await
-    }
-
-    pub async fn update(&self, request: EnvironmentUpdateRequest) -> AppResult<EnvironmentRecord> {
-        self.db.require_current_schema().await?;
-        let project = self
-            .resolve_project_identifier(Some(request.project), &request.current_dir)
-            .await?;
-        self.db
-            .update_environment(UpdateEnvironmentInput {
-                project: project.project_id,
-                slug: request.slug,
-                baseline_slug: request.baseline,
-                git_branch: request.git_branch,
-                git_commit_sha: request.git_commit_sha,
-                use_latest_commit: None,
-                auto_deploy: None,
-                immutable: None,
-                pr_number: request.pr_number,
-                status: request.status,
-                adapter_type: request.adapter_type,
-                worker_queue: request.worker_queue,
-                profile_name: None,
-                target_name: None,
-                schema_name: request.schema_name,
-                threads: request.threads,
-                profile_config: None,
-                profile_secrets: None,
-            })
-            .await
-    }
-
     pub async fn create_draft(&self, project: String) -> AppResult<EnvironmentDraftRecord> {
         self.db.require_current_schema().await?;
         let project = self.db.get_project_by_project_id(&project).await?;
@@ -507,7 +408,7 @@ impl<'a> EnvironmentService<'a> {
                 repo_url,
                 selected_branch: None,
             },
-            worker_queue: "generic".to_string(),
+            worker_queue: validation_worker_queue(),
         })
     }
 
@@ -530,7 +431,7 @@ impl<'a> EnvironmentService<'a> {
                 repo_url,
                 selected_branch: draft.git_branch.clone(),
             },
-            worker_queue: "generic".to_string(),
+            worker_queue: validation_worker_queue(),
         })
     }
 
@@ -589,7 +490,7 @@ impl<'a> EnvironmentService<'a> {
                 selected_branch,
                 profiles_yml,
             },
-            worker_queue: "generic".to_string(),
+            worker_queue: validation_worker_queue(),
         })
     }
 
@@ -603,9 +504,7 @@ impl<'a> EnvironmentService<'a> {
         request: EnvironmentReleaseRequest,
     ) -> AppResult<EnvironmentRecord> {
         self.db.require_current_schema().await?;
-        let project = self
-            .resolve_project_identifier(Some(request.project), &request.current_dir)
-            .await?;
+        let project = self.db.get_project_by_project_id(&request.project).await?;
         if project.mode != "remote" {
             return Err(AppError::RemoteExecutionRequiresRemoteProject(
                 project.project_id,
@@ -632,17 +531,11 @@ impl<'a> EnvironmentService<'a> {
 
     pub async fn history(
         &self,
-        current_dir: &Path,
         project: String,
         slug: String,
     ) -> AppResult<Vec<EnvironmentVersionRecord>> {
         self.db.require_current_schema().await?;
-        let project = self
-            .resolve_project_identifier(Some(project), current_dir)
-            .await?;
-        self.db
-            .list_environment_versions(&project.project_id, &slug)
-            .await
+        self.db.list_environment_versions(&project, &slug).await
     }
 
     pub async fn rollback(
@@ -650,9 +543,7 @@ impl<'a> EnvironmentService<'a> {
         request: EnvironmentRollbackRequest,
     ) -> AppResult<EnvironmentRecord> {
         self.db.require_current_schema().await?;
-        let project = self
-            .resolve_project_identifier(Some(request.project), &request.current_dir)
-            .await?;
+        let project = self.db.get_project_by_project_id(&request.project).await?;
         if project.mode != "remote" {
             return Err(AppError::RemoteExecutionRequiresRemoteProject(
                 project.project_id,
@@ -666,77 +557,21 @@ impl<'a> EnvironmentService<'a> {
 
     pub async fn list(
         &self,
-        current_dir: &Path,
         project: String,
     ) -> AppResult<Vec<EnvironmentRecord>> {
         self.db.require_current_schema().await?;
-        let project = self
-            .resolve_project_identifier(Some(project), current_dir)
-            .await?;
-        self.db.list_environments(&project.project_id).await
+        self.db.list_environments(&project).await
     }
 
     pub async fn show(
         &self,
-        current_dir: &Path,
         project: String,
         slug: String,
     ) -> AppResult<EnvironmentRecord> {
         self.db.require_current_schema().await?;
-        let project = self
-            .resolve_project_identifier(Some(project), current_dir)
-            .await?;
-        self.db.get_environment(&project.project_id, &slug).await
+        self.db.get_environment(&project, &slug).await
     }
 
-    async fn resolve_project_identifier(
-        &self,
-        project: Option<String>,
-        current_dir: &Path,
-    ) -> AppResult<ProjectRecord> {
-        match project.or_else(|| std::env::var("DBTX_PROJECT_ID").ok()) {
-            Some(project_id) => self.db.get_project_by_project_id(&project_id).await,
-            None => {
-                let local = infer_local_project_defaults(current_dir, None, None, None)?;
-                if let Ok(project) = self.db.get_project_by_project_id(&local.project_id).await {
-                    return Ok(project);
-                }
-                if let Ok(remote) = infer_remote_project_defaults(current_dir, None, None, None)
-                    && let Ok(project) = self.db.get_project_by_project_id(&remote.project_id).await
-                {
-                    return Ok(project);
-                }
-                self.load_or_create_inferred_project(current_dir).await
-            }
-        }
-    }
-
-    async fn load_or_create_inferred_project(
-        &self,
-        project_dir: &Path,
-    ) -> AppResult<ProjectRecord> {
-        let project_input = infer_local_project_defaults(project_dir, None, None, None)?;
-        match self
-            .db
-            .get_project_by_project_id(&project_input.project_id)
-            .await
-        {
-            Ok(project) => Ok(project),
-            Err(AppError::ProjectIdNotFound(_)) => {
-                self.db
-                    .upsert_project(CreateProjectInput {
-                        project_id: project_input.project_id,
-                        project_name: project_input.project_name,
-                        mode: project_input.mode,
-                        git_repo_url: project_input.git_repo_url,
-                        default_branch: project_input.default_branch,
-                        project_root: project_input.project_root,
-                    })
-                    .await
-            }
-            Err(err) => Err(err),
-        }
-    }
 }
 
 pub struct InvocationService<'a> {
@@ -1557,6 +1392,14 @@ fn local_machine_scope() -> AppResult<String> {
     Err(AppError::Io(std::io::Error::other(
         "failed to determine local machine scope",
     )))
+}
+
+fn validation_worker_queue() -> String {
+    std::env::var("DBTX_VALIDATION_QUEUE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "generic".to_string())
 }
 
 fn infer_local_identity_hash(current_dir: &Path, project_name: &str) -> AppResult<String> {

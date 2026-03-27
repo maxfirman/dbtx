@@ -76,41 +76,7 @@ pub struct ProjectDraftValidateResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct EnvironmentCreateApiRequest {
-    pub current_dir: String,
-    pub project: Option<String>,
-    pub slug: Option<String>,
-    pub target: Option<String>,
-    pub baseline: Option<String>,
-    pub git_branch: Option<String>,
-    pub git_commit_sha: Option<String>,
-    pub pr_number: Option<i32>,
-    pub status: String,
-    pub worker_queue: Option<String>,
-    pub schema_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct EnvironmentUpdateApiRequest {
-    pub current_dir: String,
-    pub project: String,
-    pub slug: String,
-    pub baseline: Option<String>,
-    pub git_branch: Option<String>,
-    pub git_commit_sha: Option<String>,
-    pub pr_number: Option<i32>,
-    pub status: Option<String>,
-    pub adapter_type: Option<String>,
-    pub worker_queue: Option<String>,
-    pub schema_name: Option<String>,
-    pub threads: Option<i32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentReleaseApiRequest {
-    pub current_dir: String,
-    pub project: String,
-    pub slug: String,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
     pub git_ref: Option<String>,
@@ -118,9 +84,6 @@ pub struct EnvironmentReleaseApiRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentRollbackApiRequest {
-    pub current_dir: String,
-    pub project: String,
-    pub slug: String,
     pub version_id: i64,
 }
 

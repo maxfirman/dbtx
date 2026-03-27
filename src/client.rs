@@ -1,7 +1,6 @@
 use crate::api::{
-    EnvironmentCreateApiRequest, EnvironmentReleaseApiRequest, EnvironmentResponse,
-    EnvironmentRollbackApiRequest, EnvironmentUpdateApiRequest, EnvironmentVersionsResponse,
-    EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
+    EnvironmentReleaseApiRequest, EnvironmentResponse, EnvironmentRollbackApiRequest,
+    EnvironmentVersionsResponse, EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
     InvocationClaimResponse, InvocationCleanupApiRequest, InvocationCleanupResponse,
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
     InvocationEvent, InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest,
@@ -102,28 +101,6 @@ impl DaemonClient {
         self.send(
             self.http
                 .post(self.url(&format!("/v1/project-drafts/{draft_id}/confirm"))),
-        )
-        .await
-    }
-
-    pub async fn environment_create(
-        &self,
-        request: EnvironmentCreateApiRequest,
-    ) -> AppResult<EnvironmentResponse> {
-        self.send(self.http.post(self.url("/v1/environments")).json(&request))
-            .await
-    }
-
-    pub async fn environment_update(
-        &self,
-        project_id: &str,
-        slug: &str,
-        request: EnvironmentUpdateApiRequest,
-    ) -> AppResult<EnvironmentResponse> {
-        self.send(
-            self.http
-                .patch(self.url(&format!("/v1/projects/{project_id}/environments/{slug}")))
-                .json(&request),
         )
         .await
     }
