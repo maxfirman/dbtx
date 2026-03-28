@@ -48,7 +48,7 @@
       {% endif %}
     </section>
 
-    <section class="rounded-xl border border-slate-200 bg-white shadow-sm" x-data="invocationLogs('{{ sse_url }}')">
+    <section class="rounded-xl border border-slate-200 bg-white shadow-sm" x-data="invocationLogs('{{ sse_url }}', {{ initial_log_sequence }})">
       <div class="border-b border-slate-200 px-5 py-4">
         <h2 class="font-semibold">Logs</h2>
       </div>

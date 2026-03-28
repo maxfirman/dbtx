@@ -75,11 +75,15 @@
         source.onmessage = handler;
       };
 
-      Alpine.data('invocationLogs', (url) => ({
+      Alpine.data('invocationLogs', (url, afterSequence = 0) => ({
         source: null,
         init() {
           if (!url) return;
-          this.source = new EventSource(url);
+          const separator = url.includes('?') ? '&' : '?';
+          const streamUrl = afterSequence > 0
+            ? `${url}${separator}after_sequence=${afterSequence}`
+            : url;
+          this.source = new EventSource(streamUrl);
           attachInvocationEventListeners(this.source, (event) => {
             const payload = JSON.parse(event.data);
             const line = this.renderLine(payload);

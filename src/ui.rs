@@ -560,6 +560,7 @@ async fn invocation_detail(
     let invocation_id = parse_uuid(&id)?;
     let invocation = db.get_invocation_status(invocation_id).await?;
     let events = db.load_invocation_events_since(invocation_id, 0).await?;
+    let initial_log_sequence = events.last().map(|(sequence, _)| *sequence).unwrap_or(0);
     let lines = events
         .into_iter()
         .filter_map(|(_, event)| {
@@ -578,6 +579,7 @@ async fn invocation_detail(
         title: "Invocation",
         invocation: invocation_detail_view(&invocation),
         initial_log_lines: lines,
+        initial_log_sequence,
         sse_url: format!("/v1/invocations/{invocation_id}/events"),
     })
 }
@@ -1298,6 +1300,7 @@ struct InvocationDetailTemplate {
     title: &'static str,
     invocation: InvocationDetailView,
     initial_log_lines: Vec<String>,
+    initial_log_sequence: u64,
     sse_url: String,
 }
 
@@ -1383,5 +1386,36 @@ mod tests {
         assert!(is_terminal_project_draft_status("failed"));
         assert!(!is_terminal_project_draft_status("draft"));
         assert!(!is_terminal_project_draft_status("validating"));
+    }
+
+    #[test]
+    fn invocation_detail_resumes_stream_after_initial_history() {
+        let rendered = InvocationDetailTemplate {
+            title: "Invocation",
+            invocation: InvocationDetailView {
+                invocation_id: Uuid::nil().to_string(),
+                status: "running".to_string(),
+                status_class: "",
+                execution_mode: "server".to_string(),
+                worker_queue: "default".to_string(),
+                worker_health: "healthy".to_string(),
+                cancel_state: "none".to_string(),
+                claimed_by: "worker-1".to_string(),
+                claimed_at: "2026-03-28T12:00:00Z".to_string(),
+                last_heartbeat_at: "2026-03-28T12:00:01Z".to_string(),
+                started_at: "2026-03-28T12:00:00Z".to_string(),
+                completed_at: "".to_string(),
+                error: "".to_string(),
+            },
+            initial_log_lines: vec!["line 1".to_string()],
+            initial_log_sequence: 7,
+            sse_url: "/v1/invocations/00000000-0000-0000-0000-000000000000/events".to_string(),
+        }
+        .render()
+        .expect("render invocation detail");
+
+        assert!(rendered.contains(
+            "x-data=\"invocationLogs('/v1/invocations/00000000-0000-0000-0000-000000000000/events', 7)\""
+        ));
     }
 }
