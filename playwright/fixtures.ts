@@ -12,6 +12,10 @@ type AppFixture = {
   baseUrl: string;
   repoUrl: string;
   tempDir: string;
+  mainInitialSha: string;
+  mainHeadSha: string;
+  previewBranch: string;
+  previewHeadSha: string;
 };
 
 type LoggedProcess = {
@@ -49,7 +53,13 @@ async function getFreePort(): Promise<number> {
   });
 }
 
-function createBareFixtureRepo(tempDir: string): string {
+function createBareFixtureRepo(tempDir: string): {
+  repoUrl: string;
+  mainInitialSha: string;
+  mainHeadSha: string;
+  previewBranch: string;
+  previewHeadSha: string;
+} {
   const sourceDir = join(tempDir, 'repo-source');
   const bareDir = join(tempDir, 'repo.git');
   cpSync(fixtureProjectRoot, sourceDir, { recursive: true });
@@ -61,8 +71,39 @@ function createBareFixtureRepo(tempDir: string): string {
   execFileSync('git', ['config', 'user.email', 'playwright@example.com'], { cwd: sourceDir });
   execFileSync('git', ['add', '.'], { cwd: sourceDir });
   execFileSync('git', ['commit', '-m', 'Initial fixture commit'], { cwd: sourceDir });
+  const mainInitialSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: sourceDir })
+    .toString()
+    .trim();
+
+  execFileSync(
+    'git',
+    ['commit', '--allow-empty', '-m', 'Second fixture commit'],
+    { cwd: sourceDir },
+  );
+  const mainHeadSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: sourceDir })
+    .toString()
+    .trim();
+
+  const previewBranch = 'preview';
+  execFileSync('git', ['checkout', '-b', previewBranch, mainInitialSha], { cwd: sourceDir });
+  execFileSync(
+    'git',
+    ['commit', '--allow-empty', '-m', 'Preview fixture commit'],
+    { cwd: sourceDir },
+  );
+  const previewHeadSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: sourceDir })
+    .toString()
+    .trim();
+
+  execFileSync('git', ['checkout', 'main'], { cwd: sourceDir });
   execFileSync('git', ['clone', '--bare', sourceDir, bareDir], { cwd: tempDir });
-  return `file://${bareDir}`;
+  return {
+    repoUrl: `file://${bareDir}`,
+    mainInitialSha,
+    mainHeadSha,
+    previewBranch,
+    previewHeadSha,
+  };
 }
 
 function spawnLoggedProcess(
@@ -230,7 +271,7 @@ export const test = base.extend<{ app: AppFixture }>({
     const databaseUrl = `postgres://dbtx:dbtx@${container.getHost()}:${container.getMappedPort(5432)}/dbtx`;
     const serverPort = await getFreePort();
     const baseUrl = `http://127.0.0.1:${serverPort}`;
-    const repoUrl = createBareFixtureRepo(tempDir);
+    const repo = createBareFixtureRepo(tempDir);
     const serverLogPath = join(tempDir, 'logs', 'server.log');
 
     await waitForPostgresReady(container, 30_000);
@@ -297,8 +338,12 @@ export const test = base.extend<{ app: AppFixture }>({
         await waitForWorker(join(tempDir, 'logs', 'worker.log'), 15_000);
         await use({
           baseUrl,
-          repoUrl,
+          repoUrl: repo.repoUrl,
           tempDir,
+          mainInitialSha: repo.mainInitialSha,
+          mainHeadSha: repo.mainHeadSha,
+          previewBranch: repo.previewBranch,
+          previewHeadSha: repo.previewHeadSha,
         });
       } finally {
         await stopProcess(worker);

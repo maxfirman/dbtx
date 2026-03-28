@@ -28,6 +28,39 @@
   </div>
   <script>
     document.addEventListener('alpine:init', () => {
+      window.dbtxLockEnvironmentDraftModal = (scope) => {
+        const root = scope || document;
+        const form = root.querySelector('form[data-environment-draft-form="true"]');
+        if (!form) return;
+        if (!form.querySelector('[data-validated-summary="true"]')) return;
+        for (const element of form.querySelectorAll('input, select, textarea')) {
+          if (element.type === 'hidden') continue;
+          element.disabled = true;
+        }
+      };
+
+      window.dbtxPostSwap = async (url, params, targetSelector) => {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'HX-Request': 'true',
+            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          },
+          body: new URLSearchParams(params).toString(),
+        });
+        const html = await response.text();
+        const target = document.querySelector(targetSelector);
+        if (!target) return;
+        target.outerHTML = html;
+        if (window.htmx) {
+          window.htmx.process(document.body);
+        }
+        if (window.Alpine) {
+          window.Alpine.initTree(document.body);
+        }
+        window.dbtxLockEnvironmentDraftModal(document.body);
+      };
+
       const attachInvocationEventListeners = (source, handler) => {
         const eventTypes = [
           'invocation.started',
@@ -104,6 +137,7 @@
             if (window.Alpine) {
               window.Alpine.initTree(modalRoot);
             }
+            window.dbtxLockEnvironmentDraftModal(modalRoot);
           } finally {
             if (this.source) {
               this.source.close();
@@ -436,11 +470,13 @@
 
       Alpine.data('environmentDraftForm', (options) => ({
         status: options.status,
+        validated: !!options.validated,
         statusUrl: options.statusUrl,
         branchRefreshUrl: options.branchRefreshUrl,
         validateUrl: options.validateUrl,
         confirmUrl: options.confirmUrl,
         latestCommitSha: options.latestCommitSha || '',
+        useLatestCommit: !!options.useLatestCommit,
         configPairs: options.configPairs || [],
         secretPairs: options.secretPairs || [],
         init() {
@@ -449,15 +485,27 @@
               this.refreshStatus();
             }, 1500);
           }
+          if (this.validated) {
+            this.$nextTick(() => {
+              this.applyValidatedLock();
+            });
+          }
         },
         get isBusy() {
           return this.status === 'loading_git' || this.status === 'validating' || this.status === 'confirming';
         },
         get inputsLocked() {
-          return this.isBusy || this.status === 'validated';
+          return this.isBusy || this.validated;
+        },
+        applyValidatedLock() {
+          if (!this.validated) return;
+          for (const element of this.$root.querySelectorAll('input, select, textarea')) {
+            if (element.type === 'hidden') continue;
+            element.disabled = true;
+          }
         },
         useLatestSelected() {
-          return !!this.$refs.useLatestCommit?.checked;
+          return !!this.useLatestCommit;
         },
         addConfigPair() {
           this.configPairs.push({ key: '', value: '' });
@@ -501,6 +549,7 @@
           if (window.Alpine) {
             window.Alpine.initTree(modalRoot);
           }
+          window.dbtxLockEnvironmentDraftModal(modalRoot);
         },
         async postForm(url) {
           this.syncHiddenJson();
@@ -535,7 +584,7 @@
         },
         async submit(event) {
           event.preventDefault();
-          if (this.status === 'validated') {
+          if (this.validated) {
             this.status = 'confirming';
             await this.postForm(this.confirmUrl);
             return;

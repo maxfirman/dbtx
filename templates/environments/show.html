@@ -7,8 +7,6 @@
     <h1 class="mt-2 text-3xl font-semibold tracking-tight">{{ project.project_name }} / {{ environment_slug }}</h1>
   </div>
 
-  <div id="environment-panel">
-    {{ panel_html|safe }}
-  </div>
+  {{ panel_html|safe }}
 </div>
 {% endblock %}

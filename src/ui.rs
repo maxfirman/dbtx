@@ -19,7 +19,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -189,9 +189,26 @@ struct EnvironmentDraftForm {
     immutable: Option<String>,
     adapter_type: String,
     schema_name: String,
+    #[serde(default, deserialize_with = "deserialize_optional_i32_form_field")]
     threads: Option<i32>,
     profile_config_json: Option<String>,
     profile_secrets_json: Option<String>,
+}
+
+fn deserialize_optional_i32_form_field<'de, D>(
+    deserializer: D,
+) -> Result<Option<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(raw) => raw
+            .parse::<i32>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
 }
 
 async fn project_create_modal() -> Result<Html<String>, UiError> {
@@ -651,22 +668,16 @@ async fn environment_release(
     Path((project_id, slug)): Path<(String, String)>,
     Form(form): Form<EnvironmentReleaseForm>,
 ) -> Result<Response, UiError> {
-    let db = state.db();
-    db.require_current_schema().await?;
-    let project = db.get_project_by_project_id(&project_id).await?;
-    if project.mode != "remote" {
-        return Err(UiError(AppError::RemoteExecutionRequiresRemoteProject(
-            project.project_id,
-            project.mode,
-        )));
-    }
-    db.release_environment(crate::db::EnvironmentReleaseInput {
-        project: project.project_id.clone(),
-        slug: slug.clone(),
-        git_branch: form.git_branch,
-        git_commit_sha: form.git_commit_sha,
-    })
-    .await?;
+    let service = EnvironmentService::new(state.db());
+    service
+        .release(crate::services::EnvironmentReleaseRequest {
+            project: project_id.clone(),
+            slug: slug.clone(),
+            git_branch: form.git_branch,
+            git_commit_sha: Some(form.git_commit_sha),
+            git_ref: None,
+        })
+        .await?;
 
     if is_htmx(&headers) {
         return environment_detail(State(state), htmx_headers(), Path((project_id, slug)))
@@ -688,16 +699,13 @@ async fn environment_rollback(
     Path((project_id, slug)): Path<(String, String)>,
     Form(form): Form<EnvironmentRollbackForm>,
 ) -> Result<Response, UiError> {
-    let db = state.db();
-    db.require_current_schema().await?;
-    let project = db.get_project_by_project_id(&project_id).await?;
-    if project.mode != "remote" {
-        return Err(UiError(AppError::RemoteExecutionRequiresRemoteProject(
-            project.project_id,
-            project.mode,
-        )));
-    }
-    db.rollback_environment_to_version(&project.project_id, &slug, form.version_id)
+    let service = EnvironmentService::new(state.db());
+    service
+        .rollback(crate::services::EnvironmentRollbackRequest {
+            project: project_id.clone(),
+            slug: slug.clone(),
+            version_id: form.version_id,
+        })
         .await?;
 
     if is_htmx(&headers) {
@@ -1060,6 +1068,18 @@ fn environment_draft_view(
                 == draft.git_commit_sha.as_deref(),
         })
         .collect::<Vec<_>>();
+    let commit_options = if commit_options.is_empty() && !draft.git_commit_sha.clone().unwrap_or_default().is_empty() {
+        let sha = draft.git_commit_sha.clone().unwrap_or_default();
+        vec![EnvironmentDraftCommitOptionView {
+            sha: sha.clone(),
+            short_sha: sha.chars().take(8).collect(),
+            summary: "Resolved latest commit".to_string(),
+            committed_at: String::new(),
+            selected: true,
+        }]
+    } else {
+        commit_options
+    };
     Ok(EnvironmentDraftView {
         status: draft.status.clone(),
         slug: draft.slug.clone(),

@@ -11,19 +11,24 @@
     </div>
 
     <form
+      data-environment-draft-form="true"
       x-data="environmentDraftForm({
         status: '{{ draft.status }}',
+        validated: {% if draft.is_validated %}true{% else %}false{% endif %},
         statusUrl: '{{ draft.status_url }}',
         branchRefreshUrl: '{{ draft.branch_refresh_url }}',
         validateUrl: '{{ draft.validate_url }}',
         confirmUrl: '{{ draft.confirm_url }}',
         latestCommitSha: '{{ draft.latest_commit_sha }}',
+        useLatestCommit: {% if draft.use_latest_commit %}true{% else %}false{% endif %},
         configPairs: {{ draft.profile_config_pairs_json|safe }},
         secretPairs: {{ draft.profile_secret_pairs_json|safe }}
       })"
       @submit="submit($event)"
       class="space-y-6 px-6 py-5"
     >
+      {% if draft.is_validated %}
+      {% else %}
       <div class="grid gap-4 md:grid-cols-2">
         <label class="block">
           <span class="mb-2 block text-sm font-medium text-slate-700">Environment Slug</span>
@@ -32,6 +37,7 @@
             type="text"
             required
             value="{{ draft.slug }}"
+            {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
             :disabled="inputsLocked"
             class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
             placeholder="dev"
@@ -43,6 +49,7 @@
           <span class="mb-2 block text-sm font-medium text-slate-700">Git Branch</span>
           <select
             name="git_branch"
+            {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
             :disabled="inputsLocked || status === 'loading_git'"
             @change="refreshBranch()"
             class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
@@ -62,11 +69,12 @@
             <div class="mt-1 text-xs text-slate-500">Track the latest commit on the selected branch.</div>
           </div>
           <input
-            x-ref="useLatestCommit"
+            x-model="useLatestCommit"
             name="use_latest_commit"
             type="checkbox"
             value="true"
             {% if draft.use_latest_commit %}checked{% endif %}
+            {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
             :disabled="inputsLocked"
             class="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
           >
@@ -82,6 +90,7 @@
             type="checkbox"
             value="true"
             {% if draft.auto_deploy %}checked{% endif %}
+            {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
             :disabled="inputsLocked"
             class="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
           >
@@ -97,6 +106,7 @@
             type="checkbox"
             value="true"
             {% if draft.immutable %}checked{% endif %}
+            {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
             :disabled="inputsLocked"
             class="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
           >
@@ -122,6 +132,7 @@
             x-ref="gitCommitSha"
             :name="useLatestSelected() ? '' : 'git_commit_sha'"
             x-show="!useLatestSelected()"
+            {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
             :disabled="inputsLocked || status === 'loading_git'"
             class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
           >
@@ -142,6 +153,7 @@
               type="text"
               required
               value="{{ draft.adapter_type }}"
+              {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
               :disabled="inputsLocked"
               class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
               placeholder="postgres"
@@ -154,6 +166,7 @@
               type="text"
               required
               value="{{ draft.schema_name }}"
+              {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
               :disabled="inputsLocked"
               class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
               placeholder="analytics"
@@ -166,6 +179,7 @@
               type="number"
               min="1"
               value="{{ draft.threads }}"
+              {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
               :disabled="inputsLocked"
               class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
               placeholder="4"
@@ -235,6 +249,7 @@
           <input x-ref="profileSecretsJson" name="profile_secrets_json" type="hidden">
         </section>
       </div>
+      {% endif %}
 
       {% if draft.is_loading %}
       <div
@@ -290,7 +305,11 @@
       {% endif %}
 
       {% if draft.is_validated %}
-      <div class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-950">
+      <div
+        data-validated-summary="true"
+        class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-950"
+        x-init="$nextTick(() => { for (const element of $root.querySelectorAll('input, select, textarea')) { if (element.type !== 'hidden') element.disabled = true; } })"
+      >
         <div class="flex items-center justify-between gap-4">
           <div>
             <div class="font-medium">Validation succeeded</div>
