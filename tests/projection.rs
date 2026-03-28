@@ -1,4 +1,5 @@
 use dbtx::api::{
+    EnvironmentDraftUpdateApiRequest, EnvironmentReleaseApiRequest, EnvironmentRollbackApiRequest,
     InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationCommandApi,
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationEventBatchApiRequest,
     InvocationExecutionModeApi, InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
@@ -662,6 +663,172 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    bootstrap_remote_project_only(db.pool(), repo.project_dir(), &project_id).await;
+
+    let created = client
+        .environment_draft_create(&project_id)
+        .await
+        .expect("create environment draft");
+    assert_eq!(created.draft.status, "loading_git");
+
+    let head_sha = git_rev_parse(repo.project_dir(), "HEAD");
+    let request = environment_draft_update_request("api-env", "main", Some(&head_sha), false);
+
+    let refreshed = client
+        .environment_draft_refresh_branch(created.draft.id, request.clone())
+        .await
+        .expect("refresh branch");
+    assert_eq!(refreshed.draft.status, "loading_git");
+    assert_eq!(refreshed.draft.slug, "api-env");
+    assert_eq!(refreshed.draft.git_branch.as_deref(), Some("main"));
+
+    let validating = client
+        .environment_draft_validate(created.draft.id, request)
+        .await
+        .expect("validate draft");
+    assert_eq!(validating.draft.status, "validating");
+    assert_eq!(validating.draft.git_commit_sha.as_deref(), Some(head_sha.as_str()));
+
+    mark_environment_draft_validated(
+        db.pool(),
+        created.draft.id,
+        "main",
+        &head_sha,
+        &["main", "preview"],
+    )
+    .await;
+
+    let confirmed = client
+        .environment_draft_confirm(created.draft.id)
+        .await
+        .expect("confirm validated draft");
+    assert_eq!(confirmed.environment.slug, "api-env");
+    assert_eq!(confirmed.environment.target_name, "api-env");
+    assert_eq!(confirmed.environment.git_branch.as_deref(), Some("main"));
+    assert_eq!(
+        confirmed.environment.git_commit_sha.as_deref(),
+        Some(head_sha.as_str())
+    );
+    assert!(!confirmed.environment.use_latest_commit);
+    assert!(confirmed.environment.auto_deploy);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    fs::write(repo.project_dir().join("README.md"), "second commit\n").expect("write second commit file");
+    git(&["add", "."], repo.project_dir().parent().expect("repo root"));
+    git(&["commit", "-m", "second"], repo.project_dir().parent().expect("repo root"));
+
+    let head_sha = git_rev_parse(repo.project_dir(), "HEAD");
+    let previous_sha = git_rev_parse(repo.project_dir(), "HEAD~1");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "release-api",
+        Some(&head_sha),
+    )
+    .await;
+
+    let initial_history = client
+        .environment_history(&project_id, "release-api")
+        .await
+        .expect("load initial history");
+    assert_eq!(initial_history.versions.len(), 1);
+
+    let unchanged = client
+        .environment_release(
+            &project_id,
+            "release-api",
+            EnvironmentReleaseApiRequest {
+                git_branch: Some("main".to_string()),
+                git_commit_sha: Some(head_sha.clone()),
+                git_ref: None,
+            },
+        )
+        .await
+        .expect("idempotent release");
+    assert_eq!(
+        unchanged.environment.git_commit_sha.as_deref(),
+        Some(head_sha.as_str())
+    );
+    let history_after_noop = client
+        .environment_history(&project_id, "release-api")
+        .await
+        .expect("history after noop release");
+    assert_eq!(history_after_noop.versions.len(), 1);
+
+    let released = client
+        .environment_release(
+            &project_id,
+            "release-api",
+            EnvironmentReleaseApiRequest {
+                git_branch: Some("main".to_string()),
+                git_commit_sha: Some(previous_sha.clone()),
+                git_ref: None,
+            },
+        )
+        .await
+        .expect("release previous commit");
+    assert_eq!(
+        released.environment.git_commit_sha.as_deref(),
+        Some(previous_sha.as_str())
+    );
+    let history_after_release = client
+        .environment_history(&project_id, "release-api")
+        .await
+        .expect("history after release");
+    assert_eq!(history_after_release.versions.len(), 2);
+    assert_eq!(history_after_release.versions[0].reason, "released");
+
+    let original_version = history_after_release
+        .versions
+        .iter()
+        .find(|version| version.git_commit_sha.as_deref() == Some(head_sha.as_str()))
+        .expect("original version present");
+
+    let rolled_back = client
+        .environment_rollback(
+            &project_id,
+            "release-api",
+            EnvironmentRollbackApiRequest {
+                version_id: original_version.id,
+            },
+        )
+        .await
+        .expect("rollback to original version");
+    assert_eq!(
+        rolled_back.environment.git_commit_sha.as_deref(),
+        Some(head_sha.as_str())
+    );
+    let history_after_rollback = client
+        .environment_history(&project_id, "release-api")
+        .await
+        .expect("history after rollback");
+    assert_eq!(history_after_rollback.versions.len(), 3);
+    assert_eq!(history_after_rollback.versions[0].reason, "rolled_back");
+    assert_eq!(
+        history_after_rollback.versions[0].git_commit_sha.as_deref(),
+        Some(head_sha.as_str())
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_list_filters_apply_to_operator_views() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -958,6 +1125,33 @@ async fn bootstrap_project_and_env(pool: &PgPool, repo: &TempProjectRepo, slug: 
     .await;
 }
 
+async fn bootstrap_remote_project_only(pool: &PgPool, project_dir: &Path, project_id: &str) {
+    let project_name = read_dbt_project_name(project_dir);
+    let project_root = dbtx::services::relative_project_root(
+        project_dir.parent().expect("repo root"),
+        project_dir,
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata)
+        VALUES ($1, $2, 'remote', 'https://example.com/repo.git', 'main', $3, '{}'::jsonb)
+        ON CONFLICT (project_id) DO UPDATE
+        SET project_name = EXCLUDED.project_name,
+            mode = EXCLUDED.mode,
+            git_repo_url = EXCLUDED.git_repo_url,
+            default_branch = EXCLUDED.default_branch,
+            project_root = EXCLUDED.project_root
+        "#,
+    )
+    .bind(project_id)
+    .bind(&project_name)
+    .bind(&project_root)
+    .execute(pool)
+    .await
+    .expect("upsert remote project");
+}
+
 async fn bootstrap_remote_project_and_env_direct(
     pool: &PgPool,
     project_dir: &Path,
@@ -1069,6 +1263,71 @@ fn local_invocation_request(
         project_id: None,
         environment_slug: environment_slug.map(ToString::to_string),
     }
+}
+
+fn environment_draft_update_request(
+    slug: &str,
+    git_branch: &str,
+    git_commit_sha: Option<&str>,
+    use_latest_commit: bool,
+) -> EnvironmentDraftUpdateApiRequest {
+    EnvironmentDraftUpdateApiRequest {
+        slug: slug.to_string(),
+        git_branch: Some(git_branch.to_string()),
+        git_commit_sha: git_commit_sha.map(ToString::to_string),
+        use_latest_commit,
+        auto_deploy: true,
+        immutable: false,
+        adapter_type: "duckdb".to_string(),
+        schema_name: "main".to_string(),
+        threads: Some(4),
+        profile_config: serde_json::json!({ "path": "warehouse.duckdb" }),
+        profile_secrets: serde_json::json!({}),
+    }
+}
+
+async fn mark_environment_draft_validated(
+    pool: &PgPool,
+    draft_id: Uuid,
+    git_branch: &str,
+    git_commit_sha: &str,
+    branch_options: &[&str],
+) {
+    let branch_options = serde_json::Value::Array(
+        branch_options
+            .iter()
+            .map(|branch| serde_json::Value::String((*branch).to_string()))
+            .collect(),
+    );
+    let commit_options = serde_json::json!([
+        {
+            "sha": git_commit_sha,
+            "short_sha": &git_commit_sha[..8],
+            "summary": "fixture commit",
+            "committed_at": "",
+        }
+    ]);
+    sqlx::query(
+        r#"
+        UPDATE environment_onboarding_drafts
+        SET status = 'validated',
+            git_branch = $2,
+            git_commit_sha = $3,
+            branch_options = $4,
+            commit_options = $5,
+            validated_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(draft_id)
+    .bind(git_branch)
+    .bind(git_commit_sha)
+    .bind(sqlx::types::Json(branch_options))
+    .bind(sqlx::types::Json(commit_options))
+    .execute(pool)
+    .await
+    .expect("mark environment draft validated");
 }
 
 fn remote_invocation_request(
