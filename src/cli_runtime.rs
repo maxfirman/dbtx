@@ -509,3 +509,33 @@ fn parse_cancel_state_filter(value: Option<&str>) -> AppResult<Option<Invocation
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_release_validation_args;
+
+    #[test]
+    fn release_validation_args_support_git_ref_resolution() {
+        let args =
+            build_release_validation_args(Some("main".to_string()), None, Some("preview".to_string()));
+        assert_eq!(args, vec!["--git-branch", "main", "--git-ref", "preview"]);
+    }
+
+    #[test]
+    fn release_validation_args_support_commit_sha_resolution() {
+        let args = build_release_validation_args(
+            Some("main".to_string()),
+            Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            None,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--git-branch",
+                "main",
+                "--git-commit-sha",
+                "0123456789abcdef0123456789abcdef01234567",
+            ]
+        );
+    }
+}

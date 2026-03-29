@@ -902,7 +902,6 @@ async fn environment_release(
             slug,
             git_branch: request.git_branch,
             git_commit_sha: request.git_commit_sha,
-            git_ref: request.git_ref,
         })
         .await?;
     info!(

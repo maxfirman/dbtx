@@ -693,7 +693,6 @@ async fn environment_release(
             slug: slug.clone(),
             git_branch: form.git_branch,
             git_commit_sha: Some(form.git_commit_sha),
-            git_ref: None,
         })
         .await?;
 

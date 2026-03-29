@@ -212,7 +212,6 @@ pub struct EnvironmentReleaseRequest {
     pub slug: String,
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
-    pub git_ref: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -511,20 +510,18 @@ impl<'a> EnvironmentService<'a> {
                 project.mode,
             ));
         }
-        let target = validate_release_target_request(ReleaseTargetRequest {
-            git_branch: request.git_branch,
-            git_commit_sha: request.git_commit_sha,
-            git_ref: request.git_ref,
+        let git_commit_sha = request.git_commit_sha.ok_or_else(|| {
+            AppError::InvalidReleaseTarget(
+                "public release API requires git_commit_sha; use worker-validated release flow to resolve refs"
+                    .to_string(),
+            )
         })?;
         self.db
             .release_environment(EnvironmentReleaseInput {
                 project: project.project_id,
                 slug: request.slug,
-                git_branch: target.git_branch,
-                git_commit_sha: target
-                    .git_commit_sha
-                    .or(target.git_ref)
-                    .expect("validated release target"),
+                git_branch: request.git_branch,
+                git_commit_sha,
             })
             .await
     }

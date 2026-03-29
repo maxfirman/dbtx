@@ -757,7 +757,6 @@ async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
             EnvironmentReleaseApiRequest {
                 git_branch: Some("main".to_string()),
                 git_commit_sha: Some(head_sha.clone()),
-                git_ref: None,
             },
         )
         .await
@@ -779,7 +778,6 @@ async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
             EnvironmentReleaseApiRequest {
                 git_branch: Some("main".to_string()),
                 git_commit_sha: Some(previous_sha.clone()),
-                git_ref: None,
             },
         )
         .await

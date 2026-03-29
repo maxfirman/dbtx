@@ -105,7 +105,6 @@ pub struct EnvironmentDraftStartResponse {
 pub struct EnvironmentReleaseApiRequest {
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
-    pub git_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
