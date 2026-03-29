@@ -3,7 +3,7 @@ use dbtx::api::{
     InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationCommandApi,
     InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationEventBatchApiRequest,
     InvocationExecutionModeApi, InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
-    InvocationListApiRequest,
+    InvocationListApiRequest, ProjectDraftCreateApiRequest,
 };
 use dbtx::client::DaemonClient;
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
@@ -829,6 +829,156 @@ async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn project_draft_api_round_trip_and_confirms_validated_draft() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    let repo_root = repo.project_dir().parent().expect("repo root");
+    let project_root = dbtx::services::relative_project_root(repo_root, repo.project_dir());
+
+    let created = client
+        .project_draft_create(ProjectDraftCreateApiRequest {
+            git_repo_url: "https://example.com/repo.git".to_string(),
+            project_root: project_root.clone(),
+        })
+        .await
+        .expect("create project draft");
+    assert_eq!(created.draft.status, "draft");
+    assert_eq!(created.draft.project_root, project_root);
+
+    let validating = client
+        .project_draft_validate(created.draft.id)
+        .await
+        .expect("start project draft validation");
+    assert_eq!(validating.draft.status, "validating");
+
+    let project_name = read_dbt_project_name(repo.project_dir());
+    mark_project_draft_validated(
+        db.pool(),
+        created.draft.id,
+        &project_name,
+        "main",
+    )
+    .await;
+
+    let reloaded = client
+        .project_draft_get(created.draft.id)
+        .await
+        .expect("reload validated draft");
+    assert_eq!(reloaded.draft.status, "validated");
+    assert_eq!(reloaded.draft.project_name.as_deref(), Some(project_name.as_str()));
+    assert_eq!(reloaded.draft.default_branch.as_deref(), Some("main"));
+
+    let confirmed = client
+        .project_draft_confirm(created.draft.id)
+        .await
+        .expect("confirm validated project draft");
+    assert_eq!(confirmed.project.mode, "remote");
+    assert_eq!(
+        confirmed.project.git_repo_url.as_deref(),
+        Some("https://example.com/repo.git")
+    );
+    assert_eq!(confirmed.project.project_root.as_deref(), Some(project_root.as_str()));
+    assert_eq!(confirmed.project.project_name, project_name);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn validation_queue_routes_onboarding_but_not_normal_remote_invocations() {
+    let db = TestDatabase::new_with_validation_queue("validation-only").await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+
+    let repo_root = repo.project_dir().parent().expect("repo root");
+    let project_root = dbtx::services::relative_project_root(repo_root, repo.project_dir());
+
+    let project_draft = client
+        .project_draft_create(ProjectDraftCreateApiRequest {
+            git_repo_url: "https://example.com/repo.git".to_string(),
+            project_root: project_root.clone(),
+        })
+        .await
+        .expect("create project draft");
+    let project_validation = client
+        .project_draft_validate(project_draft.draft.id)
+        .await
+        .expect("validate project draft");
+
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    bootstrap_remote_project_only(db.pool(), repo.project_dir(), &project_id).await;
+    let env_draft = client
+        .environment_draft_create(&project_id)
+        .await
+        .expect("create environment draft");
+    let head_sha = git_rev_parse(repo.project_dir(), "HEAD");
+    let env_request = environment_draft_update_request("queue-env", "main", Some(&head_sha), false);
+    let env_prepare = client
+        .environment_draft_refresh_branch(env_draft.draft.id, env_request.clone())
+        .await
+        .expect("refresh env branch");
+    let env_validation = client
+        .environment_draft_validate(env_draft.draft.id, env_request)
+        .await
+        .expect("validate env draft");
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "queue-env",
+        Some(&head_sha),
+    )
+    .await;
+    let normal_invocation = client
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "queue-env",
+            InvocationCommandApi::Ls,
+        ))
+        .await
+        .expect("create normal remote invocation");
+
+    let rows = sqlx::query(
+        "SELECT invocation_id, worker_queue FROM invocations WHERE invocation_id IN ($1, $2, $3, $4)",
+    )
+    .bind(project_validation.invocation_id)
+    .bind(env_prepare.invocation_id)
+    .bind(env_validation.invocation_id)
+    .bind(normal_invocation.invocation_id)
+    .fetch_all(db.pool())
+    .await
+    .expect("load invocation queues");
+
+    let mut queues = std::collections::HashMap::new();
+    for row in rows {
+        let invocation_id: Uuid = row.get("invocation_id");
+        let worker_queue: String = row.get("worker_queue");
+        queues.insert(invocation_id, worker_queue);
+    }
+
+    assert_eq!(
+        queues.get(&project_validation.invocation_id).map(String::as_str),
+        Some("validation-only")
+    );
+    assert_eq!(
+        queues.get(&env_prepare.invocation_id).map(String::as_str),
+        Some("validation-only")
+    );
+    assert_eq!(
+        queues.get(&env_validation.invocation_id).map(String::as_str),
+        Some("validation-only")
+    );
+    assert_eq!(
+        queues.get(&normal_invocation.invocation_id).map(String::as_str),
+        Some("generic")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_list_filters_apply_to_operator_views() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -912,8 +1062,16 @@ struct TestDatabase {
 
 impl TestDatabase {
     async fn new() -> Self {
+        Self::new_inner(None).await
+    }
+
+    async fn new_with_validation_queue(queue: &str) -> Self {
+        Self::new_inner(Some(queue)).await
+    }
+
+    async fn new_inner(validation_queue: Option<&str>) -> Self {
         if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
-            let daemon = TestDaemon::start(&url);
+            let daemon = TestDaemon::start(&url, validation_queue);
             init_dbtx_schema(daemon.service_url());
             let pool = PgPool::connect(&url)
                 .await
@@ -939,7 +1097,7 @@ impl TestDatabase {
             .await
             .expect("postgres port");
         let url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx");
-        let daemon = TestDaemon::start(&url);
+        let daemon = TestDaemon::start(&url, validation_queue);
         init_dbtx_schema(daemon.service_url());
         let pool = PgPool::connect(&url)
             .await
@@ -966,16 +1124,19 @@ struct TestDaemon {
 }
 
 impl TestDaemon {
-    fn start(database_url: &str) -> Self {
+    fn start(database_url: &str, validation_queue: Option<&str>) -> Self {
         let listen = next_listen_addr();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_dbtx-server"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx-server"));
+        command
             .args(["--listen", &listen])
             .env("DBTX_DATABASE_URL", database_url)
             .env("DBTX_SECRET_KEY", "test-secret-key")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start dbtx-server");
+            .stderr(Stdio::null());
+        if let Some(validation_queue) = validation_queue {
+            command.env("DBTX_VALIDATION_QUEUE", validation_queue);
+        }
+        let mut child = command.spawn().expect("start dbtx-server");
 
         let service_url = format!("http://{listen}");
         wait_for_server(&service_url, &mut child);
@@ -1150,6 +1311,32 @@ async fn bootstrap_remote_project_only(pool: &PgPool, project_dir: &Path, projec
     .execute(pool)
     .await
     .expect("upsert remote project");
+}
+
+async fn mark_project_draft_validated(
+    pool: &PgPool,
+    draft_id: Uuid,
+    project_name: &str,
+    default_branch: &str,
+) {
+    sqlx::query(
+        r#"
+        UPDATE project_onboarding_drafts
+        SET status = 'validated',
+            validation_error = NULL,
+            project_name = $2,
+            default_branch = $3,
+            validated_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(draft_id)
+    .bind(project_name)
+    .bind(default_branch)
+    .execute(pool)
+    .await
+    .expect("mark project draft validated");
 }
 
 async fn bootstrap_remote_project_and_env_direct(
