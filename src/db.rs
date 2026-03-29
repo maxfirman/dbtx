@@ -706,6 +706,38 @@ impl Db {
         Ok(())
     }
 
+    pub async fn fail_environment_draft(
+        &self,
+        draft_id: Uuid,
+        error: &str,
+    ) -> AppResult<EnvironmentDraftRecord> {
+        let row = sqlx::query(
+            r#"
+            UPDATE environment_onboarding_drafts
+            SET status = 'failed',
+                validation_error = $2,
+                validated_at = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
+                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                profile_secrets, branch_options, commit_options, status, validation_error,
+                validation_invocation_id, created_at, updated_at, validated_at
+            "#
+        )
+        .bind(draft_id)
+        .bind(error)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("environment draft '{draft_id}' was not found"),
+            ))
+        })?;
+        Ok(environment_draft_record_from_row(&row))
+    }
+
     pub async fn confirm_environment_draft(
         &self,
         draft_id: Uuid,

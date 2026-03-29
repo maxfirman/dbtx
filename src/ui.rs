@@ -252,9 +252,17 @@ async fn environment_draft_branch_refresh(
     Form(form): Form<EnvironmentDraftForm>,
 ) -> Result<Html<String>, UiError> {
     let service = EnvironmentService::new(state.db());
-    let prepared = service
-        .refresh_draft_branch(draft_id, environment_draft_update_request(form)?)
-        .await?;
+    let request = environment_draft_update_request(form)?;
+    let prepared = match service.refresh_draft_branch(draft_id, request).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let draft = state
+                .db()
+                .fail_environment_draft(draft_id, &error.to_string())
+                .await?;
+            return render_environment_draft_modal(state.db(), &draft).await;
+        }
+    };
     start_environment_draft_prepared(&state, prepared).await?;
     render_environment_draft_modal(state.db(), &service.get_draft(draft_id).await?).await
 }
@@ -265,9 +273,17 @@ async fn environment_draft_validate(
     Form(form): Form<EnvironmentDraftForm>,
 ) -> Result<Html<String>, UiError> {
     let service = EnvironmentService::new(state.db());
-    let prepared = service
-        .prepare_draft_validation(draft_id, environment_draft_update_request(form)?)
-        .await?;
+    let request = environment_draft_update_request(form)?;
+    let prepared = match service.prepare_draft_validation(draft_id, request).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let draft = state
+                .db()
+                .fail_environment_draft(draft_id, &error.to_string())
+                .await?;
+            return render_environment_draft_modal(state.db(), &draft).await;
+        }
+    };
     start_environment_draft_validation(&state, prepared).await?;
     render_environment_draft_modal(state.db(), &service.get_draft(draft_id).await?).await
 }

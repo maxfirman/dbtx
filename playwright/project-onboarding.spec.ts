@@ -184,6 +184,34 @@ test.describe('project onboarding', () => {
     await expect(page.locator('input[name="git_commit_sha"]').last()).toHaveValue(app.mainHeadSha);
   });
 
+  test('shows environment validation failure inline', async ({ page, app }) => {
+    await createProject(page, app.repoUrl);
+
+    const projectCard = page.locator('section').filter({ hasText: app.repoUrl });
+    await projectCard.getByRole('button', { name: 'Create Environment' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Create Environment' })).toBeVisible();
+    const modalForm = page.locator('#modal-root form');
+    await expect(page.getByText('Loading branch and commit metadata…')).toHaveCount(0, { timeout: 30_000 });
+
+    await modalForm.locator('input[name="slug"]').fill('invalid-env');
+    await modalForm.locator('input[name="adapter_type"]').fill('not-a-real-adapter');
+    await modalForm.locator('input[name="schema_name"]').fill('main');
+    await modalForm.locator('input[name="threads"]').fill('4');
+    await modalForm.getByRole('button', { name: 'Add Field' }).click();
+    await modalForm.locator('input[placeholder="database"]').fill('path');
+    await modalForm.locator('input[placeholder="warehouse"]').fill('warehouse.duckdb');
+
+    const createButton = modalForm.getByRole('button', { name: 'Create Environment' });
+    await createButton.click();
+
+    await expect(page.getByText('Validation failed')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('Update the environment settings above, then retry.')).toBeVisible();
+    await expect(createButton).toBeEnabled();
+    await expect(modalForm.locator('input[name="slug"]')).toBeEnabled();
+    await expect(modalForm.locator('input[name="adapter_type"]')).toBeEnabled();
+  });
+
   test('releases and rolls back an environment through the UI', async ({ page, app }) => {
     await createProject(page, app.repoUrl);
     await createEnvironment(page, 'release-ui');
