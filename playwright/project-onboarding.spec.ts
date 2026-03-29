@@ -14,6 +14,9 @@ async function createProject(page, repoUrl) {
   await expect(page.getByText('Validation Steps')).toBeVisible();
   await expect(page.getByText('Validation Progress')).toBeVisible();
   await expect(page.getByText('Validating remote project…')).toBeVisible();
+  await expect(page.locator('#project-draft-panel')).toContainText('Checking project path .', {
+    timeout: 30_000,
+  });
   await expect(page.getByText('Validation succeeded')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByLabel('Git URL')).toBeDisabled();
   await expect(page.getByLabel('Relative Project Path')).toBeDisabled();

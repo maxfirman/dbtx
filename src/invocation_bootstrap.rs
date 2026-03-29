@@ -41,6 +41,10 @@ pub async fn start_project_draft_validation_invocation(
             )),
         })
         .await?;
+    state
+        .db()
+        .attach_project_draft_invocation(prepared.draft.id, invocation_id)
+        .await?;
     state.bootstrap_invocation_started(invocation_id, None).await?;
     Ok(invocation_id)
 }

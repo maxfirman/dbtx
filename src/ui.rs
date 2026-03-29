@@ -446,7 +446,7 @@ fn render_project_draft_fragment(
         }),
         _ => render_template(&ProjectDraftPendingTemplate {
             draft: project_draft_view(draft),
-            should_poll,
+            should_poll: should_poll && draft.validation_invocation_id.is_none(),
         }),
     }
 }
@@ -1383,16 +1383,27 @@ mod tests {
     }
 
     #[test]
-    fn pending_draft_fragment_includes_polling_and_sse_progress() {
+    fn pending_draft_fragment_prefers_sse_over_polling() {
         let draft = draft("validating", Some(Uuid::nil()));
+        let rendered = render_project_draft_fragment(&draft, None, true)
+            .expect("render pending draft")
+            .0;
+
+        assert!(!rendered.contains("hx-trigger=\"load delay:2s\""));
+        assert!(rendered.contains("/ui/project-drafts/"));
+        assert!(rendered.contains("/v1/invocations/00000000-0000-0000-0000-000000000000/events"));
+        assert!(rendered.contains("Validation Progress"));
+    }
+
+    #[test]
+    fn pending_draft_fragment_polls_when_no_sse_stream_is_available() {
+        let draft = draft("validating", None);
         let rendered = render_project_draft_fragment(&draft, None, true)
             .expect("render pending draft")
             .0;
 
         assert!(rendered.contains("hx-trigger=\"load delay:2s\""));
         assert!(rendered.contains("/ui/project-drafts/"));
-        assert!(rendered.contains("/v1/invocations/00000000-0000-0000-0000-000000000000/events"));
-        assert!(rendered.contains("Validation Progress"));
     }
 
     #[test]
