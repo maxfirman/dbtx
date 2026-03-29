@@ -56,11 +56,9 @@ pub enum AppError {
     GitRepoNotFound,
     #[error("failed to infer git remote origin url from current repository")]
     GitRemoteNotFound,
-    #[error(
-        "dbtx project id is already configured in dbtx.toml: {0}. Use `dbtx project init --force` to overwrite it."
-    )]
+    #[error("dbtx project id is already configured in dbtx.toml: {0}.")]
     ProjectIdAlreadyConfigured(String),
-    #[error("dbtx project id is missing from dbtx.toml. Run `dbtx project init` first.")]
+    #[error("dbtx project id is missing from dbtx.toml.")]
     ProjectIdMissing,
     #[error("remote execution requires --project or project_id")]
     RemoteExecutionRequiresProjectId,
@@ -93,13 +91,9 @@ pub enum AppError {
         "database schema is not up to date. Run `dbtx state migrate` before invoking other commands."
     )]
     SchemaOutOfDate,
-    #[error(
-        "project id '{0}' was not found in the database. Run `dbtx project init --force` to re-initialize the project or `dbtx project update` to sync it."
-    )]
+    #[error("project id '{0}' was not found in the database.")]
     ProjectIdNotFound(String),
-    #[error(
-        "environment '{1}' for project '{0}' was not found. Create it with `dbtx environment create --project {0} --slug {1}`."
-    )]
+    #[error("environment '{1}' for project '{0}' was not found.")]
     EnvironmentNotFound(String, String),
     #[error("environment '{1}' for project '{0}' already exists")]
     EnvironmentAlreadyExists(String, String),
@@ -120,7 +114,7 @@ pub enum AppError {
     )]
     InvalidRemoteProjectCommitSha(String, String, String),
     #[error(
-        "registered project metadata does not match the current repo state for project id '{0}'. Run `dbtx project update` to sync the database, or `dbtx project init --force` to re-initialize the project."
+        "registered project metadata does not match the current repo state for project id '{0}'. Run `dbtx project update` to sync the database."
     )]
     ProjectValidationFailed(String),
     #[error("dbtx manages --state internally; remove the user-supplied --state argument")]

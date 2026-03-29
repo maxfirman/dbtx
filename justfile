@@ -22,14 +22,14 @@ worker-local:
 migrate:
     DBTX_SERVICE_URL={{service_url}} cargo run --bin dbtx -- state migrate
 
-project-init *args:
-    DBTX_SERVICE_URL={{service_url}} cargo run --bin dbtx -- project init {{args}}
+project-create *args:
+    DBTX_SERVICE_URL={{service_url}} cargo run --bin dbtx -- project create {{args}}
 
 project-list:
     DBTX_SERVICE_URL={{service_url}} cargo run --bin dbtx -- project list
 
-environment-create *args:
-    DBTX_SERVICE_URL={{service_url}} cargo run --bin dbtx -- environment create {{args}}
+environment-release *args:
+    DBTX_SERVICE_URL={{service_url}} cargo run --bin dbtx -- environment release {{args}}
 
 environment-list project:
     DBTX_SERVICE_URL={{service_url}} cargo run --bin dbtx -- environment list --project {{project}}
