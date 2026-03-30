@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title }} · dbtx</title>
+  <style>[x-cloak] { display: none !important; }</style>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <script defer src="https://unpkg.com/alpinejs@3.14.9/dist/cdn.min.js"></script>
@@ -180,6 +181,35 @@
             target.scrollTop = target.scrollHeight;
           });
         }
+      }));
+
+      Alpine.data('multiSelectDropdown', (placeholder) => ({
+        open: false,
+        placeholder,
+        selectedLabels: [],
+        init() {
+          this.refresh();
+        },
+        refresh() {
+          this.selectedLabels = Array.from(
+            this.$el.querySelectorAll('input[type="checkbox"]:checked')
+          ).map((input) => input.dataset.label || input.value);
+        },
+        toggle() {
+          this.open = !this.open;
+        },
+        close() {
+          this.open = false;
+        },
+        buttonLabel() {
+          if (this.selectedLabels.length === 0) {
+            return this.placeholder;
+          }
+          if (this.selectedLabels.length === 1) {
+            return this.selectedLabels[0];
+          }
+          return `${this.placeholder} (${this.selectedLabels.length})`;
+        },
       }));
 
       Alpine.data('environmentValidationProgress', (sseUrl, statusUrl) => ({

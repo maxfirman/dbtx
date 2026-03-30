@@ -2196,7 +2196,9 @@ mod tests {
         .render()
         .expect("render invocations page");
 
-        assert!(rendered.contains("multiple"));
+        assert!(rendered.contains("x-data=\"multiSelectDropdown('Status')\""));
+        assert!(rendered.contains("type=\"checkbox\" name=\"status\""));
+        assert!(rendered.contains("type=\"checkbox\" name=\"worker_queue\""));
         assert!(!rendered.contains("Limit"));
         assert!(rendered.contains("hx-get=\"/ui/invocations\""));
     }
