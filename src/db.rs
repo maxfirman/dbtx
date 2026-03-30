@@ -333,7 +333,6 @@ pub(crate) struct InvocationListFilters<'a> {
     pub(crate) execution_modes: &'a [String],
     pub(crate) worker_queues: &'a [String],
     pub(crate) claimed_bys: &'a [String],
-    pub(crate) cancel_states: &'a [String],
 }
 
 impl Db {
@@ -1391,7 +1390,8 @@ impl Db {
             WHERE (
                 cardinality($1::TEXT[]) = 0
                 OR ('queued' = ANY($1) AND status = 'running' AND claimed_by IS NULL)
-                OR ('running' = ANY($1) AND status = 'running' AND claimed_by IS NOT NULL)
+                OR ('running' = ANY($1) AND status = 'running' AND claimed_by IS NOT NULL AND cancel_requested = FALSE)
+                OR ('cancelling' = ANY($1) AND status = 'running' AND claimed_by IS NOT NULL AND cancel_requested = TRUE)
                 OR ('succeeded' = ANY($1) AND status = 'succeeded')
                 OR ('failed' = ANY($1) AND status = 'failed')
                 OR ('canceled' = ANY($1) AND status = 'canceled')
@@ -1399,22 +1399,15 @@ impl Db {
               AND (cardinality($2::TEXT[]) = 0 OR execution_mode = ANY($2))
               AND (cardinality($3::TEXT[]) = 0 OR worker_queue = ANY($3))
               AND (cardinality($4::TEXT[]) = 0 OR claimed_by = ANY($4))
-              AND (
-                cardinality($5::TEXT[]) = 0
-                OR ('none' = ANY($5) AND status <> 'canceled' AND cancel_requested = FALSE)
-                OR ('requested' = ANY($5) AND status = 'running' AND cancel_requested = TRUE)
-                OR ('completed' = ANY($5) AND status = 'canceled')
-              )
             ORDER BY started_at DESC, invocation_id DESC
-            LIMIT $6
-            OFFSET $7
+            LIMIT $5
+            OFFSET $6
             "#,
         )
         .bind(filters.display_statuses)
         .bind(filters.execution_modes)
         .bind(filters.worker_queues)
         .bind(filters.claimed_bys)
-        .bind(filters.cancel_states)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -1433,7 +1426,8 @@ impl Db {
             WHERE (
                 cardinality($1::TEXT[]) = 0
                 OR ('queued' = ANY($1) AND status = 'running' AND claimed_by IS NULL)
-                OR ('running' = ANY($1) AND status = 'running' AND claimed_by IS NOT NULL)
+                OR ('running' = ANY($1) AND status = 'running' AND claimed_by IS NOT NULL AND cancel_requested = FALSE)
+                OR ('cancelling' = ANY($1) AND status = 'running' AND claimed_by IS NOT NULL AND cancel_requested = TRUE)
                 OR ('succeeded' = ANY($1) AND status = 'succeeded')
                 OR ('failed' = ANY($1) AND status = 'failed')
                 OR ('canceled' = ANY($1) AND status = 'canceled')
@@ -1441,19 +1435,12 @@ impl Db {
               AND (cardinality($2::TEXT[]) = 0 OR execution_mode = ANY($2))
               AND (cardinality($3::TEXT[]) = 0 OR worker_queue = ANY($3))
               AND (cardinality($4::TEXT[]) = 0 OR claimed_by = ANY($4))
-              AND (
-                cardinality($5::TEXT[]) = 0
-                OR ('none' = ANY($5) AND status <> 'canceled' AND cancel_requested = FALSE)
-                OR ('requested' = ANY($5) AND status = 'running' AND cancel_requested = TRUE)
-                OR ('completed' = ANY($5) AND status = 'canceled')
-              )
             "#,
         )
         .bind(filters.display_statuses)
         .bind(filters.execution_modes)
         .bind(filters.worker_queues)
         .bind(filters.claimed_bys)
-        .bind(filters.cancel_states)
         .fetch_one(&self.pool)
         .await?;
         Ok(count)

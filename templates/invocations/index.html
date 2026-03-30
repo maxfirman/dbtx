@@ -93,25 +93,6 @@
             </div>
           </div>
         </div>
-        <div class="text-sm text-slate-600">
-          <span class="mb-1 block">Cancel State</span>
-          <div class="relative" x-data="multiSelectDropdown('Cancel State')" @click.outside="close()">
-            <button type="button" @click="toggle()" class="flex w-full items-center justify-between rounded-lg border border-slate-300 bg-white px-3 py-2 text-left text-sm text-slate-700 shadow-sm">
-              <span x-text="buttonLabel()"></span>
-              <span class="text-slate-400">▾</span>
-            </button>
-            <div x-show="open" x-cloak class="absolute z-20 mt-2 w-full rounded-xl border border-slate-200 bg-white p-2 shadow-lg">
-              <div class="max-h-64 space-y-1 overflow-y-auto">
-                {% for option in filters.cancel_state %}
-                <label class="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50">
-                  <input type="checkbox" name="cancel_state" value="{{ option.value }}" data-label="{{ option.label }}" class="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400" {% if option.selected %}checked{% endif %} @change="refresh()">
-                  <span class="text-sm text-slate-700">{{ option.label }}</span>
-                </label>
-                {% endfor %}
-              </div>
-            </div>
-          </div>
-        </div>
       </form>
     </div>
     {% include "invocations/_results.html" %}

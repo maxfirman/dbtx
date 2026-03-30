@@ -550,8 +550,6 @@ struct InvocationFilterQuery {
     worker_queue: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_multi_value_form_field")]
     claimed_by: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_multi_value_form_field")]
-    cancel_state: Vec<String>,
     page: Option<usize>,
 }
 
@@ -563,7 +561,6 @@ struct NormalizedInvocationFilters {
     execution_modes: Vec<String>,
     worker_queues: Vec<String>,
     claimed_bys: Vec<String>,
-    cancel_states: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -588,7 +585,9 @@ fn parse_display_status_filters(values: &[String]) -> AppResult<Vec<String>> {
     let mut display_statuses = Vec::new();
     for value in normalize_filter_values(values) {
         match value.as_str() {
-            "queued" | "running" | "succeeded" | "failed" | "canceled" => display_statuses.push(value),
+            "queued" | "running" | "cancelling" | "succeeded" | "failed" | "canceled" => {
+                display_statuses.push(value)
+            }
             other => {
                 return Err(AppError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -613,29 +612,14 @@ fn parse_execution_mode_filters(values: &[String]) -> AppResult<Vec<String>> {
         .collect()
 }
 
-fn parse_cancel_state_filters(values: &[String]) -> AppResult<Vec<String>> {
-    normalize_filter_values(values)
-        .into_iter()
-        .map(|value| match value.as_str() {
-            "none" | "requested" | "completed" => Ok(value),
-            other => Err(AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid invocation cancel state filter: {other}"),
-            ))),
-        })
-        .collect()
-}
-
 fn normalized_invocation_filters(query: &InvocationFilterQuery) -> AppResult<NormalizedInvocationFilters> {
     let display_statuses = parse_display_status_filters(&query.status)?;
     let execution_modes = parse_execution_mode_filters(&query.execution_mode)?;
-    let cancel_states = parse_cancel_state_filters(&query.cancel_state)?;
     Ok(NormalizedInvocationFilters {
         display_statuses,
         execution_modes,
         worker_queues: normalize_filter_values(&query.worker_queue),
         claimed_bys: normalize_filter_values(&query.claimed_by),
-        cancel_states,
     })
 }
 
@@ -663,7 +647,6 @@ fn parse_invocation_filter_query(raw_query: Option<&str>) -> AppResult<Invocatio
             "execution_mode" => query.execution_mode.push(value.into_owned()),
             "worker_queue" => query.worker_queue.push(value.into_owned()),
             "claimed_by" => query.claimed_by.push(value.into_owned()),
-            "cancel_state" => query.cancel_state.push(value.into_owned()),
             "page" => {
                 let page = value.parse::<usize>().map_err(|err| {
                     AppError::Io(std::io::Error::new(
@@ -694,9 +677,6 @@ fn invocations_page_url(query: &InvocationFilterQuery, page: usize) -> String {
         }
         for value in normalize_filter_values(&query.claimed_by) {
             pairs.append_pair("claimed_by", &value);
-        }
-        for value in normalize_filter_values(&query.cancel_state) {
-            pairs.append_pair("cancel_state", &value);
         }
         if page > 1 {
             pairs.append_pair("page", &page.to_string());
@@ -785,6 +765,7 @@ async fn invocations_index(
                 &[
                     ("queued", "Queued"),
                     ("running", "Running"),
+                    ("cancelling", "Cancelling"),
                     ("succeeded", "Succeeded"),
                     ("failed", "Failed"),
                     ("canceled", "Canceled"),
@@ -801,14 +782,6 @@ async fn invocations_index(
             claimed_by: invocation_dynamic_option_views(
                 &normalize_filter_values(&query.claimed_by),
                 &options.claimed_bys,
-            ),
-            cancel_state: invocation_filter_option_views(
-                &normalize_filter_values(&query.cancel_state),
-                &[
-                    ("none", "None"),
-                    ("requested", "Requested"),
-                    ("completed", "Completed"),
-                ],
             ),
         },
         invocations: rows.clone(),
@@ -849,7 +822,6 @@ async fn load_invocation_rows(
             execution_modes: &normalized.execution_modes,
             worker_queues: &normalized.worker_queues,
             claimed_bys: &normalized.claimed_bys,
-            cancel_states: &normalized.cancel_states,
         })
         .await?;
     let total_pages = ((total_count.max(1) as usize - 1) / INVOCATIONS_PAGE_SIZE) + 1;
@@ -861,7 +833,6 @@ async fn load_invocation_rows(
                 execution_modes: &normalized.execution_modes,
                 worker_queues: &normalized.worker_queues,
                 claimed_bys: &normalized.claimed_bys,
-                cancel_states: &normalized.cancel_states,
             },
             INVOCATIONS_PAGE_SIZE as i64,
             ((current_page - 1) * INVOCATIONS_PAGE_SIZE) as i64,
@@ -1259,6 +1230,11 @@ fn fmt_optional_ts(value: Option<DateTime<Utc>>) -> String {
 fn invocation_display_status(invocation: &InvocationStatusResponse) -> &'static str {
     match invocation.status {
         InvocationLifecycleStatus::Running if invocation.claimed_by.is_none() => "queued",
+        InvocationLifecycleStatus::Running
+            if !matches!(invocation.cancel_state, crate::api::InvocationCancelStateApi::None) =>
+        {
+            "cancelling"
+        }
         InvocationLifecycleStatus::Running => "running",
         InvocationLifecycleStatus::Succeeded => "succeeded",
         InvocationLifecycleStatus::Failed => "failed",
@@ -1277,6 +1253,7 @@ fn status_badge_class(status: &str) -> &'static str {
     match status {
         "queued" => "bg-amber-100 text-amber-800",
         "running" => "bg-sky-100 text-sky-800",
+        "cancelling" => "bg-orange-100 text-orange-800",
         "succeeded" => "bg-emerald-100 text-emerald-800",
         "failed" => "bg-rose-100 text-rose-800",
         "canceled" => "bg-slate-200 text-slate-700",
@@ -1401,7 +1378,6 @@ struct InvocationDetailView {
     execution_mode: String,
     worker_queue: String,
     worker_health: String,
-    cancel_state: String,
     claimed_by: String,
     claimed_at: String,
     last_heartbeat_at: String,
@@ -1491,7 +1467,6 @@ struct InvocationFilterView {
     execution_mode: Vec<SelectOptionView>,
     worker_queue: Vec<SelectOptionView>,
     claimed_by: Vec<SelectOptionView>,
-    cancel_state: Vec<SelectOptionView>,
 }
 
 fn project_summary_view(project: &ProjectRecord) -> ProjectSummaryView {
@@ -1685,7 +1660,6 @@ fn invocation_detail_view(invocation: &InvocationStatusResponse) -> InvocationDe
         execution_mode: invocation_mode_value(&invocation.execution_mode).to_string(),
         worker_queue: invocation.worker_queue.clone(),
         worker_health: format!("{:?}", invocation.worker_health).to_lowercase(),
-        cancel_state: format!("{:?}", invocation.cancel_state).to_lowercase(),
         claimed_by: invocation.claimed_by.clone().unwrap_or_default(),
         claimed_at: fmt_optional_ts(invocation.claimed_at),
         last_heartbeat_at: fmt_optional_ts(invocation.last_heartbeat_at),
@@ -2006,6 +1980,31 @@ mod tests {
     }
 
     #[test]
+    fn running_cancel_requested_invocations_render_as_cancelling() {
+        let invocation = InvocationStatusResponse {
+            invocation_id: Uuid::nil(),
+            status: InvocationLifecycleStatus::Running,
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: "generic".to_string(),
+            worker_health: crate::api::InvocationWorkerHealthApi::Claimed,
+            cancel_state: InvocationCancelStateApi::Requested,
+            claimed_at: Some(Utc::now()),
+            claimed_by: Some("worker-1".to_string()),
+            last_heartbeat_at: Some(Utc::now()),
+            cancel_requested_at: Some(Utc::now()),
+            started_at: Utc::now(),
+            completed_at: None,
+            cancel_requested: true,
+            exit_code: None,
+            error: None,
+        };
+
+        let view = invocation_detail_view(&invocation);
+        assert_eq!(view.status, "cancelling");
+        assert_eq!(view.status_class, "bg-orange-100 text-orange-800");
+    }
+
+    #[test]
     fn invocation_detail_panel_keeps_polling_until_terminal() {
         let rendered = InvocationDetailPanelTemplate {
             invocation: InvocationDetailView {
@@ -2017,7 +2016,6 @@ mod tests {
                 execution_mode: "server".to_string(),
                 worker_queue: "default".to_string(),
                 worker_health: "unknown".to_string(),
-                cancel_state: "none".to_string(),
                 claimed_by: "".to_string(),
                 claimed_at: "".to_string(),
                 last_heartbeat_at: "".to_string(),
@@ -2047,7 +2045,6 @@ mod tests {
                 execution_mode: "server".to_string(),
                 worker_queue: "default".to_string(),
                 worker_health: "healthy".to_string(),
-                cancel_state: "none".to_string(),
                 claimed_by: "worker-1".to_string(),
                 claimed_at: "2026-03-28T12:00:00Z".to_string(),
                 last_heartbeat_at: "2026-03-28T12:00:01Z".to_string(),
@@ -2106,17 +2103,16 @@ mod tests {
     #[test]
     fn invocation_page_url_repeats_multi_select_params() {
         let query = InvocationFilterQuery {
-            status: vec!["queued".to_string(), "running".to_string()],
+            status: vec!["queued".to_string(), "cancelling".to_string()],
             execution_mode: vec!["server".to_string()],
             worker_queue: vec!["generic".to_string(), "validation".to_string()],
             claimed_by: vec!["worker-a".to_string()],
-            cancel_state: vec!["requested".to_string()],
             page: Some(3),
         };
 
         let url = invocations_page_url(&query, 3);
         assert!(url.contains("status=queued"));
-        assert!(url.contains("status=running"));
+        assert!(url.contains("status=cancelling"));
         assert!(url.contains("worker_queue=generic"));
         assert!(url.contains("worker_queue=validation"));
         assert!(url.contains("page=3"));
@@ -2165,7 +2161,7 @@ mod tests {
             filters: InvocationFilterView {
                 status: invocation_filter_option_views(
                     &["queued".to_string()],
-                    &[("queued", "Queued"), ("running", "Running")],
+                    &[("queued", "Queued"), ("running", "Running"), ("cancelling", "Cancelling")],
                 ),
                 execution_mode: invocation_filter_option_views(
                     &["server".to_string()],
@@ -2173,7 +2169,6 @@ mod tests {
                 ),
                 worker_queue: invocation_dynamic_option_views(&[], &["generic".to_string()]),
                 claimed_by: invocation_dynamic_option_views(&[], &["worker-a".to_string()]),
-                cancel_state: invocation_filter_option_views(&[], &[("none", "None")]),
             },
             invocations: vec![],
             results: InvocationResultsView {
@@ -2199,6 +2194,7 @@ mod tests {
         assert!(rendered.contains("x-data=\"multiSelectDropdown('Status')\""));
         assert!(rendered.contains("type=\"checkbox\" name=\"status\""));
         assert!(rendered.contains("type=\"checkbox\" name=\"worker_queue\""));
+        assert!(!rendered.contains("Cancel State"));
         assert!(!rendered.contains("Limit"));
         assert!(rendered.contains("hx-get=\"/ui/invocations\""));
     }
