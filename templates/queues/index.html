@@ -2,9 +2,25 @@
 
 {% block content %}
 <div class="space-y-8">
-  <div>
-    <h1 class="text-3xl font-semibold tracking-tight">Queues</h1>
-    <p class="mt-2 text-sm text-slate-600">Execution routing and backlog state, including registered queues with no active work.</p>
+  <div class="flex items-start justify-between gap-4">
+    <div>
+      <h1 class="text-3xl font-semibold tracking-tight">Queues</h1>
+      <p class="mt-2 text-sm text-slate-600">Execution routing and backlog state, including registered queues with no active work.</p>
+    </div>
+    <form
+      hx-get="{{ page_url }}"
+      hx-trigger="change"
+      hx-target="#queues-table"
+      hx-select="#queues-table"
+      hx-swap="outerHTML"
+      hx-push-url="true"
+      class="shrink-0"
+    >
+      <label class="inline-flex cursor-pointer items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-sm">
+        <input type="checkbox" name="show_stale" value="true" class="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400" {% if show_stale %}checked{% endif %}>
+        <span>Show stale</span>
+      </label>
+    </form>
   </div>
 
   {% include "queues/_table.html" %}

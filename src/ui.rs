@@ -14,13 +14,14 @@ use crate::services::{
 };
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, RawQuery, State};
+use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -916,41 +917,238 @@ async fn invocation_cancel(
     Ok(Redirect::to(&format!("/ui/invocations/{invocation_id}")))
 }
 
-async fn workers_index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
+struct StaleVisibilityQuery {
+    show_stale: Option<bool>,
+}
+
+fn show_stale_enabled(query: &StaleVisibilityQuery) -> bool {
+    query.show_stale.unwrap_or(false)
+}
+
+fn workers_page_url(show_stale: bool) -> &'static str {
+    if show_stale {
+        "/ui/workers?show_stale=true"
+    } else {
+        "/ui/workers"
+    }
+}
+
+fn workers_table_url(show_stale: bool) -> &'static str {
+    if show_stale {
+        "/ui/workers/table?show_stale=true"
+    } else {
+        "/ui/workers/table"
+    }
+}
+
+fn queues_page_url(show_stale: bool) -> &'static str {
+    if show_stale {
+        "/ui/queues?show_stale=true"
+    } else {
+        "/ui/queues"
+    }
+}
+
+fn queues_table_url(show_stale: bool) -> &'static str {
+    if show_stale {
+        "/ui/queues/table?show_stale=true"
+    } else {
+        "/ui/queues/table"
+    }
+}
+
+fn filter_workers(workers: Vec<WorkerSummaryView>, show_stale: bool) -> Vec<WorkerSummaryView> {
+    if show_stale {
+        workers
+    } else {
+        workers
+            .into_iter()
+            .filter(|worker| worker.health != "stale")
+            .collect()
+    }
+}
+
+fn queue_is_stale_only(queue: &QueueSummaryView) -> bool {
+    queue.pending_count == 0 && queue.claimed_count > 0 && queue.claimed_count == queue.stale_claim_count
+}
+
+fn queue_key(execution_mode: &str, worker_queue: &str) -> String {
+    format!("{execution_mode}:{worker_queue}")
+}
+
+fn worker_queue_health_sets(
+    workers: &[WorkerStatusResponse],
+) -> (HashSet<String>, HashSet<String>) {
+    let mut non_stale = HashSet::new();
+    let mut stale = HashSet::new();
+    for worker in workers {
+        let mode = invocation_mode_value(&worker.execution_mode);
+        for worker_queue in &worker.worker_queues {
+            let key = queue_key(mode, worker_queue);
+            if matches!(worker.health, crate::api::InvocationWorkerHealthApi::Stale) {
+                stale.insert(key);
+            } else {
+                non_stale.insert(key);
+            }
+        }
+    }
+    (non_stale, stale)
+}
+
+async fn configured_queue_keys(db: &crate::db::Db) -> Result<HashSet<String>, UiError> {
+    let projects = db.list_projects().await?;
+    let mut keys = HashSet::new();
+    for project in projects {
+        let execution_mode = if project.mode == "remote" { "server" } else { "local" };
+        for environment in db.list_environments(&project.project_id).await? {
+            keys.insert(queue_key(execution_mode, &environment.worker_queue));
+        }
+    }
+    Ok(keys)
+}
+
+fn filter_queues(
+    queues: Vec<QueueSummaryView>,
+    show_stale: bool,
+    configured_queues: &HashSet<String>,
+    non_stale_worker_queues: &HashSet<String>,
+    stale_worker_queues: &HashSet<String>,
+) -> Vec<QueueSummaryView> {
+    if show_stale {
+        queues
+    } else {
+        queues
+            .into_iter()
+            .filter(|queue| {
+                if queue_is_stale_only(queue) {
+                    return false;
+                }
+                let key = queue_key(&queue.execution_mode, &queue.worker_queue);
+                let stale_worker_only_zero_work = queue.pending_count == 0
+                    && queue.claimed_count == 0
+                    && !configured_queues.contains(&key)
+                    && !non_stale_worker_queues.contains(&key)
+                    && stale_worker_queues.contains(&key);
+                !stale_worker_only_zero_work
+            })
+            .collect()
+    }
+}
+
+async fn workers_index_inner(
+    state: AppState,
+    show_stale: bool,
+) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
-    let workers = db.list_workers().await?;
+    let workers = filter_workers(
+        db.list_workers()
+            .await?
+            .iter()
+            .map(worker_summary_view)
+            .collect(),
+        show_stale,
+    );
     render_template(&WorkersTemplate {
         title: "Workers",
-        workers: workers.iter().map(worker_summary_view).collect(),
+        workers,
+        show_stale,
+        page_url: workers_page_url(show_stale),
+        table_url: workers_table_url(show_stale),
     })
 }
 
-async fn workers_table(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+async fn workers_index(
+    State(state): State<AppState>,
+    Query(query): Query<StaleVisibilityQuery>,
+) -> Result<Html<String>, UiError> {
+    workers_index_inner(state, show_stale_enabled(&query)).await
+}
+
+async fn workers_table(
+    State(state): State<AppState>,
+    Query(query): Query<StaleVisibilityQuery>,
+) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
-    let workers = db.list_workers().await?;
+    let show_stale = show_stale_enabled(&query);
+    let workers = filter_workers(
+        db.list_workers()
+            .await?
+            .iter()
+            .map(worker_summary_view)
+            .collect(),
+        show_stale,
+    );
     render_template(&WorkersTableTemplate {
-        workers: workers.iter().map(worker_summary_view).collect(),
+        workers,
+        show_stale,
+        table_url: workers_table_url(show_stale),
     })
 }
 
-async fn queues_index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+async fn queues_index_inner(
+    state: AppState,
+    show_stale: bool,
+) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
-    let queues = db.list_queues().await?;
+    let raw_workers = db.list_workers().await?;
+    let configured_queues = configured_queue_keys(db).await?;
+    let (non_stale_worker_queues, stale_worker_queues) = worker_queue_health_sets(&raw_workers);
+    let queues = filter_queues(
+        db.list_queues()
+            .await?
+            .iter()
+            .map(queue_summary_view)
+            .collect(),
+        show_stale,
+        &configured_queues,
+        &non_stale_worker_queues,
+        &stale_worker_queues,
+    );
     render_template(&QueuesTemplate {
         title: "Queues",
-        queues: queues.iter().map(queue_summary_view).collect(),
+        queues,
+        show_stale,
+        page_url: queues_page_url(show_stale),
+        table_url: queues_table_url(show_stale),
     })
 }
 
-async fn queues_table(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+async fn queues_index(
+    State(state): State<AppState>,
+    Query(query): Query<StaleVisibilityQuery>,
+) -> Result<Html<String>, UiError> {
+    queues_index_inner(state, show_stale_enabled(&query)).await
+}
+
+async fn queues_table(
+    State(state): State<AppState>,
+    Query(query): Query<StaleVisibilityQuery>,
+) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
-    let queues = db.list_queues().await?;
+    let show_stale = show_stale_enabled(&query);
+    let raw_workers = db.list_workers().await?;
+    let configured_queues = configured_queue_keys(db).await?;
+    let (non_stale_worker_queues, stale_worker_queues) = worker_queue_health_sets(&raw_workers);
+    let queues = filter_queues(
+        db.list_queues()
+            .await?
+            .iter()
+            .map(queue_summary_view)
+            .collect(),
+        show_stale,
+        &configured_queues,
+        &non_stale_worker_queues,
+        &stale_worker_queues,
+    );
     render_template(&QueuesTableTemplate {
-        queues: queues.iter().map(queue_summary_view).collect(),
+        queues,
+        show_stale,
+        table_url: queues_table_url(show_stale),
     })
 }
 
@@ -1824,12 +2022,17 @@ struct InvocationDetailTemplate {
 struct WorkersTemplate {
     title: &'static str,
     workers: Vec<WorkerSummaryView>,
+    show_stale: bool,
+    page_url: &'static str,
+    table_url: &'static str,
 }
 
 #[derive(Template)]
 #[template(path = "workers/_table.html")]
 struct WorkersTableTemplate {
     workers: Vec<WorkerSummaryView>,
+    show_stale: bool,
+    table_url: &'static str,
 }
 
 #[derive(Template)]
@@ -1837,12 +2040,17 @@ struct WorkersTableTemplate {
 struct QueuesTemplate {
     title: &'static str,
     queues: Vec<QueueSummaryView>,
+    show_stale: bool,
+    page_url: &'static str,
+    table_url: &'static str,
 }
 
 #[derive(Template)]
 #[template(path = "queues/_table.html")]
 struct QueuesTableTemplate {
     queues: Vec<QueueSummaryView>,
+    show_stale: bool,
+    table_url: &'static str,
 }
 
 #[derive(Template)]
@@ -2084,20 +2292,149 @@ mod tests {
 
     #[test]
     fn workers_table_renders_empty_state() {
-        let rendered = WorkersTableTemplate { workers: vec![] }
+        let rendered = WorkersTableTemplate {
+            workers: vec![],
+            show_stale: false,
+            table_url: "/ui/workers/table",
+        }
             .render()
             .expect("render workers table");
-        assert!(rendered.contains("No workers registered yet."));
+        assert!(rendered.contains("No active or idle workers."));
         assert!(rendered.contains("hx-get=\"/ui/workers/table\""));
     }
 
     #[test]
     fn queues_table_renders_empty_state() {
-        let rendered = QueuesTableTemplate { queues: vec![] }
+        let rendered = QueuesTableTemplate {
+            queues: vec![],
+            show_stale: false,
+            table_url: "/ui/queues/table",
+        }
             .render()
             .expect("render queues table");
-        assert!(rendered.contains("No queues registered yet."));
+        assert!(rendered.contains("No active or idle queues."));
         assert!(rendered.contains("hx-get=\"/ui/queues/table\""));
+    }
+
+    #[test]
+    fn filter_workers_hides_stale_by_default() {
+        let filtered = filter_workers(
+            vec![
+                WorkerSummaryView {
+                    worker_id: "worker-idle".to_string(),
+                    execution_mode: "server".to_string(),
+                    worker_queues: "generic".to_string(),
+                    claimed_invocation_count: 0,
+                    last_heartbeat_at: "2026-03-30 12:00:00 UTC".to_string(),
+                    health: "idle".to_string(),
+                    health_class: "bg-slate-100 text-slate-700",
+                },
+                WorkerSummaryView {
+                    worker_id: "worker-stale".to_string(),
+                    execution_mode: "server".to_string(),
+                    worker_queues: "generic".to_string(),
+                    claimed_invocation_count: 0,
+                    last_heartbeat_at: "2026-03-30 11:00:00 UTC".to_string(),
+                    health: "stale".to_string(),
+                    health_class: "bg-orange-100 text-orange-800",
+                },
+            ],
+            false,
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].worker_id, "worker-idle");
+    }
+
+    #[test]
+    fn filter_queues_hides_stale_only_rows_by_default() {
+        let configured: HashSet<String> = HashSet::new();
+        let non_stale: HashSet<String> = HashSet::new();
+        let stale: HashSet<String> = HashSet::new();
+        let filtered = filter_queues(
+            vec![
+                QueueSummaryView {
+                    worker_queue: "stale-only".to_string(),
+                    execution_mode: "server".to_string(),
+                    pending_count: 0,
+                    claimed_count: 2,
+                    stale_claim_count: 2,
+                    oldest_pending_at: String::new(),
+                },
+                QueueSummaryView {
+                    worker_queue: "active".to_string(),
+                    execution_mode: "server".to_string(),
+                    pending_count: 0,
+                    claimed_count: 2,
+                    stale_claim_count: 1,
+                    oldest_pending_at: String::new(),
+                },
+            ],
+            false,
+            &configured,
+            &non_stale,
+            &stale,
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].worker_queue, "active");
+    }
+
+    #[test]
+    fn filter_queues_hides_stale_worker_only_zero_work_rows_by_default() {
+        let non_stale: HashSet<String> = HashSet::new();
+        let stale: HashSet<String> = HashSet::from([queue_key("server", "stale-worker-only")]);
+        let filtered = filter_queues(
+            vec![
+                QueueSummaryView {
+                    worker_queue: "stale-worker-only".to_string(),
+                    execution_mode: "server".to_string(),
+                    pending_count: 0,
+                    claimed_count: 0,
+                    stale_claim_count: 0,
+                    oldest_pending_at: String::new(),
+                },
+                QueueSummaryView {
+                    worker_queue: "configured-idle".to_string(),
+                    execution_mode: "server".to_string(),
+                    pending_count: 0,
+                    claimed_count: 0,
+                    stale_claim_count: 0,
+                    oldest_pending_at: String::new(),
+                },
+            ],
+            false,
+            &HashSet::from([queue_key("server", "configured-idle")]),
+            &non_stale,
+            &stale,
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].worker_queue, "configured-idle");
+    }
+
+    #[test]
+    fn workers_index_renders_show_stale_toggle_checked_from_query_state() {
+        let rendered = WorkersTemplate {
+            title: "Workers",
+            workers: vec![],
+            show_stale: true,
+            page_url: "/ui/workers?show_stale=true",
+            table_url: "/ui/workers/table?show_stale=true",
+        }
+        .render()
+        .expect("render workers page");
+        assert!(rendered.contains("show_stale"));
+        assert!(rendered.contains("checked"));
+    }
+
+    #[test]
+    fn queues_table_preserves_show_stale_polling_url() {
+        let rendered = QueuesTableTemplate {
+            queues: vec![],
+            show_stale: true,
+            table_url: "/ui/queues/table?show_stale=true",
+        }
+        .render()
+        .expect("render queues table");
+        assert!(rendered.contains("hx-get=\"/ui/queues/table?show_stale=true\""));
     }
 
     #[test]

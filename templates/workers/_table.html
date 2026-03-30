@@ -1,7 +1,7 @@
 <section
   id="workers-table"
   class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm"
-  hx-get="/ui/workers/table"
+  hx-get="{{ table_url }}"
   hx-trigger="every 2s"
   hx-swap="outerHTML"
 >
@@ -20,7 +20,11 @@
       {% if workers.len() == 0 %}
       <tr>
         <td colspan="6" class="px-5 py-8 text-center text-sm text-slate-500">
+          {% if show_stale %}
           No workers registered yet.
+          {% else %}
+          No active or idle workers.
+          {% endif %}
         </td>
       </tr>
       {% else %}
