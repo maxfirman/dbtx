@@ -331,10 +331,10 @@ pub fn print_invocation(invocation: &api::InvocationStatusResponse) {
 
 pub fn print_worker(worker: &api::WorkerStatusResponse) {
     println!(
-        "worker id={} mode={:?} worker_queue={} claimed_invocation_count={} last_heartbeat_at={} health={:?}",
+        "worker id={} mode={:?} worker_queues={} claimed_invocation_count={} last_heartbeat_at={} health={:?}",
         worker.worker_id,
         worker.execution_mode,
-        worker.worker_queue,
+        worker.worker_queues.join(","),
         worker.claimed_invocation_count,
         worker
             .last_heartbeat_at

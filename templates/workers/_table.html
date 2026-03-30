@@ -10,7 +10,7 @@
       <tr>
         <th class="px-5 py-3 font-medium">Worker</th>
         <th class="px-5 py-3 font-medium">Mode</th>
-        <th class="px-5 py-3 font-medium">Queue</th>
+        <th class="px-5 py-3 font-medium">Queues</th>
         <th class="px-5 py-3 font-medium">Claims</th>
         <th class="px-5 py-3 font-medium">Last Seen</th>
         <th class="px-5 py-3 font-medium">Health</th>
@@ -28,7 +28,7 @@
       <tr>
         <td class="px-5 py-3 font-medium">{{ worker.worker_id }}</td>
         <td class="px-5 py-3 text-slate-600">{{ worker.execution_mode }}</td>
-        <td class="px-5 py-3 text-slate-600">{{ worker.worker_queue }}</td>
+        <td class="px-5 py-3 text-slate-600">{{ worker.worker_queues }}</td>
         <td class="px-5 py-3 text-slate-600">{{ worker.claimed_invocation_count }}</td>
         <td class="px-5 py-3 text-slate-600">{{ worker.last_heartbeat_at }}</td>
         <td class="px-5 py-3">

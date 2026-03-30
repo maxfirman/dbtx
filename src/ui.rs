@@ -1176,7 +1176,7 @@ struct InvocationDetailView {
 struct WorkerSummaryView {
     worker_id: String,
     execution_mode: String,
-    worker_queue: String,
+    worker_queues: String,
     claimed_invocation_count: i64,
     last_heartbeat_at: String,
     health: String,
@@ -1432,7 +1432,7 @@ fn worker_summary_view(worker: &WorkerStatusResponse) -> WorkerSummaryView {
     WorkerSummaryView {
         worker_id: worker.worker_id.clone(),
         execution_mode: invocation_mode_value(&worker.execution_mode).to_string(),
-        worker_queue: worker.worker_queue.clone(),
+        worker_queues: worker.worker_queues.join(", "),
         claimed_invocation_count: worker.claimed_invocation_count,
         last_heartbeat_at: fmt_optional_ts(worker.last_heartbeat_at),
         health_class: status_badge_class(&health),
@@ -1802,7 +1802,7 @@ mod tests {
         let worker = WorkerStatusResponse {
             worker_id: "worker-1".to_string(),
             execution_mode: InvocationExecutionModeApi::Server,
-            worker_queue: "generic".to_string(),
+            worker_queues: vec!["generic".to_string(), "validation".to_string()],
             claimed_invocation_count: 0,
             last_heartbeat_at: Some(Utc::now()),
             health: crate::api::InvocationWorkerHealthApi::Idle,
@@ -1811,6 +1811,7 @@ mod tests {
         let view = worker_summary_view(&worker);
         assert_eq!(view.health, "idle");
         assert_eq!(view.health_class, "bg-slate-100 text-slate-700");
+        assert_eq!(view.worker_queues, "generic, validation");
     }
 
     #[test]

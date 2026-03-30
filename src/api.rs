@@ -229,7 +229,7 @@ pub struct InvocationClaimResponse {
 pub struct InvocationClaimNextApiRequest {
     pub execution_mode: Option<InvocationExecutionModeApi>,
     pub worker_id: String,
-    pub worker_queue: Option<String>,
+    pub worker_queues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -307,7 +307,7 @@ pub struct InvocationHeartbeatResponse {
 pub struct WorkerStatusResponse {
     pub worker_id: String,
     pub execution_mode: InvocationExecutionModeApi,
-    pub worker_queue: String,
+    pub worker_queues: Vec<String>,
     pub claimed_invocation_count: i64,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub health: InvocationWorkerHealthApi,

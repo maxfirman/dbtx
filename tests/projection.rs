@@ -104,7 +104,7 @@ async fn lease_tokens_enforce_invocation_ownership() {
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Local),
             worker_id: "worker-a".to_string(),
-            worker_queue: Some(local_queue),
+            worker_queues: vec![local_queue],
         })
         .await
         .expect("claim next")
@@ -136,6 +136,17 @@ async fn lease_tokens_enforce_invocation_ownership() {
             .await
             .is_err()
     );
+    let heartbeat = client
+        .invocation_heartbeat(
+            created.invocation_id,
+            InvocationHeartbeatApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+            },
+        )
+        .await
+        .expect("heartbeat with owned lease succeeds");
+    assert!(!heartbeat.cancel_requested);
     assert!(
         client
             .invocation_complete(
@@ -222,7 +233,7 @@ async fn claimed_invocation_timeout_fails_without_reclaim() {
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Server),
             worker_id: "worker-a".to_string(),
-            worker_queue: None,
+            worker_queues: vec!["generic".to_string()],
         })
         .await
         .expect("claim next")
@@ -250,7 +261,7 @@ async fn claimed_invocation_timeout_fails_without_reclaim() {
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Server),
             worker_id: "worker-b".to_string(),
-            worker_queue: None,
+            worker_queues: vec!["generic".to_string()],
         })
         .await
         .expect("claim next after timeout");
@@ -406,7 +417,7 @@ async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Local),
             worker_id: "worker-local".to_string(),
-            worker_queue: Some(local_queue),
+            worker_queues: vec![local_queue],
         })
         .await
         .expect("claim local invocation")
@@ -415,7 +426,7 @@ async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Server),
             worker_id: "worker-server".to_string(),
-            worker_queue: None,
+            worker_queues: vec!["generic".to_string()],
         })
         .await
         .expect("claim server invocation")
@@ -538,7 +549,7 @@ async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finish
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Server),
             worker_id: "worker-a".to_string(),
-            worker_queue: None,
+            worker_queues: vec!["generic".to_string()],
         })
         .await
         .expect("claim invocation")
@@ -603,7 +614,7 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Server),
             worker_id: "worker-a".to_string(),
-            worker_queue: Some("generic".to_string()),
+            worker_queues: vec!["generic".to_string()],
         })
         .await
         .expect("claim generic server work")
@@ -612,7 +623,7 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Local),
             worker_id: "worker-b".to_string(),
-            worker_queue: Some(local_queue.clone()),
+            worker_queues: vec![local_queue.clone()],
         })
         .await
         .expect("claim isolated local work")
@@ -633,13 +644,13 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
         .find(|worker| worker.worker_id == "worker-a")
         .expect("worker-a");
     assert_eq!(worker_a.claimed_invocation_count, 1);
-    assert_eq!(worker_a.worker_queue, "generic");
+    assert_eq!(worker_a.worker_queues, vec!["generic".to_string()]);
     let worker_b = workers
         .iter()
         .find(|worker| worker.worker_id == "worker-b")
         .expect("worker-b");
     assert_eq!(worker_b.claimed_invocation_count, 1);
-    assert_eq!(worker_b.worker_queue, local_queue);
+    assert_eq!(worker_b.worker_queues, vec![local_queue.clone()]);
     assert_eq!(format!("{:?}", worker_b.health), "Stale");
 
     let queues = client.queue_list().await.expect("queue list").queues;
@@ -1007,7 +1018,7 @@ async fn invocation_list_filters_apply_to_operator_views() {
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Server),
             worker_id: "worker-filter".to_string(),
-            worker_queue: Some("generic".to_string()),
+            worker_queues: vec!["generic".to_string()],
         })
         .await
         .expect("claim running invocation")

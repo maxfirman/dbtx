@@ -17,8 +17,8 @@ struct WorkerCli {
     service_url: Option<String>,
     #[arg(long, default_value = "server")]
     execution_mode: WorkerExecutionMode,
-    #[arg(long)]
-    queue: Option<String>,
+    #[arg(long = "queue", required = true, num_args = 1.., value_delimiter = ',')]
+    queue: Vec<String>,
     #[arg(long)]
     once: bool,
     #[arg(long, default_value_t = 1000)]
@@ -63,7 +63,7 @@ async fn run() -> AppResult<()> {
         worker_id = %worker_id,
         service_url = %service_url,
         execution_mode = ?execution_mode,
-        queue = cli.queue.as_deref().unwrap_or("any"),
+        queues = %cli.queue.join(","),
         once = cli.once,
         poll_interval_ms = cli.poll_interval_ms,
         "starting dbtx worker"
@@ -74,7 +74,7 @@ async fn run() -> AppResult<()> {
             .invocation_claim_next(InvocationClaimNextApiRequest {
                 execution_mode: Some(execution_mode),
                 worker_id: worker_id.clone(),
-                worker_queue: cli.queue.clone(),
+                worker_queues: cli.queue.clone(),
             })
             .await?
         {
@@ -83,7 +83,7 @@ async fn run() -> AppResult<()> {
                     invocation_id = %claim.invocation_id,
                     worker_id = %worker_id,
                     execution_mode = ?execution_mode,
-                    queue = cli.queue.as_deref().unwrap_or("any"),
+                    queues = %cli.queue.join(","),
                     "claimed invocation"
                 );
                 if let Err(err) = worker::execute_claimed_invocation(&client, claim, None).await {
@@ -101,7 +101,7 @@ async fn run() -> AppResult<()> {
                     warn!(
                         worker_id = %worker_id,
                         execution_mode = ?execution_mode,
-                        queue = cli.queue.as_deref().unwrap_or("any"),
+                        queues = %cli.queue.join(","),
                         "no invocation available for one-shot worker"
                     );
                     return Err(AppError::Io(std::io::Error::other(
@@ -111,7 +111,7 @@ async fn run() -> AppResult<()> {
                 debug!(
                     worker_id = %worker_id,
                     execution_mode = ?execution_mode,
-                    queue = cli.queue.as_deref().unwrap_or("any"),
+                    queues = %cli.queue.join(","),
                     "no invocation available, polling again"
                 );
                 tokio::time::sleep(poll_interval).await;

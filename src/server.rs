@@ -1196,13 +1196,10 @@ async fn invocation_claim_next(
     Json(request): Json<InvocationClaimNextApiRequest>,
 ) -> Result<Response, ApiError> {
     reconcile_timed_out_invocations(&state).await?;
+    let worker_queues = normalize_worker_queues(&request.worker_queues)?;
     let Some(claimed) = state
         .db
-        .claim_next_invocation(
-            &request.worker_id,
-            request.execution_mode,
-            request.worker_queue.as_deref(),
-        )
+        .claim_next_invocation(&request.worker_id, request.execution_mode, &worker_queues)
         .await?
     else {
         return Ok(StatusCode::NO_CONTENT.into_response());
@@ -1213,6 +1210,24 @@ async fn invocation_claim_next(
         .await;
     info!(invocation_id = %claimed.invocation_id, "claimed next invocation execution");
     Ok(Json(claimed).into_response())
+}
+
+fn normalize_worker_queues(worker_queues: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut normalized = worker_queues
+        .iter()
+        .map(|queue| queue.trim())
+        .filter(|queue| !queue.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    if normalized.is_empty() {
+        return Err(ApiError(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "worker_queues must not be empty",
+        ))));
+    }
+    Ok(normalized)
 }
 
 #[utoipa::path(
@@ -1668,5 +1683,23 @@ mod tests {
         assert!(paths.contains_key("/v1/environment-drafts/{draft_id}/branch"));
         assert!(paths.contains_key("/v1/environment-drafts/{draft_id}/validate"));
         assert!(paths.contains_key("/v1/environment-drafts/{draft_id}/confirm"));
+    }
+
+    #[test]
+    fn normalize_worker_queues_trims_and_deduplicates() {
+        let queues = super::normalize_worker_queues(&[
+            " generic ".to_string(),
+            "validation".to_string(),
+            "generic".to_string(),
+        ]);
+        assert!(queues.is_ok());
+        let queues = queues.unwrap_or_default();
+        assert_eq!(queues, vec!["generic".to_string(), "validation".to_string()]);
+    }
+
+    #[test]
+    fn normalize_worker_queues_rejects_empty_input() {
+        assert!(super::normalize_worker_queues(&[]).is_err());
+        assert!(super::normalize_worker_queues(&["   ".to_string()]).is_err());
     }
 }

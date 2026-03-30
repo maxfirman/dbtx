@@ -1398,7 +1398,7 @@ impl Db {
             r#"
             SELECT worker_id, execution_mode, worker_queue, first_seen_at, last_seen_at
             FROM workers
-            ORDER BY worker_id ASC
+            ORDER BY worker_id ASC, worker_queue ASC
             "#,
         )
         .fetch_all(&self.pool)
@@ -1435,20 +1435,42 @@ impl Db {
             }
         }
 
-        Ok(registry
+        let mut grouped: BTreeMap<String, Vec<WorkerRegistryReadModel>> = BTreeMap::new();
+        for worker in registry {
+            grouped.entry(worker.worker_id.clone()).or_default().push(worker);
+        }
+
+        Ok(grouped
             .into_iter()
-            .map(|worker| {
+            .map(|(worker_id, registrations)| {
+                let execution_mode = registrations
+                    .first()
+                    .map(|worker| worker.execution_mode)
+                    .unwrap_or(InvocationExecutionModeApi::Server);
                 let claimed_invocation_count =
-                    claimed_counts.get(&worker.worker_id).copied().unwrap_or_default();
-                let health = active_health.get(&worker.worker_id).copied().unwrap_or_else(|| {
-                    compute_worker_registry_health(&worker, claimed_invocation_count)
+                    claimed_counts.get(&worker_id).copied().unwrap_or_default();
+                let last_seen_at = registrations
+                    .iter()
+                    .map(|worker| worker.last_seen_at)
+                    .max()
+                    .unwrap_or_else(Utc::now);
+                let worker_queues = registrations
+                    .iter()
+                    .map(|worker| worker.worker_queue.clone())
+                    .collect::<Vec<_>>();
+                let health = active_health.get(&worker_id).copied().unwrap_or_else(|| {
+                    compute_worker_registry_health(
+                        &registrations[0],
+                        claimed_invocation_count,
+                        last_seen_at,
+                    )
                 });
                 WorkerStatusResponse {
-                    worker_id: worker.worker_id,
-                    execution_mode: worker.execution_mode,
-                    worker_queue: worker.worker_queue,
+                    worker_id,
+                    execution_mode,
+                    worker_queues,
                     claimed_invocation_count,
-                    last_heartbeat_at: Some(worker.last_seen_at),
+                    last_heartbeat_at: Some(last_seen_at),
                     health,
                 }
             })
@@ -1557,9 +1579,8 @@ impl Db {
             r#"
             INSERT INTO workers (worker_id, execution_mode, worker_queue, first_seen_at, last_seen_at)
             VALUES ($1, $2, $3, NOW(), NOW())
-            ON CONFLICT (worker_id) DO UPDATE
+            ON CONFLICT (worker_id, worker_queue) DO UPDATE
             SET execution_mode = EXCLUDED.execution_mode,
-                worker_queue = EXCLUDED.worker_queue,
                 last_seen_at = NOW()
             "#,
         )
@@ -1571,14 +1592,57 @@ impl Db {
         Ok(())
     }
 
+    pub(crate) async fn sync_worker_registrations(
+        &self,
+        worker_id: &str,
+        execution_mode: InvocationExecutionModeApi,
+        worker_queues: &[String],
+    ) -> AppResult<()> {
+        let execution_mode = match execution_mode {
+            InvocationExecutionModeApi::Server => "server",
+            InvocationExecutionModeApi::Local => "local",
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            DELETE FROM workers
+            WHERE worker_id = $1
+              AND (execution_mode <> $2 OR NOT (worker_queue = ANY($3)))
+            "#,
+        )
+        .bind(worker_id)
+        .bind(execution_mode)
+        .bind(worker_queues)
+        .execute(&mut *tx)
+        .await?;
+        for worker_queue in worker_queues {
+            sqlx::query(
+                r#"
+                INSERT INTO workers (worker_id, execution_mode, worker_queue, first_seen_at, last_seen_at)
+                VALUES ($1, $2, $3, NOW(), NOW())
+                ON CONFLICT (worker_id, worker_queue) DO UPDATE
+                SET execution_mode = EXCLUDED.execution_mode,
+                    last_seen_at = NOW()
+                "#,
+            )
+            .bind(worker_id)
+            .bind(execution_mode)
+            .bind(worker_queue)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub(crate) async fn claim_next_invocation(
         &self,
         worker_id: &str,
         execution_mode: Option<InvocationExecutionModeApi>,
-        worker_queue: Option<&str>,
+        worker_queues: &[String],
     ) -> AppResult<Option<InvocationClaimResponse>> {
         if let Some(mode) = execution_mode {
-            self.upsert_worker_registration(worker_id, mode, worker_queue.unwrap_or("any"))
+            self.sync_worker_registrations(worker_id, mode, worker_queues)
                 .await?;
         }
         let mut tx = self.pool.begin().await?;
@@ -1591,7 +1655,7 @@ impl Db {
                 WHERE status = 'running'
                   AND execution_spec IS NOT NULL
                   AND ($1::TEXT IS NULL OR execution_mode = $1)
-                  AND ($2::TEXT IS NULL OR worker_queue = $2)
+                  AND worker_queue = ANY($2)
                   AND (claim_deadline_at IS NULL OR claim_deadline_at >= NOW())
                   AND claimed_by IS NULL
                 ORDER BY started_at ASC, invocation_id ASC
@@ -1612,7 +1676,7 @@ impl Db {
             InvocationExecutionModeApi::Server => "server",
             InvocationExecutionModeApi::Local => "local",
         }))
-        .bind(worker_queue)
+        .bind(worker_queues)
         .bind(worker_id)
         .bind(lease_token)
         .fetch_optional(&mut *tx)
@@ -3655,10 +3719,11 @@ fn worker_registry_read_model_from_row(row: PgRow) -> WorkerRegistryReadModel {
 fn compute_worker_registry_health(
     worker: &WorkerRegistryReadModel,
     claimed_invocation_count: i64,
+    last_seen_at: chrono::DateTime<Utc>,
 ) -> InvocationWorkerHealthApi {
     let stale_after = chrono::Duration::from_std(heartbeat_stale_timeout(worker.execution_mode))
         .unwrap_or_else(|_| chrono::Duration::seconds(15));
-    let is_stale = Utc::now() - worker.last_seen_at > stale_after;
+    let is_stale = Utc::now() - last_seen_at > stale_after;
     if claimed_invocation_count > 0 {
         if is_stale {
             InvocationWorkerHealthApi::Stale
@@ -3869,7 +3934,7 @@ mod tests {
             last_seen_at: Utc::now(),
         };
         assert_eq!(
-            compute_worker_registry_health(&worker, 0),
+            compute_worker_registry_health(&worker, 0, worker.last_seen_at),
             InvocationWorkerHealthApi::Idle
         );
     }
@@ -3883,7 +3948,7 @@ mod tests {
             last_seen_at: Utc::now() - Duration::seconds(60),
         };
         assert_eq!(
-            compute_worker_registry_health(&worker, 0),
+            compute_worker_registry_health(&worker, 0, worker.last_seen_at),
             InvocationWorkerHealthApi::Stale
         );
     }
