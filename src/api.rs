@@ -270,6 +270,7 @@ pub struct InvocationStatusResponse {
 pub enum InvocationWorkerHealthApi {
     Unclaimed,
     Claimed,
+    Idle,
     Stale,
     Completed,
 }

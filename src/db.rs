@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -317,6 +318,14 @@ struct InvocationReadModel {
     claimed_at: Option<chrono::DateTime<Utc>>,
     last_heartbeat_at: Option<chrono::DateTime<Utc>>,
     claimed_by: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkerRegistryReadModel {
+    worker_id: String,
+    execution_mode: InvocationExecutionModeApi,
+    worker_queue: String,
+    last_seen_at: chrono::DateTime<Utc>,
 }
 
 impl Db {
@@ -1385,7 +1394,16 @@ impl Db {
     }
 
     pub(crate) async fn list_workers(&self) -> AppResult<Vec<WorkerStatusResponse>> {
-        let rows = sqlx::query(
+        let worker_rows = sqlx::query(
+            r#"
+            SELECT worker_id, execution_mode, worker_queue, first_seen_at, last_seen_at
+            FROM workers
+            ORDER BY worker_id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let claimed_rows = sqlx::query(
             r#"
             SELECT execution_mode, worker_queue, claimed_by, claimed_at, last_heartbeat_at, cancel_requested, status, started_at
             FROM invocations
@@ -1397,46 +1415,40 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut grouped: BTreeMap<(String, String, String), Vec<InvocationReadModel>> =
-            BTreeMap::new();
-        for row in rows {
+        let registry = worker_rows
+            .into_iter()
+            .map(worker_registry_read_model_from_row)
+            .collect::<Vec<_>>();
+        let mut claimed_counts: BTreeMap<String, i64> = BTreeMap::new();
+        let mut active_health: BTreeMap<String, InvocationWorkerHealthApi> = BTreeMap::new();
+        for row in claimed_rows {
             let model = invocation_read_model_from_row(&row);
-            let worker_id = model
-                .claimed_by
-                .clone()
-                .expect("claimed invocation should have worker id");
-            let mode = match model.execution_mode {
-                InvocationExecutionModeApi::Server => "server".to_string(),
-                InvocationExecutionModeApi::Local => "local".to_string(),
-            };
-            let queue = model.worker_queue.clone();
-            grouped
-                .entry((worker_id, mode, queue))
-                .or_default()
-                .push(model);
+            let model_health = compute_worker_health_from_model(&model);
+            if let Some(worker_id) = model.claimed_by {
+                *claimed_counts.entry(worker_id.clone()).or_insert(0) += 1;
+                let entry = active_health
+                    .entry(worker_id)
+                    .or_insert(InvocationWorkerHealthApi::Claimed);
+                if matches!(model_health, InvocationWorkerHealthApi::Stale) {
+                    *entry = InvocationWorkerHealthApi::Stale;
+                }
+            }
         }
 
-        Ok(grouped
+        Ok(registry
             .into_iter()
-            .map(|((worker_id, _, worker_queue), models)| {
-                let execution_mode = models[0].execution_mode;
-                let last_heartbeat_at = models.iter().filter_map(|m| m.last_heartbeat_at).max();
-                let health = if models.iter().any(|m| {
-                    matches!(
-                        compute_worker_health_from_model(m),
-                        InvocationWorkerHealthApi::Claimed
-                    )
-                }) {
-                    InvocationWorkerHealthApi::Claimed
-                } else {
-                    InvocationWorkerHealthApi::Stale
-                };
+            .map(|worker| {
+                let claimed_invocation_count =
+                    claimed_counts.get(&worker.worker_id).copied().unwrap_or_default();
+                let health = active_health.get(&worker.worker_id).copied().unwrap_or_else(|| {
+                    compute_worker_registry_health(&worker, claimed_invocation_count)
+                });
                 WorkerStatusResponse {
-                    worker_id,
-                    execution_mode,
-                    worker_queue,
-                    claimed_invocation_count: models.len() as i64,
-                    last_heartbeat_at,
+                    worker_id: worker.worker_id,
+                    execution_mode: worker.execution_mode,
+                    worker_queue: worker.worker_queue,
+                    claimed_invocation_count,
+                    last_heartbeat_at: Some(worker.last_seen_at),
                     health,
                 }
             })
@@ -1458,18 +1470,50 @@ impl Db {
         let mut grouped: BTreeMap<(String, String), Vec<InvocationReadModel>> = BTreeMap::new();
         for row in rows {
             let model = invocation_read_model_from_row(&row);
-            let mode = match model.execution_mode {
-                InvocationExecutionModeApi::Server => "server".to_string(),
-                InvocationExecutionModeApi::Local => "local".to_string(),
-            };
+            let mode = invocation_mode_value(model.execution_mode).to_string();
             let queue = model.worker_queue.clone();
             grouped.entry((mode, queue)).or_default().push(model);
         }
 
+        let env_rows = sqlx::query(
+            r#"
+            SELECT DISTINCT
+                CASE
+                    WHEN p.mode = 'remote' THEN 'server'
+                    ELSE 'local'
+                END AS execution_mode,
+                e.worker_queue
+            FROM environments e
+            JOIN projects p ON p.id = e.project_id
+            ORDER BY execution_mode ASC, e.worker_queue ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in env_rows {
+            let mode = row.get::<String, _>("execution_mode");
+            let queue: String = row.get("worker_queue");
+            grouped.entry((mode, queue)).or_default();
+        }
+
+        let worker_rows = sqlx::query(
+            r#"
+            SELECT execution_mode, worker_queue
+            FROM workers
+            ORDER BY execution_mode ASC, worker_queue ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in worker_rows {
+            let mode = row.get::<String, _>("execution_mode");
+            let queue: String = row.get("worker_queue");
+            grouped.entry((mode, queue)).or_default();
+        }
+
         Ok(grouped
             .into_iter()
-            .map(|((_, worker_queue), models)| {
-                let execution_mode = models[0].execution_mode;
+            .map(|((execution_mode, worker_queue), models)| {
                 let pending_count = models.iter().filter(|m| m.claimed_by.is_none()).count() as i64;
                 let claimed_count = models.iter().filter(|m| m.claimed_by.is_some()).count() as i64;
                 let stale_claim_count = models
@@ -1489,7 +1533,7 @@ impl Db {
                     .min();
                 QueueStatusResponse {
                     worker_queue,
-                    execution_mode,
+                    execution_mode: execution_mode_from_db(&execution_mode),
                     pending_count,
                     claimed_count,
                     stale_claim_count,
@@ -1499,12 +1543,44 @@ impl Db {
             .collect())
     }
 
+    pub(crate) async fn upsert_worker_registration(
+        &self,
+        worker_id: &str,
+        execution_mode: InvocationExecutionModeApi,
+        worker_queue: &str,
+    ) -> AppResult<()> {
+        let execution_mode = match execution_mode {
+            InvocationExecutionModeApi::Server => "server",
+            InvocationExecutionModeApi::Local => "local",
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO workers (worker_id, execution_mode, worker_queue, first_seen_at, last_seen_at)
+            VALUES ($1, $2, $3, NOW(), NOW())
+            ON CONFLICT (worker_id) DO UPDATE
+            SET execution_mode = EXCLUDED.execution_mode,
+                worker_queue = EXCLUDED.worker_queue,
+                last_seen_at = NOW()
+            "#,
+        )
+        .bind(worker_id)
+        .bind(execution_mode)
+        .bind(worker_queue)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn claim_next_invocation(
         &self,
         worker_id: &str,
         execution_mode: Option<InvocationExecutionModeApi>,
         worker_queue: Option<&str>,
     ) -> AppResult<Option<InvocationClaimResponse>> {
+        if let Some(mode) = execution_mode {
+            self.upsert_worker_registration(worker_id, mode, worker_queue.unwrap_or("any"))
+                .await?;
+        }
         let mut tx = self.pool.begin().await?;
         let lease_token = Uuid::new_v4();
         let row = sqlx::query(
@@ -1570,7 +1646,7 @@ impl Db {
               AND claimed_by = $2
               AND lease_token = $3
               AND status = 'running'
-            RETURNING cancel_requested
+            RETURNING cancel_requested, execution_mode, worker_queue
             "#,
         )
         .bind(invocation_id)
@@ -1583,6 +1659,10 @@ impl Db {
                 "invocation is owned by a different worker or is not running",
             )));
         };
+        let execution_mode = execution_mode_from_db(&row.get::<String, _>("execution_mode"));
+        let worker_queue: String = row.get("worker_queue");
+        self.upsert_worker_registration(worker_id, execution_mode, &worker_queue)
+            .await?;
         Ok(row.get("cancel_requested"))
     }
 
@@ -3563,6 +3643,35 @@ fn compute_worker_health(status: &InvocationStatusResponse) -> InvocationWorkerH
     })
 }
 
+fn worker_registry_read_model_from_row(row: PgRow) -> WorkerRegistryReadModel {
+    WorkerRegistryReadModel {
+        worker_id: row.get("worker_id"),
+        execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
+        worker_queue: row.get("worker_queue"),
+        last_seen_at: row.get("last_seen_at"),
+    }
+}
+
+fn compute_worker_registry_health(
+    worker: &WorkerRegistryReadModel,
+    claimed_invocation_count: i64,
+) -> InvocationWorkerHealthApi {
+    let stale_after = chrono::Duration::from_std(heartbeat_stale_timeout(worker.execution_mode))
+        .unwrap_or_else(|_| chrono::Duration::seconds(15));
+    let is_stale = Utc::now() - worker.last_seen_at > stale_after;
+    if claimed_invocation_count > 0 {
+        if is_stale {
+            InvocationWorkerHealthApi::Stale
+        } else {
+            InvocationWorkerHealthApi::Claimed
+        }
+    } else if is_stale {
+        InvocationWorkerHealthApi::Stale
+    } else {
+        InvocationWorkerHealthApi::Idle
+    }
+}
+
 fn compute_worker_health_from_model(status: &InvocationReadModel) -> InvocationWorkerHealthApi {
     if !matches!(status.status, InvocationLifecycleStatus::Running) {
         return InvocationWorkerHealthApi::Completed;
@@ -3582,6 +3691,13 @@ fn compute_worker_health_from_model(status: &InvocationReadModel) -> InvocationW
             InvocationWorkerHealthApi::Stale
         }
         (_, _, Some(_)) => InvocationWorkerHealthApi::Claimed,
+    }
+}
+
+fn invocation_mode_value(value: InvocationExecutionModeApi) -> &'static str {
+    match value {
+        InvocationExecutionModeApi::Server => "server",
+        InvocationExecutionModeApi::Local => "local",
     }
 }
 
@@ -3686,8 +3802,13 @@ fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectRecord, is_valid_git_commit_sha, validate_environment_git_metadata};
+    use super::{
+        ProjectRecord, WorkerRegistryReadModel, compute_worker_registry_health,
+        is_valid_git_commit_sha, validate_environment_git_metadata,
+    };
+    use crate::api::{InvocationExecutionModeApi, InvocationWorkerHealthApi};
     use crate::error::AppError;
+    use chrono::{Duration, Utc};
     use serde_json::json;
 
     fn remote_project() -> ProjectRecord {
@@ -3737,5 +3858,33 @@ mod tests {
             AppError::InvalidRemoteProjectCommitSha(project_id, slug, _)
                 if project_id == "prj_remote_example" && slug == "dev"
         ));
+    }
+
+    #[test]
+    fn worker_registry_health_reports_idle_without_claims() {
+        let worker = WorkerRegistryReadModel {
+            worker_id: "worker-1".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: "generic".to_string(),
+            last_seen_at: Utc::now(),
+        };
+        assert_eq!(
+            compute_worker_registry_health(&worker, 0),
+            InvocationWorkerHealthApi::Idle
+        );
+    }
+
+    #[test]
+    fn worker_registry_health_reports_stale_when_last_seen_is_old() {
+        let worker = WorkerRegistryReadModel {
+            worker_id: "worker-1".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: "generic".to_string(),
+            last_seen_at: Utc::now() - Duration::seconds(60),
+        };
+        assert_eq!(
+            compute_worker_registry_health(&worker, 0),
+            InvocationWorkerHealthApi::Stale
+        );
     }
 }

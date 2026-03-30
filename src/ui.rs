@@ -68,7 +68,9 @@ pub fn router() -> Router<AppState> {
         .route("/ui/invocations/{id}/panel", get(invocation_detail_panel))
         .route("/ui/invocations/{id}/cancel", post(invocation_cancel))
         .route("/ui/workers", get(workers_index))
+        .route("/ui/workers/table", get(workers_table))
         .route("/ui/queues", get(queues_index))
+        .route("/ui/queues/table", get(queues_table))
         .route(
             "/ui/projects/{project_id}/environments/{slug}",
             get(environment_detail),
@@ -715,12 +717,30 @@ async fn workers_index(State(state): State<AppState>) -> Result<Html<String>, Ui
     })
 }
 
+async fn workers_table(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let workers = db.list_workers().await?;
+    render_template(&WorkersTableTemplate {
+        workers: workers.iter().map(worker_summary_view).collect(),
+    })
+}
+
 async fn queues_index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
     let queues = db.list_queues().await?;
     render_template(&QueuesTemplate {
         title: "Queues",
+        queues: queues.iter().map(queue_summary_view).collect(),
+    })
+}
+
+async fn queues_table(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let queues = db.list_queues().await?;
+    render_template(&QueuesTableTemplate {
         queues: queues.iter().map(queue_summary_view).collect(),
     })
 }
@@ -1023,6 +1043,7 @@ fn status_badge_class(status: &str) -> &'static str {
         "failed" => "bg-rose-100 text-rose-800",
         "canceled" => "bg-slate-200 text-slate-700",
         "claimed" => "bg-sky-100 text-sky-800",
+        "idle" => "bg-slate-100 text-slate-700",
         "stale" => "bg-orange-100 text-orange-800",
         _ => "bg-slate-100 text-slate-700",
     }
@@ -1562,9 +1583,21 @@ struct WorkersTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "workers/_table.html")]
+struct WorkersTableTemplate {
+    workers: Vec<WorkerSummaryView>,
+}
+
+#[derive(Template)]
 #[template(path = "queues/index.html")]
 struct QueuesTemplate {
     title: &'static str,
+    queues: Vec<QueueSummaryView>,
+}
+
+#[derive(Template)]
+#[template(path = "queues/_table.html")]
+struct QueuesTableTemplate {
     queues: Vec<QueueSummaryView>,
 }
 
@@ -1762,5 +1795,39 @@ mod tests {
         assert!(rendered.contains(
             "x-data=\"invocationLogs('/v1/invocations/00000000-0000-0000-0000-000000000000/events', 7)\""
         ));
+    }
+
+    #[test]
+    fn idle_workers_render_with_neutral_badge() {
+        let worker = WorkerStatusResponse {
+            worker_id: "worker-1".to_string(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: "generic".to_string(),
+            claimed_invocation_count: 0,
+            last_heartbeat_at: Some(Utc::now()),
+            health: crate::api::InvocationWorkerHealthApi::Idle,
+        };
+
+        let view = worker_summary_view(&worker);
+        assert_eq!(view.health, "idle");
+        assert_eq!(view.health_class, "bg-slate-100 text-slate-700");
+    }
+
+    #[test]
+    fn workers_table_renders_empty_state() {
+        let rendered = WorkersTableTemplate { workers: vec![] }
+            .render()
+            .expect("render workers table");
+        assert!(rendered.contains("No workers registered yet."));
+        assert!(rendered.contains("hx-get=\"/ui/workers/table\""));
+    }
+
+    #[test]
+    fn queues_table_renders_empty_state() {
+        let rendered = QueuesTableTemplate { queues: vec![] }
+            .render()
+            .expect("render queues table");
+        assert!(rendered.contains("No queues registered yet."));
+        assert!(rendered.contains("hx-get=\"/ui/queues/table\""));
     }
 }

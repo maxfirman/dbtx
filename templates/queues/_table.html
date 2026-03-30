@@ -1,0 +1,40 @@
+<section
+  id="queues-table"
+  class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm"
+  hx-get="/ui/queues/table"
+  hx-trigger="every 2s"
+  hx-swap="outerHTML"
+>
+  <table class="min-w-full divide-y divide-slate-200 text-sm">
+    <thead class="bg-slate-50 text-left text-slate-500">
+      <tr>
+        <th class="px-5 py-3 font-medium">Queue</th>
+        <th class="px-5 py-3 font-medium">Mode</th>
+        <th class="px-5 py-3 font-medium">Pending</th>
+        <th class="px-5 py-3 font-medium">Claimed</th>
+        <th class="px-5 py-3 font-medium">Stale Claims</th>
+        <th class="px-5 py-3 font-medium">Oldest Pending</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100 bg-white">
+      {% if queues.len() == 0 %}
+      <tr>
+        <td colspan="6" class="px-5 py-8 text-center text-sm text-slate-500">
+          No queues registered yet.
+        </td>
+      </tr>
+      {% else %}
+      {% for queue in queues %}
+      <tr>
+        <td class="px-5 py-3 font-medium">{{ queue.worker_queue }}</td>
+        <td class="px-5 py-3 text-slate-600">{{ queue.execution_mode }}</td>
+        <td class="px-5 py-3 text-slate-600">{{ queue.pending_count }}</td>
+        <td class="px-5 py-3 text-slate-600">{{ queue.claimed_count }}</td>
+        <td class="px-5 py-3 text-slate-600">{{ queue.stale_claim_count }}</td>
+        <td class="px-5 py-3 text-slate-600">{{ queue.oldest_pending_at }}</td>
+      </tr>
+      {% endfor %}
+      {% endif %}
+    </tbody>
+  </table>
+</section>

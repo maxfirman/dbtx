@@ -382,6 +382,16 @@ CREATE TABLE IF NOT EXISTS invocations (
     CONSTRAINT chk_invocations_worker_queue CHECK (btrim(worker_queue) <> '')
 );
 
+CREATE TABLE IF NOT EXISTS workers (
+    worker_id TEXT PRIMARY KEY,
+    execution_mode TEXT NOT NULL,
+    worker_queue TEXT NOT NULL,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_workers_execution_mode CHECK (execution_mode IN ('local', 'server')),
+    CONSTRAINT chk_workers_worker_queue CHECK (btrim(worker_queue) <> '')
+);
+
 CREATE INDEX IF NOT EXISTS idx_invocations_claim
     ON invocations (status, execution_mode, worker_queue, started_at, invocation_id);
 
