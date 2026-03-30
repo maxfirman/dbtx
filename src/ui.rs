@@ -32,6 +32,8 @@ pub fn router() -> Router<AppState> {
             get(dashboard_recent_invocations),
         )
         .route("/ui/dashboard/summary", get(dashboard_summary))
+        .route("/ui/dashboard/workers", get(dashboard_workers))
+        .route("/ui/dashboard/queues", get(dashboard_queues))
         .route("/ui/projects", get(projects_index))
         .route("/ui/projects/new", get(project_create_modal))
         .route(
@@ -239,6 +241,40 @@ async fn dashboard_recent_invocations(State(state): State<AppState>) -> Result<H
     render_template(&InvocationTableTemplate {
         invocations: invocations.iter().map(invocation_summary_view).collect(),
     })
+}
+
+async fn dashboard_workers(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let workers = filter_workers(
+        db.list_workers()
+            .await?
+            .iter()
+            .map(worker_summary_view)
+            .collect(),
+        false,
+    );
+    render_template(&DashboardWorkersTemplate { workers })
+}
+
+async fn dashboard_queues(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let raw_workers = db.list_workers().await?;
+    let configured_queues = configured_queue_keys(db).await?;
+    let (non_stale_worker_queues, stale_worker_queues) = worker_queue_health_sets(&raw_workers);
+    let queues = filter_queues(
+        db.list_queues()
+            .await?
+            .iter()
+            .map(queue_summary_view)
+            .collect(),
+        false,
+        &configured_queues,
+        &non_stale_worker_queues,
+        &stale_worker_queues,
+    );
+    render_template(&DashboardQueuesTemplate { queues })
 }
 
 async fn projects_index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
@@ -2006,6 +2042,18 @@ struct DashboardSummaryTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "dashboard/_workers.html")]
+struct DashboardWorkersTemplate {
+    workers: Vec<WorkerSummaryView>,
+}
+
+#[derive(Template)]
+#[template(path = "dashboard/_queues.html")]
+struct DashboardQueuesTemplate {
+    queues: Vec<QueueSummaryView>,
+}
+
+#[derive(Template)]
 #[template(path = "projects/index.html")]
 struct ProjectsTemplate {
     title: &'static str,
@@ -2529,6 +2577,21 @@ mod tests {
         assert!(rendered.contains("href=\"/ui/invocations?status=running\""));
         assert!(rendered.contains("href=\"/ui/invocations?status=queued\""));
         assert!(rendered.contains("hx-get=\"/ui/dashboard/summary\""));
+    }
+
+    #[test]
+    fn dashboard_workers_and_queues_poll_for_updates() {
+        let workers_rendered = DashboardWorkersTemplate { workers: vec![] }
+            .render()
+            .expect("render dashboard workers");
+        assert!(workers_rendered.contains("hx-get=\"/ui/dashboard/workers\""));
+        assert!(workers_rendered.contains("hx-trigger=\"every 2s\""));
+
+        let queues_rendered = DashboardQueuesTemplate { queues: vec![] }
+            .render()
+            .expect("render dashboard queues");
+        assert!(queues_rendered.contains("hx-get=\"/ui/dashboard/queues\""));
+        assert!(queues_rendered.contains("hx-trigger=\"every 2s\""));
     }
 
     #[test]

@@ -1,0 +1,22 @@
+<section
+  class="rounded-xl border border-slate-200 bg-white shadow-sm"
+  hx-get="/ui/dashboard/queues"
+  hx-trigger="every 2s"
+  hx-swap="outerHTML"
+>
+  <div class="border-b border-slate-200 px-5 py-4">
+    <h2 class="font-semibold">Queues</h2>
+  </div>
+  <div class="divide-y divide-slate-100">
+    {% if queues.len() == 0 %}
+    <div class="px-5 py-6 text-sm text-slate-500">No active or idle queues.</div>
+    {% else %}
+    {% for queue in queues %}
+    <div class="px-5 py-3 text-sm">
+      <div class="font-medium">{{ queue.worker_queue }}</div>
+      <div class="text-xs text-slate-500">{{ queue.execution_mode }} · pending {{ queue.pending_count }} · claimed {{ queue.claimed_count }}</div>
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
+</section>
