@@ -143,8 +143,27 @@ async fn dashboard(State(state): State<AppState>) -> Result<Html<String>, UiErro
             ..Default::default()
         })
         .await?;
-    let workers = db.list_workers().await?;
-    let queues = db.list_queues().await?;
+    let raw_workers = db.list_workers().await?;
+    let workers = filter_workers(
+        raw_workers
+            .iter()
+            .map(worker_summary_view)
+            .collect::<Vec<_>>(),
+        false,
+    );
+    let configured_queues = configured_queue_keys(db).await?;
+    let (non_stale_worker_queues, stale_worker_queues) = worker_queue_health_sets(&raw_workers);
+    let queues = filter_queues(
+        db.list_queues()
+            .await?
+            .iter()
+            .map(queue_summary_view)
+            .collect::<Vec<_>>(),
+        false,
+        &configured_queues,
+        &non_stale_worker_queues,
+        &stale_worker_queues,
+    );
 
     let page = DashboardTemplate {
         title: "Dashboard",
@@ -157,8 +176,8 @@ async fn dashboard(State(state): State<AppState>) -> Result<Html<String>, UiErro
         queued_work_count: queues.iter().map(|item| item.pending_count).sum(),
         invocations: invocations.iter().map(invocation_summary_view).collect(),
         projects: projects.iter().map(project_summary_view).collect(),
-        workers: workers.iter().map(worker_summary_view).collect(),
-        queues: queues.iter().map(queue_summary_view).collect(),
+        workers,
+        queues,
     };
     render_template(&page)
 }
