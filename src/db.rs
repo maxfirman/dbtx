@@ -328,6 +328,14 @@ struct WorkerRegistryReadModel {
     last_seen_at: chrono::DateTime<Utc>,
 }
 
+pub(crate) struct InvocationListFilters<'a> {
+    pub(crate) display_statuses: &'a [String],
+    pub(crate) execution_modes: &'a [String],
+    pub(crate) worker_queues: &'a [String],
+    pub(crate) claimed_bys: &'a [String],
+    pub(crate) cancel_states: &'a [String],
+}
+
 impl Db {
     pub async fn connect(database_url: &str) -> AppResult<Self> {
         let pool = PgPoolOptions::new()
@@ -1366,6 +1374,108 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(invocation_status_from_row).collect())
+    }
+
+    pub(crate) async fn list_invocations_filtered(
+        &self,
+        filters: InvocationListFilters<'_>,
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<InvocationStatusResponse>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT invocation_id, execution_mode, worker_queue, status, exit_code, error,
+                started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
+                cancel_requested, claimed_by
+            FROM invocations
+            WHERE (
+                cardinality($1::TEXT[]) = 0
+                OR ('queued' = ANY($1) AND status = 'running' AND claimed_by IS NULL)
+                OR ('running' = ANY($1) AND status = 'running' AND claimed_by IS NOT NULL)
+                OR ('succeeded' = ANY($1) AND status = 'succeeded')
+                OR ('failed' = ANY($1) AND status = 'failed')
+                OR ('canceled' = ANY($1) AND status = 'canceled')
+            )
+              AND (cardinality($2::TEXT[]) = 0 OR execution_mode = ANY($2))
+              AND (cardinality($3::TEXT[]) = 0 OR worker_queue = ANY($3))
+              AND (cardinality($4::TEXT[]) = 0 OR claimed_by = ANY($4))
+              AND (
+                cardinality($5::TEXT[]) = 0
+                OR ('none' = ANY($5) AND status <> 'canceled' AND cancel_requested = FALSE)
+                OR ('requested' = ANY($5) AND status = 'running' AND cancel_requested = TRUE)
+                OR ('completed' = ANY($5) AND status = 'canceled')
+              )
+            ORDER BY started_at DESC, invocation_id DESC
+            LIMIT $6
+            OFFSET $7
+            "#,
+        )
+        .bind(filters.display_statuses)
+        .bind(filters.execution_modes)
+        .bind(filters.worker_queues)
+        .bind(filters.claimed_bys)
+        .bind(filters.cancel_states)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(invocation_status_from_row).collect())
+    }
+
+    pub(crate) async fn count_invocations_filtered(
+        &self,
+        filters: InvocationListFilters<'_>,
+    ) -> AppResult<i64> {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM invocations
+            WHERE (
+                cardinality($1::TEXT[]) = 0
+                OR ('queued' = ANY($1) AND status = 'running' AND claimed_by IS NULL)
+                OR ('running' = ANY($1) AND status = 'running' AND claimed_by IS NOT NULL)
+                OR ('succeeded' = ANY($1) AND status = 'succeeded')
+                OR ('failed' = ANY($1) AND status = 'failed')
+                OR ('canceled' = ANY($1) AND status = 'canceled')
+            )
+              AND (cardinality($2::TEXT[]) = 0 OR execution_mode = ANY($2))
+              AND (cardinality($3::TEXT[]) = 0 OR worker_queue = ANY($3))
+              AND (cardinality($4::TEXT[]) = 0 OR claimed_by = ANY($4))
+              AND (
+                cardinality($5::TEXT[]) = 0
+                OR ('none' = ANY($5) AND status <> 'canceled' AND cancel_requested = FALSE)
+                OR ('requested' = ANY($5) AND status = 'running' AND cancel_requested = TRUE)
+                OR ('completed' = ANY($5) AND status = 'canceled')
+              )
+            "#,
+        )
+        .bind(filters.display_statuses)
+        .bind(filters.execution_modes)
+        .bind(filters.worker_queues)
+        .bind(filters.claimed_bys)
+        .bind(filters.cancel_states)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    pub(crate) async fn list_worker_filter_options(&self) -> AppResult<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT value
+            FROM (
+                SELECT DISTINCT worker_id AS value FROM workers
+                UNION
+                SELECT DISTINCT claimed_by AS value
+                FROM invocations
+                WHERE claimed_by IS NOT NULL
+            ) options
+            ORDER BY value ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     pub(crate) async fn get_invocation_status(

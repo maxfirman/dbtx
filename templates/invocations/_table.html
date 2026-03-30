@@ -11,6 +11,11 @@
     </tr>
   </thead>
   <tbody class="divide-y divide-slate-100 bg-white">
+    {% if invocations.len() == 0 %}
+    <tr>
+      <td colspan="7" class="px-4 py-8 text-center text-sm text-slate-500">No invocations match the current filters.</td>
+    </tr>
+    {% endif %}
     {% for invocation in invocations %}
     <tr>
       <td class="px-4 py-3">

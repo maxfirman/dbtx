@@ -1,8 +1,8 @@
 use crate::api::{
-    InvocationCancelStateApi, InvocationExecutionModeApi, InvocationLifecycleStatus,
-    InvocationListApiRequest, InvocationStatusResponse, QueueStatusResponse, WorkerStatusResponse,
+    InvocationExecutionModeApi, InvocationLifecycleStatus, InvocationListApiRequest,
+    InvocationStatusResponse, QueueStatusResponse, WorkerStatusResponse,
 };
-use crate::db::{EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
+use crate::db::{EnvironmentRecord, EnvironmentVersionRecord, InvocationListFilters, ProjectRecord};
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
     start_environment_draft_prepare_invocation, start_environment_draft_validation_invocation,
@@ -14,7 +14,7 @@ use crate::services::{
 };
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -230,6 +230,24 @@ where
             .parse::<i32>()
             .map(Some)
             .map_err(serde::de::Error::custom),
+    }
+}
+
+fn deserialize_multi_value_form_field<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => Ok(Vec::new()),
+        Some(OneOrMany::One(value)) => Ok(vec![value]),
+        Some(OneOrMany::Many(values)) => Ok(values),
     }
 }
 
@@ -524,137 +542,357 @@ fn is_terminal_project_draft_status(status: &str) -> bool {
 
 #[derive(Debug, Default, Deserialize)]
 struct InvocationFilterQuery {
-    status: Option<String>,
-    execution_mode: Option<String>,
-    worker_queue: Option<String>,
-    claimed_by: Option<String>,
-    cancel_state: Option<String>,
-    limit: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_multi_value_form_field")]
+    status: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_multi_value_form_field")]
+    execution_mode: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_multi_value_form_field")]
+    worker_queue: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_multi_value_form_field")]
+    claimed_by: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_multi_value_form_field")]
+    cancel_state: Vec<String>,
+    page: Option<usize>,
 }
 
-fn invocation_status_filter_value(value: Option<&str>) -> AppResult<Option<InvocationLifecycleStatus>> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok(None),
-        Some("queued") | Some("running") => Ok(Some(InvocationLifecycleStatus::Running)),
-        Some("succeeded") => Ok(Some(InvocationLifecycleStatus::Succeeded)),
-        Some("failed") => Ok(Some(InvocationLifecycleStatus::Failed)),
-        Some("canceled") => Ok(Some(InvocationLifecycleStatus::Canceled)),
-        Some(other) => Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid invocation status filter: {other}"),
-        ))),
-    }
+const INVOCATIONS_PAGE_SIZE: usize = 50;
+
+#[derive(Debug, Clone)]
+struct NormalizedInvocationFilters {
+    display_statuses: Vec<String>,
+    execution_modes: Vec<String>,
+    worker_queues: Vec<String>,
+    claimed_bys: Vec<String>,
+    cancel_states: Vec<String>,
 }
 
-fn invocation_execution_mode_filter_value(
-    value: Option<&str>,
-) -> AppResult<Option<InvocationExecutionModeApi>> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok(None),
-        Some("local") => Ok(Some(InvocationExecutionModeApi::Local)),
-        Some("server") => Ok(Some(InvocationExecutionModeApi::Server)),
-        Some(other) => Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid invocation execution mode filter: {other}"),
-        ))),
-    }
+#[derive(Debug, Clone)]
+struct InvocationFilterOptions {
+    worker_queues: Vec<String>,
+    claimed_bys: Vec<String>,
 }
 
-fn invocation_cancel_state_filter_value(
-    value: Option<&str>,
-) -> AppResult<Option<InvocationCancelStateApi>> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok(None),
-        Some("none") => Ok(Some(InvocationCancelStateApi::None)),
-        Some("requested") => Ok(Some(InvocationCancelStateApi::Requested)),
-        Some("completed") => Ok(Some(InvocationCancelStateApi::Completed)),
-        Some(other) => Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid invocation cancel state filter: {other}"),
-        ))),
-    }
-}
-
-fn invocation_limit_filter_value(value: Option<&str>) -> AppResult<Option<i64>> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok(None),
-        Some(raw) => raw.parse::<i64>().map(Some).map_err(|err| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid invocation limit: {err}"),
-            ))
-        }),
-    }
-}
-
-fn invocation_text_filter_value(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
+fn normalize_filter_values(values: &[String]) -> Vec<String> {
+    let mut normalized = values
+        .iter()
+        .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
-fn matches_display_status(invocation: &InvocationStatusResponse, filter: Option<&str>) -> bool {
-    match filter.map(str::trim).filter(|value| !value.is_empty()) {
-        None => true,
-        Some(expected) => invocation_display_status(invocation) == expected,
+fn parse_display_status_filters(values: &[String]) -> AppResult<Vec<String>> {
+    let mut display_statuses = Vec::new();
+    for value in normalize_filter_values(values) {
+        match value.as_str() {
+            "queued" | "running" | "succeeded" | "failed" | "canceled" => display_statuses.push(value),
+            other => {
+                return Err(AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid invocation status filter: {other}"),
+                )));
+            }
+        }
     }
+    Ok(display_statuses)
+}
+
+fn parse_execution_mode_filters(values: &[String]) -> AppResult<Vec<String>> {
+    normalize_filter_values(values)
+        .into_iter()
+        .map(|value| match value.as_str() {
+            "local" | "server" => Ok(value),
+            other => Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid invocation execution mode filter: {other}"),
+            ))),
+        })
+        .collect()
+}
+
+fn parse_cancel_state_filters(values: &[String]) -> AppResult<Vec<String>> {
+    normalize_filter_values(values)
+        .into_iter()
+        .map(|value| match value.as_str() {
+            "none" | "requested" | "completed" => Ok(value),
+            other => Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid invocation cancel state filter: {other}"),
+            ))),
+        })
+        .collect()
+}
+
+fn normalized_invocation_filters(query: &InvocationFilterQuery) -> AppResult<NormalizedInvocationFilters> {
+    let display_statuses = parse_display_status_filters(&query.status)?;
+    let execution_modes = parse_execution_mode_filters(&query.execution_mode)?;
+    let cancel_states = parse_cancel_state_filters(&query.cancel_state)?;
+    Ok(NormalizedInvocationFilters {
+        display_statuses,
+        execution_modes,
+        worker_queues: normalize_filter_values(&query.worker_queue),
+        claimed_bys: normalize_filter_values(&query.claimed_by),
+        cancel_states,
+    })
+}
+
+fn parse_page_number(value: Option<usize>) -> AppResult<usize> {
+    match value {
+        None => Ok(1),
+        Some(0) => Err(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid invocation page: must be >= 1",
+        ))),
+        Some(page) => Ok(page),
+    }
+}
+
+fn parse_invocation_filter_query(raw_query: Option<&str>) -> AppResult<InvocationFilterQuery> {
+    let mut query = InvocationFilterQuery::default();
+    let Some(raw_query) = raw_query else {
+        return Ok(query);
+    };
+    let url = reqwest::Url::parse(&format!("http://localhost/ui/invocations?{raw_query}"))
+        .map_err(|err| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, err)))?;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "status" => query.status.push(value.into_owned()),
+            "execution_mode" => query.execution_mode.push(value.into_owned()),
+            "worker_queue" => query.worker_queue.push(value.into_owned()),
+            "claimed_by" => query.claimed_by.push(value.into_owned()),
+            "cancel_state" => query.cancel_state.push(value.into_owned()),
+            "page" => {
+                let page = value.parse::<usize>().map_err(|err| {
+                    AppError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("invalid invocation page filter: {err}"),
+                    ))
+                })?;
+                query.page = Some(page);
+            }
+            _ => {}
+        }
+    }
+    Ok(query)
+}
+
+fn invocations_page_url(query: &InvocationFilterQuery, page: usize) -> String {
+    let mut url = reqwest::Url::parse("http://localhost/ui/invocations").expect("valid invocations url");
+    {
+        let mut pairs = url.query_pairs_mut();
+        for value in normalize_filter_values(&query.status) {
+            pairs.append_pair("status", &value);
+        }
+        for value in normalize_filter_values(&query.execution_mode) {
+            pairs.append_pair("execution_mode", &value);
+        }
+        for value in normalize_filter_values(&query.worker_queue) {
+            pairs.append_pair("worker_queue", &value);
+        }
+        for value in normalize_filter_values(&query.claimed_by) {
+            pairs.append_pair("claimed_by", &value);
+        }
+        for value in normalize_filter_values(&query.cancel_state) {
+            pairs.append_pair("cancel_state", &value);
+        }
+        if page > 1 {
+            pairs.append_pair("page", &page.to_string());
+        }
+    }
+    match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_string(),
+    }
+}
+
+fn invocations_table_url(query: &InvocationFilterQuery, page: usize) -> String {
+    invocations_page_url(query, page).replacen("/ui/invocations", "/ui/invocations/table", 1)
+}
+
+fn invocation_filter_option_views(
+    selected: &[String],
+    options: &[(&str, &str)],
+) -> Vec<SelectOptionView> {
+    options
+        .iter()
+        .map(|(value, label)| SelectOptionView {
+            value: (*value).to_string(),
+            label: (*label).to_string(),
+            selected: selected.iter().any(|selected| selected == value),
+        })
+        .collect()
+}
+
+fn invocation_dynamic_option_views(selected: &[String], options: &[String]) -> Vec<SelectOptionView> {
+    options
+        .iter()
+        .map(|value| SelectOptionView {
+            value: value.clone(),
+            label: value.clone(),
+            selected: selected.iter().any(|selected| selected == value),
+        })
+        .collect()
+}
+
+async fn invocation_filter_options(db: &crate::db::Db) -> Result<InvocationFilterOptions, UiError> {
+    let worker_queues = db
+        .list_queues()
+        .await?
+        .into_iter()
+        .map(|queue| queue.worker_queue)
+        .collect::<Vec<_>>();
+    let claimed_bys = db.list_worker_filter_options().await?;
+    Ok(InvocationFilterOptions {
+        worker_queues,
+        claimed_bys,
+    })
+}
+
+fn invocation_rows_summary(current_page: usize, total_count: i64, row_count: usize) -> String {
+    if total_count == 0 {
+        return "No invocations found".to_string();
+    }
+    let start = ((current_page - 1) * INVOCATIONS_PAGE_SIZE) + 1;
+    let end = start + row_count.saturating_sub(1);
+    format!("Showing {start}-{end} of {total_count}")
+}
+
+fn invocation_page_window(current_page: usize, total_pages: usize) -> std::ops::RangeInclusive<usize> {
+    if total_pages <= 5 {
+        return 1..=total_pages.max(1);
+    }
+    let start = current_page.saturating_sub(2).max(1);
+    let end = (start + 4).min(total_pages);
+    let adjusted_start = end.saturating_sub(4).max(1);
+    adjusted_start..=end
 }
 
 async fn invocations_index(
     State(state): State<AppState>,
-    Query(query): Query<InvocationFilterQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Html<String>, UiError> {
-    let rows = load_invocation_rows(state.db(), &query).await?;
+    let query = parse_invocation_filter_query(raw_query.as_deref()).map_err(UiError::from)?;
+    let db = state.db();
+    let (rows, pagination, options) = load_invocation_rows(db, &query).await?;
     render_template(&InvocationsPageTemplate {
         title: "Invocations",
         filters: InvocationFilterView {
-            status: query.status.unwrap_or_default(),
-            execution_mode: query
-                .execution_mode
-                .unwrap_or_default()
-                .to_string(),
-            worker_queue: query.worker_queue.unwrap_or_default(),
-            claimed_by: query.claimed_by.unwrap_or_default(),
-            cancel_state: query
-                .cancel_state
-                .unwrap_or_default()
-                .to_string(),
-            limit: query.limit.unwrap_or_default(),
+            status: invocation_filter_option_views(
+                &normalize_filter_values(&query.status),
+                &[
+                    ("queued", "Queued"),
+                    ("running", "Running"),
+                    ("succeeded", "Succeeded"),
+                    ("failed", "Failed"),
+                    ("canceled", "Canceled"),
+                ],
+            ),
+            execution_mode: invocation_filter_option_views(
+                &normalize_filter_values(&query.execution_mode),
+                &[("local", "Local"), ("server", "Server")],
+            ),
+            worker_queue: invocation_dynamic_option_views(
+                &normalize_filter_values(&query.worker_queue),
+                &options.worker_queues,
+            ),
+            claimed_by: invocation_dynamic_option_views(
+                &normalize_filter_values(&query.claimed_by),
+                &options.claimed_bys,
+            ),
+            cancel_state: invocation_filter_option_views(
+                &normalize_filter_values(&query.cancel_state),
+                &[
+                    ("none", "None"),
+                    ("requested", "Requested"),
+                    ("completed", "Completed"),
+                ],
+            ),
         },
-        invocations: rows,
+        invocations: rows.clone(),
+        results: InvocationResultsView {
+            table_url: invocations_table_url(&query, pagination.current_page),
+            summary: invocation_rows_summary(pagination.current_page, pagination.total_count, rows.len()),
+            pagination,
+        },
     })
 }
 
 async fn invocations_table(
     State(state): State<AppState>,
-    Query(query): Query<InvocationFilterQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Html<String>, UiError> {
-    let rows = load_invocation_rows(state.db(), &query).await?;
-    render_template(&InvocationResultsTemplate { invocations: rows })
+    let query = parse_invocation_filter_query(raw_query.as_deref()).map_err(UiError::from)?;
+    let (rows, pagination, _) = load_invocation_rows(state.db(), &query).await?;
+    render_template(&InvocationResultsTemplate {
+        invocations: rows.clone(),
+        results: InvocationResultsView {
+            table_url: invocations_table_url(&query, pagination.current_page),
+            summary: invocation_rows_summary(pagination.current_page, pagination.total_count, rows.len()),
+            pagination,
+        },
+    })
 }
 
 async fn load_invocation_rows(
     db: &crate::db::Db,
     query: &InvocationFilterQuery,
-) -> Result<Vec<InvocationSummaryView>, UiError> {
+) -> Result<(Vec<InvocationSummaryView>, InvocationPaginationView, InvocationFilterOptions), UiError> {
     db.require_current_schema().await?;
-    let invocations = db
-        .list_invocations(InvocationListApiRequest {
-            status: invocation_status_filter_value(query.status.as_deref())?,
-            execution_mode: invocation_execution_mode_filter_value(query.execution_mode.as_deref())?,
-            worker_queue: invocation_text_filter_value(query.worker_queue.as_deref()),
-            claimed_by: invocation_text_filter_value(query.claimed_by.as_deref()),
-            cancel_state: invocation_cancel_state_filter_value(query.cancel_state.as_deref())?,
-            limit: invocation_limit_filter_value(query.limit.as_deref())?.or(Some(100)),
+    let normalized = normalized_invocation_filters(query).map_err(UiError::from)?;
+    let requested_page = parse_page_number(query.page).map_err(UiError::from)?;
+    let total_count = db
+        .count_invocations_filtered(InvocationListFilters {
+            display_statuses: &normalized.display_statuses,
+            execution_modes: &normalized.execution_modes,
+            worker_queues: &normalized.worker_queues,
+            claimed_bys: &normalized.claimed_bys,
+            cancel_states: &normalized.cancel_states,
         })
+        .await?;
+    let total_pages = ((total_count.max(1) as usize - 1) / INVOCATIONS_PAGE_SIZE) + 1;
+    let current_page = requested_page.min(total_pages.max(1));
+    let invocations = db
+        .list_invocations_filtered(
+            InvocationListFilters {
+                display_statuses: &normalized.display_statuses,
+                execution_modes: &normalized.execution_modes,
+                worker_queues: &normalized.worker_queues,
+                claimed_bys: &normalized.claimed_bys,
+                cancel_states: &normalized.cancel_states,
+            },
+            INVOCATIONS_PAGE_SIZE as i64,
+            ((current_page - 1) * INVOCATIONS_PAGE_SIZE) as i64,
+        )
         .await?;
     let rows = invocations
         .iter()
-        .filter(|invocation| matches_display_status(invocation, query.status.as_deref()))
         .map(invocation_summary_view)
         .collect::<Vec<_>>();
-    Ok(rows)
+    let options = invocation_filter_options(db).await?;
+    let page_links = invocation_page_window(current_page, total_pages)
+        .map(|page| PaginationLinkView {
+            label: page.to_string(),
+            page_url: invocations_page_url(query, page),
+            current: page == current_page,
+        })
+        .collect::<Vec<_>>();
+    Ok((
+        rows,
+        InvocationPaginationView {
+            current_page,
+            total_pages,
+            total_count,
+            previous_page_url: (current_page > 1)
+                .then(|| invocations_page_url(query, current_page - 1)),
+            next_page_url: (current_page < total_pages)
+                .then(|| invocations_page_url(query, current_page + 1)),
+            page_links,
+        },
+        options,
+    ))
 }
 
 async fn invocation_detail(
@@ -1217,13 +1455,43 @@ struct EnvironmentVersionView {
 }
 
 #[derive(Clone)]
+struct SelectOptionView {
+    value: String,
+    label: String,
+    selected: bool,
+}
+
+#[derive(Clone)]
+struct PaginationLinkView {
+    label: String,
+    page_url: String,
+    current: bool,
+}
+
+#[derive(Clone)]
+struct InvocationPaginationView {
+    current_page: usize,
+    total_pages: usize,
+    total_count: i64,
+    previous_page_url: Option<String>,
+    next_page_url: Option<String>,
+    page_links: Vec<PaginationLinkView>,
+}
+
+#[derive(Clone)]
+struct InvocationResultsView {
+    table_url: String,
+    summary: String,
+    pagination: InvocationPaginationView,
+}
+
+#[derive(Clone)]
 struct InvocationFilterView {
-    status: String,
-    execution_mode: String,
-    worker_queue: String,
-    claimed_by: String,
-    cancel_state: String,
-    limit: String,
+    status: Vec<SelectOptionView>,
+    execution_mode: Vec<SelectOptionView>,
+    worker_queue: Vec<SelectOptionView>,
+    claimed_by: Vec<SelectOptionView>,
+    cancel_state: Vec<SelectOptionView>,
 }
 
 fn project_summary_view(project: &ProjectRecord) -> ProjectSummaryView {
@@ -1543,12 +1811,14 @@ struct InvocationsPageTemplate {
     title: &'static str,
     filters: InvocationFilterView,
     invocations: Vec<InvocationSummaryView>,
+    results: InvocationResultsView,
 }
 
 #[derive(Template)]
 #[template(path = "invocations/_results.html")]
 struct InvocationResultsTemplate {
     invocations: Vec<InvocationSummaryView>,
+    results: InvocationResultsView,
 }
 
 #[derive(Template)]
@@ -1629,6 +1899,7 @@ struct ErrorTemplate<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::InvocationCancelStateApi;
     use chrono::Utc;
 
     fn draft(
@@ -1830,5 +2101,117 @@ mod tests {
             .expect("render queues table");
         assert!(rendered.contains("No queues registered yet."));
         assert!(rendered.contains("hx-get=\"/ui/queues/table\""));
+    }
+
+    #[test]
+    fn invocation_page_url_repeats_multi_select_params() {
+        let query = InvocationFilterQuery {
+            status: vec!["queued".to_string(), "running".to_string()],
+            execution_mode: vec!["server".to_string()],
+            worker_queue: vec!["generic".to_string(), "validation".to_string()],
+            claimed_by: vec!["worker-a".to_string()],
+            cancel_state: vec!["requested".to_string()],
+            page: Some(3),
+        };
+
+        let url = invocations_page_url(&query, 3);
+        assert!(url.contains("status=queued"));
+        assert!(url.contains("status=running"));
+        assert!(url.contains("worker_queue=generic"));
+        assert!(url.contains("worker_queue=validation"));
+        assert!(url.contains("page=3"));
+    }
+
+    #[test]
+    fn invocation_results_render_pagination_links() {
+        let rendered = InvocationResultsTemplate {
+            invocations: vec![],
+            results: InvocationResultsView {
+                table_url: "/ui/invocations/table?status=queued&page=2".to_string(),
+                summary: "Showing 51-60 of 120".to_string(),
+                pagination: InvocationPaginationView {
+                    current_page: 2,
+                    total_pages: 3,
+                    total_count: 120,
+                    previous_page_url: Some("/ui/invocations?status=queued".to_string()),
+                    next_page_url: Some("/ui/invocations?status=queued&page=3".to_string()),
+                    page_links: vec![
+                        PaginationLinkView {
+                            label: "1".to_string(),
+                            page_url: "/ui/invocations?status=queued".to_string(),
+                            current: false,
+                        },
+                        PaginationLinkView {
+                            label: "2".to_string(),
+                            page_url: "/ui/invocations?status=queued&page=2".to_string(),
+                            current: true,
+                        },
+                    ],
+                },
+            },
+        }
+        .render()
+        .expect("render invocation results");
+
+        assert!(rendered.contains("Page 2 of 3"));
+        assert!(rendered.contains("Previous"));
+        assert!(rendered.contains("Next"));
+    }
+
+    #[test]
+    fn invocations_filter_form_uses_multi_selects_and_no_limit() {
+        let rendered = InvocationsPageTemplate {
+            title: "Invocations",
+            filters: InvocationFilterView {
+                status: invocation_filter_option_views(
+                    &["queued".to_string()],
+                    &[("queued", "Queued"), ("running", "Running")],
+                ),
+                execution_mode: invocation_filter_option_views(
+                    &["server".to_string()],
+                    &[("server", "Server")],
+                ),
+                worker_queue: invocation_dynamic_option_views(&[], &["generic".to_string()]),
+                claimed_by: invocation_dynamic_option_views(&[], &["worker-a".to_string()]),
+                cancel_state: invocation_filter_option_views(&[], &[("none", "None")]),
+            },
+            invocations: vec![],
+            results: InvocationResultsView {
+                table_url: "/ui/invocations/table".to_string(),
+                summary: "No invocations found".to_string(),
+                pagination: InvocationPaginationView {
+                    current_page: 1,
+                    total_pages: 1,
+                    total_count: 0,
+                    previous_page_url: None,
+                    next_page_url: None,
+                    page_links: vec![PaginationLinkView {
+                        label: "1".to_string(),
+                        page_url: "/ui/invocations".to_string(),
+                        current: true,
+                    }],
+                },
+            },
+        }
+        .render()
+        .expect("render invocations page");
+
+        assert!(rendered.contains("multiple"));
+        assert!(!rendered.contains("Limit"));
+        assert!(rendered.contains("hx-get=\"/ui/invocations\""));
+    }
+
+    #[test]
+    fn parse_invocation_filter_query_accepts_single_and_repeated_values() {
+        let parsed = parse_invocation_filter_query(Some(
+            "status=canceled&status=failed&worker_queue=generic&page=2",
+        ))
+        .expect("parse invocation filter query");
+        assert_eq!(
+            parsed.status,
+            vec!["canceled".to_string(), "failed".to_string()]
+        );
+        assert_eq!(parsed.worker_queue, vec!["generic".to_string()]);
+        assert_eq!(parsed.page, Some(2));
     }
 }

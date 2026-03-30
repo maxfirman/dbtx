@@ -1,8 +1,48 @@
 <div id="invocation-results"
      class="overflow-x-auto px-5 py-4"
-     hx-get="/ui/invocations/table"
-     hx-include="#invocation-filters"
+     hx-get="{{ results.table_url }}"
      hx-trigger="every 2s"
      hx-swap="outerHTML">
+  <div class="mb-3 flex items-center justify-between gap-4 text-sm text-slate-500">
+    <span>{{ results.summary }}</span>
+    <span>Page {{ results.pagination.current_page }} of {{ results.pagination.total_pages }}</span>
+  </div>
   {% include "invocations/_table.html" %}
+  <div class="mt-4 flex items-center justify-between gap-3 border-t border-slate-200 pt-4">
+    <div class="flex items-center gap-2">
+      {% if let Some(previous_page_url) = results.pagination.previous_page_url %}
+      <a href="{{ previous_page_url }}"
+         hx-get="{{ previous_page_url }}"
+         hx-select="#invocation-results"
+         hx-target="#invocation-results"
+         hx-swap="outerHTML"
+         hx-push-url="true"
+         class="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">Previous</a>
+      {% else %}
+      <span class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-400">Previous</span>
+      {% endif %}
+      {% if let Some(next_page_url) = results.pagination.next_page_url %}
+      <a href="{{ next_page_url }}"
+         hx-get="{{ next_page_url }}"
+         hx-select="#invocation-results"
+         hx-target="#invocation-results"
+         hx-swap="outerHTML"
+         hx-push-url="true"
+         class="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">Next</a>
+      {% else %}
+      <span class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-400">Next</span>
+      {% endif %}
+    </div>
+    <div class="flex items-center gap-2">
+      {% for page in results.pagination.page_links %}
+      <a href="{{ page.page_url }}"
+         hx-get="{{ page.page_url }}"
+         hx-select="#invocation-results"
+         hx-target="#invocation-results"
+         hx-swap="outerHTML"
+         hx-push-url="true"
+         class="rounded-lg px-3 py-2 text-sm {% if page.current %}bg-slate-900 text-white{% else %}border border-slate-300 text-slate-700 hover:bg-slate-50{% endif %}">{{ page.label }}</a>
+      {% endfor %}
+    </div>
+  </div>
 </div>
