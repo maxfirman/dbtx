@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
             "/ui/dashboard/recent-invocations",
             get(dashboard_recent_invocations),
         )
+        .route("/ui/dashboard/summary", get(dashboard_summary))
         .route("/ui/projects", get(projects_index))
         .route("/ui/projects/new", get(project_create_modal))
         .route(
@@ -164,22 +165,66 @@ async fn dashboard(State(state): State<AppState>) -> Result<Html<String>, UiErro
         &non_stale_worker_queues,
         &stale_worker_queues,
     );
+    let summary = load_dashboard_summary(db, projects.len() as i64, workers.len() as i64).await?;
 
     let page = DashboardTemplate {
         title: "Dashboard",
-        project_count: projects.len() as i64,
-        active_invocation_count: invocations
-            .iter()
-            .filter(|item| matches!(item.status, InvocationLifecycleStatus::Running))
-            .count() as i64,
-        worker_count: workers.len() as i64,
-        queued_work_count: queues.iter().map(|item| item.pending_count).sum(),
+        summary,
         invocations: invocations.iter().map(invocation_summary_view).collect(),
         projects: projects.iter().map(project_summary_view).collect(),
         workers,
         queues,
     };
     render_template(&page)
+}
+
+async fn dashboard_summary(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let project_count = db.list_projects().await?.len() as i64;
+    let raw_workers = db.list_workers().await?;
+    let workers = filter_workers(
+        raw_workers
+            .iter()
+            .map(worker_summary_view)
+            .collect::<Vec<_>>(),
+        false,
+    );
+    render_template(&DashboardSummaryTemplate {
+        summary: load_dashboard_summary(db, project_count, workers.len() as i64).await?,
+    })
+}
+
+async fn load_dashboard_summary(
+    db: &crate::db::Db,
+    project_count: i64,
+    worker_count: i64,
+) -> Result<DashboardSummaryView, UiError> {
+    let running_filters = vec!["running".to_string()];
+    let queued_filters = vec!["queued".to_string()];
+    let no_filters: Vec<String> = Vec::new();
+    let running_invocation_count = db
+        .count_invocations_filtered(InvocationListFilters {
+            display_statuses: &running_filters,
+            execution_modes: &no_filters,
+            worker_queues: &no_filters,
+            claimed_bys: &no_filters,
+        })
+        .await?;
+    let queued_invocation_count = db
+        .count_invocations_filtered(InvocationListFilters {
+            display_statuses: &queued_filters,
+            execution_modes: &no_filters,
+            worker_queues: &no_filters,
+            claimed_bys: &no_filters,
+        })
+        .await?;
+    Ok(DashboardSummaryView {
+        project_count,
+        running_invocation_count,
+        queued_invocation_count,
+        worker_count,
+    })
 }
 
 async fn dashboard_recent_invocations(State(state): State<AppState>) -> Result<Html<String>, UiError> {
@@ -1939,14 +1984,25 @@ fn environment_version_view(version: &EnvironmentVersionRecord) -> EnvironmentVe
 #[template(path = "dashboard.html")]
 struct DashboardTemplate {
     title: &'static str,
-    project_count: i64,
-    active_invocation_count: i64,
-    worker_count: i64,
-    queued_work_count: i64,
+    summary: DashboardSummaryView,
     invocations: Vec<InvocationSummaryView>,
     projects: Vec<ProjectSummaryView>,
     workers: Vec<WorkerSummaryView>,
     queues: Vec<QueueSummaryView>,
+}
+
+#[derive(Clone)]
+struct DashboardSummaryView {
+    project_count: i64,
+    running_invocation_count: i64,
+    queued_invocation_count: i64,
+    worker_count: i64,
+}
+
+#[derive(Template)]
+#[template(path = "dashboard/_summary.html")]
+struct DashboardSummaryTemplate {
+    summary: DashboardSummaryView,
 }
 
 #[derive(Template)]
@@ -2454,6 +2510,25 @@ mod tests {
         .render()
         .expect("render queues table");
         assert!(rendered.contains("hx-get=\"/ui/queues/table?show_stale=true\""));
+    }
+
+    #[test]
+    fn dashboard_summary_uses_running_and_queued_invocation_links() {
+        let rendered = DashboardSummaryTemplate {
+            summary: DashboardSummaryView {
+                project_count: 4,
+                running_invocation_count: 2,
+                queued_invocation_count: 3,
+                worker_count: 1,
+            },
+        }
+        .render()
+        .expect("render dashboard summary");
+        assert!(rendered.contains("Running Invocations"));
+        assert!(rendered.contains("Queued Invocations"));
+        assert!(rendered.contains("href=\"/ui/invocations?status=running\""));
+        assert!(rendered.contains("href=\"/ui/invocations?status=queued\""));
+        assert!(rendered.contains("hx-get=\"/ui/dashboard/summary\""));
     }
 
     #[test]

@@ -1,0 +1,24 @@
+<div
+  id="dashboard-summary"
+  class="grid gap-4 md:grid-cols-4"
+  hx-get="/ui/dashboard/summary"
+  hx-trigger="every 2s"
+  hx-swap="outerHTML"
+>
+  <a href="/ui/projects" class="block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:bg-slate-50">
+    <div class="text-sm text-slate-500">Projects</div>
+    <div class="mt-2 text-3xl font-semibold">{{ summary.project_count }}</div>
+  </a>
+  <a href="/ui/invocations?status=running" class="block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:bg-slate-50">
+    <div class="text-sm text-slate-500">Running Invocations</div>
+    <div class="mt-2 text-3xl font-semibold">{{ summary.running_invocation_count }}</div>
+  </a>
+  <a href="/ui/invocations?status=queued" class="block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:bg-slate-50">
+    <div class="text-sm text-slate-500">Queued Invocations</div>
+    <div class="mt-2 text-3xl font-semibold">{{ summary.queued_invocation_count }}</div>
+  </a>
+  <a href="/ui/workers" class="block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:bg-slate-50">
+    <div class="text-sm text-slate-500">Workers</div>
+    <div class="mt-2 text-3xl font-semibold">{{ summary.worker_count }}</div>
+  </a>
+</div>

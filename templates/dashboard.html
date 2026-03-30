@@ -7,24 +7,7 @@
     <p class="mt-2 text-sm text-slate-600">Control-plane overview for projects, execution, and live system state.</p>
   </div>
 
-  <div class="grid gap-4 md:grid-cols-4">
-    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="text-sm text-slate-500">Projects</div>
-      <div class="mt-2 text-3xl font-semibold">{{ project_count }}</div>
-    </div>
-    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="text-sm text-slate-500">Active Invocations</div>
-      <div class="mt-2 text-3xl font-semibold">{{ active_invocation_count }}</div>
-    </div>
-    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="text-sm text-slate-500">Workers</div>
-      <div class="mt-2 text-3xl font-semibold">{{ worker_count }}</div>
-    </div>
-    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="text-sm text-slate-500">Queued Work</div>
-      <div class="mt-2 text-3xl font-semibold">{{ queued_work_count }}</div>
-    </div>
-  </div>
+  {% include "dashboard/_summary.html" %}
 
   <div class="grid gap-8 lg:grid-cols-[1.4fr,1fr]">
     <section class="rounded-xl border border-slate-200 bg-white shadow-sm">
