@@ -1,0 +1,8 @@
+<div id="invocation-results"
+     class="overflow-x-auto px-5 py-4"
+     hx-get="/ui/invocations/table"
+     hx-include="#invocation-filters"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML">
+  {% include "invocations/_table.html" %}
+</div>

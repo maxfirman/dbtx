@@ -75,6 +75,93 @@
         source.onmessage = handler;
       };
 
+      const escapeHtml = (text) => text
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+
+      const stripAnsi = (text) => text.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
+
+      const styleRelationTokens = (text) => {
+        let html = '';
+        let index = 0;
+        const isIdent = (ch) => /[A-Za-z0-9_]/.test(ch);
+        while (index < text.length) {
+          let leftEnd = index;
+          while (leftEnd < text.length && isIdent(text[leftEnd])) leftEnd += 1;
+          if (
+            leftEnd > index &&
+            leftEnd < text.length &&
+            text[leftEnd] === '.'
+          ) {
+            let rightEnd = leftEnd + 1;
+            while (rightEnd < text.length && isIdent(text[rightEnd])) rightEnd += 1;
+            if (rightEnd > leftEnd + 1) {
+              html += `<span class="font-semibold text-cyan-700">${escapeHtml(text.slice(index, leftEnd))}.</span>`;
+              html += `<span class="font-semibold text-blue-700">${escapeHtml(text.slice(leftEnd + 1, rightEnd))}</span>`;
+              index = rightEnd;
+              continue;
+            }
+          }
+          html += escapeHtml(text[index]);
+          index += 1;
+        }
+        return html;
+      };
+
+      const styleBracketSegments = (text) => {
+        let html = '';
+        let remaining = text;
+        while (remaining.includes('[')) {
+          const start = remaining.indexOf('[');
+          const before = remaining.slice(0, start);
+          const tail = remaining.slice(start);
+          html += styleRelationTokens(before);
+          const end = tail.indexOf(']');
+          if (end === -1) {
+            html += styleRelationTokens(tail);
+            remaining = '';
+            break;
+          }
+          const segment = tail.slice(0, end + 1);
+          html += `<span class="text-slate-400">${escapeHtml(segment)}</span>`;
+          remaining = tail.slice(end + 1);
+        }
+        html += styleRelationTokens(remaining);
+        return html;
+      };
+
+      const renderCliLikeLogHtml = (text) => {
+        const cleaned = stripAnsi(text).trimEnd();
+        if (!cleaned) return '';
+        if (cleaned.startsWith('dbt-fusion ')) {
+          return `<span class="font-semibold text-emerald-700">dbt-fusion</span> ${styleBracketSegments(cleaned.slice('dbt-fusion '.length))}`;
+        }
+        for (const [prefix, className] of [
+          ['Succeeded', 'font-semibold text-emerald-700'],
+          ['Failed', 'font-semibold text-rose-700'],
+          ['Warned', 'font-semibold text-amber-700'],
+          ['Skipped', 'font-semibold text-amber-700'],
+          ['PASS', 'font-semibold text-emerald-700'],
+          ['ERROR', 'font-semibold text-rose-700'],
+        ]) {
+          if (cleaned.startsWith(prefix)) {
+            return `<span class="${className}">${escapeHtml(prefix)}</span>${styleBracketSegments(cleaned.slice(prefix.length))}`;
+          }
+        }
+        return styleBracketSegments(cleaned);
+      };
+
+      const renderInvocationLogLineHtml = (payload) => {
+        if (!payload.text) return null;
+        if (payload.event_type === 'dbt.log') {
+          return renderCliLikeLogHtml(payload.text);
+        }
+        return escapeHtml(stripAnsi(payload.text));
+      };
+
       Alpine.data('invocationLogs', (url, afterSequence = 0) => ({
         source: null,
         init() {
@@ -86,16 +173,12 @@
           this.source = new EventSource(streamUrl);
           attachInvocationEventListeners(this.source, (event) => {
             const payload = JSON.parse(event.data);
-            const line = this.renderLine(payload);
+            const line = renderInvocationLogLineHtml(payload);
             if (!line) return;
             const target = this.$refs.log;
-            target.textContent = target.textContent ? `${target.textContent}\n${line}` : line;
+            target.insertAdjacentHTML('beforeend', `<div class="whitespace-pre-wrap">${line}</div>`);
             target.scrollTop = target.scrollHeight;
           });
-        },
-        renderLine(payload) {
-          if (!payload.text) return null;
-          return payload.text.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
         }
       }));
 

@@ -26,6 +26,10 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(dashboard))
+        .route(
+            "/ui/dashboard/recent-invocations",
+            get(dashboard_recent_invocations),
+        )
         .route("/ui/projects", get(projects_index))
         .route("/ui/projects/new", get(project_create_modal))
         .route(
@@ -59,7 +63,9 @@ pub fn router() -> Router<AppState> {
             post(environment_draft_confirm),
         )
         .route("/ui/invocations", get(invocations_index))
+        .route("/ui/invocations/table", get(invocations_table))
         .route("/ui/invocations/{id}", get(invocation_detail))
+        .route("/ui/invocations/{id}/panel", get(invocation_detail_panel))
         .route("/ui/invocations/{id}/cancel", post(invocation_cancel))
         .route("/ui/workers", get(workers_index))
         .route("/ui/queues", get(queues_index))
@@ -152,6 +158,20 @@ async fn dashboard(State(state): State<AppState>) -> Result<Html<String>, UiErro
         queues: queues.iter().map(queue_summary_view).collect(),
     };
     render_template(&page)
+}
+
+async fn dashboard_recent_invocations(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let invocations = db
+        .list_invocations(InvocationListApiRequest {
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await?;
+    render_template(&InvocationTableTemplate {
+        invocations: invocations.iter().map(invocation_summary_view).collect(),
+    })
 }
 
 async fn projects_index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
@@ -502,69 +522,137 @@ fn is_terminal_project_draft_status(status: &str) -> bool {
 
 #[derive(Debug, Default, Deserialize)]
 struct InvocationFilterQuery {
-    status: Option<InvocationLifecycleStatus>,
-    execution_mode: Option<InvocationExecutionModeApi>,
+    status: Option<String>,
+    execution_mode: Option<String>,
     worker_queue: Option<String>,
     claimed_by: Option<String>,
-    cancel_state: Option<InvocationCancelStateApi>,
-    limit: Option<i64>,
+    cancel_state: Option<String>,
+    limit: Option<String>,
+}
+
+fn invocation_status_filter_value(value: Option<&str>) -> AppResult<Option<InvocationLifecycleStatus>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("queued") | Some("running") => Ok(Some(InvocationLifecycleStatus::Running)),
+        Some("succeeded") => Ok(Some(InvocationLifecycleStatus::Succeeded)),
+        Some("failed") => Ok(Some(InvocationLifecycleStatus::Failed)),
+        Some("canceled") => Ok(Some(InvocationLifecycleStatus::Canceled)),
+        Some(other) => Err(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid invocation status filter: {other}"),
+        ))),
+    }
+}
+
+fn invocation_execution_mode_filter_value(
+    value: Option<&str>,
+) -> AppResult<Option<InvocationExecutionModeApi>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("local") => Ok(Some(InvocationExecutionModeApi::Local)),
+        Some("server") => Ok(Some(InvocationExecutionModeApi::Server)),
+        Some(other) => Err(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid invocation execution mode filter: {other}"),
+        ))),
+    }
+}
+
+fn invocation_cancel_state_filter_value(
+    value: Option<&str>,
+) -> AppResult<Option<InvocationCancelStateApi>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("none") => Ok(Some(InvocationCancelStateApi::None)),
+        Some("requested") => Ok(Some(InvocationCancelStateApi::Requested)),
+        Some("completed") => Ok(Some(InvocationCancelStateApi::Completed)),
+        Some(other) => Err(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid invocation cancel state filter: {other}"),
+        ))),
+    }
+}
+
+fn invocation_limit_filter_value(value: Option<&str>) -> AppResult<Option<i64>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some(raw) => raw.parse::<i64>().map(Some).map_err(|err| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid invocation limit: {err}"),
+            ))
+        }),
+    }
+}
+
+fn invocation_text_filter_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn matches_display_status(invocation: &InvocationStatusResponse, filter: Option<&str>) -> bool {
+    match filter.map(str::trim).filter(|value| !value.is_empty()) {
+        None => true,
+        Some(expected) => invocation_display_status(invocation) == expected,
+    }
 }
 
 async fn invocations_index(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Query(query): Query<InvocationFilterQuery>,
 ) -> Result<Html<String>, UiError> {
-    let db = state.db();
-    db.require_current_schema().await?;
-    let invocations = db
-        .list_invocations(InvocationListApiRequest {
-            status: query.status.clone(),
-            execution_mode: query.execution_mode,
-            worker_queue: query.worker_queue.clone(),
-            claimed_by: query.claimed_by.clone(),
-            cancel_state: query.cancel_state,
-            limit: query.limit.or(Some(100)),
-        })
-        .await?;
-    let rows = invocations
-        .iter()
-        .map(invocation_summary_view)
-        .collect::<Vec<_>>();
-    if is_htmx(&headers) {
-        return render_template(&InvocationTableTemplate { invocations: rows });
-    }
-
+    let rows = load_invocation_rows(state.db(), &query).await?;
     render_template(&InvocationsPageTemplate {
         title: "Invocations",
         filters: InvocationFilterView {
-            status: query
-                .status
-                .as_ref()
-                .map(invocation_status_value)
-                .unwrap_or_default()
-                .to_string(),
+            status: query.status.unwrap_or_default(),
             execution_mode: query
                 .execution_mode
-                .as_ref()
-                .map(invocation_mode_value)
                 .unwrap_or_default()
                 .to_string(),
             worker_queue: query.worker_queue.unwrap_or_default(),
             claimed_by: query.claimed_by.unwrap_or_default(),
             cancel_state: query
                 .cancel_state
-                .as_ref()
-                .map(cancel_state_value)
                 .unwrap_or_default()
                 .to_string(),
-            limit: query
-                .limit
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
+            limit: query.limit.unwrap_or_default(),
         },
         invocations: rows,
     })
+}
+
+async fn invocations_table(
+    State(state): State<AppState>,
+    Query(query): Query<InvocationFilterQuery>,
+) -> Result<Html<String>, UiError> {
+    let rows = load_invocation_rows(state.db(), &query).await?;
+    render_template(&InvocationResultsTemplate { invocations: rows })
+}
+
+async fn load_invocation_rows(
+    db: &crate::db::Db,
+    query: &InvocationFilterQuery,
+) -> Result<Vec<InvocationSummaryView>, UiError> {
+    db.require_current_schema().await?;
+    let invocations = db
+        .list_invocations(InvocationListApiRequest {
+            status: invocation_status_filter_value(query.status.as_deref())?,
+            execution_mode: invocation_execution_mode_filter_value(query.execution_mode.as_deref())?,
+            worker_queue: invocation_text_filter_value(query.worker_queue.as_deref()),
+            claimed_by: invocation_text_filter_value(query.claimed_by.as_deref()),
+            cancel_state: invocation_cancel_state_filter_value(query.cancel_state.as_deref())?,
+            limit: invocation_limit_filter_value(query.limit.as_deref())?.or(Some(100)),
+        })
+        .await?;
+    let rows = invocations
+        .iter()
+        .filter(|invocation| matches_display_status(invocation, query.status.as_deref()))
+        .map(invocation_summary_view)
+        .collect::<Vec<_>>();
+    Ok(rows)
 }
 
 async fn invocation_detail(
@@ -579,16 +667,7 @@ async fn invocation_detail(
     let initial_log_sequence = events.last().map(|(sequence, _)| *sequence).unwrap_or(0);
     let lines = events
         .into_iter()
-        .filter_map(|(_, event)| {
-            event.text.as_deref().and_then(|text| {
-                let cleaned = strip_ansi(text);
-                if cleaned.trim().is_empty() {
-                    None
-                } else {
-                    Some(cleaned)
-                }
-            })
-        })
+        .filter_map(|(_, event)| render_invocation_log_html(&event))
         .collect();
 
     render_template(&InvocationDetailTemplate {
@@ -597,6 +676,21 @@ async fn invocation_detail(
         initial_log_lines: lines,
         initial_log_sequence,
         sse_url: format!("/v1/invocations/{invocation_id}/events"),
+        panel_url: format!("/ui/invocations/{invocation_id}/panel"),
+    })
+}
+
+async fn invocation_detail_panel(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let invocation_id = parse_uuid(&id)?;
+    let invocation = db.get_invocation_status(invocation_id).await?;
+    render_template(&InvocationDetailPanelTemplate {
+        invocation: invocation_detail_view(&invocation),
+        panel_url: format!("/ui/invocations/{invocation_id}/panel"),
     })
 }
 
@@ -767,6 +861,135 @@ fn strip_ansi(input: &str) -> String {
     output
 }
 
+fn escape_html(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            '\'' => output.push_str("&#39;"),
+            _ => output.push(ch),
+        }
+    }
+    output
+}
+
+fn consume_identifier(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let is_ident = byte.is_ascii_alphanumeric() || byte == b'_';
+        if !is_ident {
+            break;
+        }
+        index += 1;
+    }
+    index
+}
+
+fn style_relation_tokens(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        let left_end = consume_identifier(bytes, index);
+        if left_end > start
+            && left_end < bytes.len()
+            && bytes[left_end] == b'.'
+        {
+            let right_start = left_end + 1;
+            let right_end = consume_identifier(bytes, right_start);
+            if right_end > right_start {
+                output.push_str("<span class=\"font-semibold text-cyan-700\">");
+                output.push_str(&escape_html(&input[start..left_end]));
+                output.push_str(".</span><span class=\"font-semibold text-blue-700\">");
+                output.push_str(&escape_html(&input[right_start..right_end]));
+                output.push_str("</span>");
+                index = right_end;
+                continue;
+            }
+        }
+        let ch = input[index..].chars().next().expect("char boundary");
+        output.push_str(&escape_html(&ch.to_string()));
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn style_bracket_segments(input: &str) -> String {
+    let mut output = String::new();
+    let mut remaining = input;
+    while let Some(start) = remaining.find('[') {
+        let (before, tail) = remaining.split_at(start);
+        output.push_str(&style_relation_tokens(before));
+        if let Some(end) = tail.find(']') {
+            let (segment, rest) = tail.split_at(end + 1);
+            output.push_str("<span class=\"text-slate-400\">");
+            output.push_str(&escape_html(segment));
+            output.push_str("</span>");
+            remaining = rest;
+        } else {
+            output.push_str(&style_relation_tokens(tail));
+            remaining = "";
+        }
+    }
+    output.push_str(&style_relation_tokens(remaining));
+    output
+}
+
+fn render_cli_like_log_html(text: &str) -> String {
+    let text = strip_ansi(text);
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("dbt-fusion ") {
+        return format!(
+            "<span class=\"font-semibold text-emerald-700\">dbt-fusion</span> {}",
+            style_bracket_segments(rest)
+        );
+    }
+
+    for (prefix, class_name) in [
+        ("Succeeded", "font-semibold text-emerald-700"),
+        ("Failed", "font-semibold text-rose-700"),
+        ("Warned", "font-semibold text-amber-700"),
+        ("Skipped", "font-semibold text-amber-700"),
+        ("PASS", "font-semibold text-emerald-700"),
+        ("ERROR", "font-semibold text-rose-700"),
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return format!(
+                "<span class=\"{class_name}\">{}</span>{}",
+                escape_html(prefix),
+                style_bracket_segments(rest)
+            );
+        }
+    }
+
+    style_bracket_segments(trimmed)
+}
+
+fn render_invocation_log_html(event: &crate::api::InvocationEvent) -> Option<String> {
+    let text = event.text.as_deref()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let rendered = match event.event_type.as_str() {
+        "dbt.log" => render_cli_like_log_html(text),
+        _ => escape_html(&strip_ansi(text)),
+    };
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
+}
+
 fn fmt_ts(value: DateTime<Utc>) -> String {
     value.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
@@ -775,8 +998,9 @@ fn fmt_optional_ts(value: Option<DateTime<Utc>>) -> String {
     value.map(fmt_ts).unwrap_or_default()
 }
 
-fn invocation_status_value(value: &InvocationLifecycleStatus) -> &'static str {
-    match value {
+fn invocation_display_status(invocation: &InvocationStatusResponse) -> &'static str {
+    match invocation.status {
+        InvocationLifecycleStatus::Running if invocation.claimed_by.is_none() => "queued",
         InvocationLifecycleStatus::Running => "running",
         InvocationLifecycleStatus::Succeeded => "succeeded",
         InvocationLifecycleStatus::Failed => "failed",
@@ -791,17 +1015,10 @@ fn invocation_mode_value(value: &InvocationExecutionModeApi) -> &'static str {
     }
 }
 
-fn cancel_state_value(value: &InvocationCancelStateApi) -> &'static str {
-    match value {
-        InvocationCancelStateApi::None => "none",
-        InvocationCancelStateApi::Requested => "requested",
-        InvocationCancelStateApi::Completed => "completed",
-    }
-}
-
 fn status_badge_class(status: &str) -> &'static str {
     match status {
-        "running" => "bg-amber-100 text-amber-800",
+        "queued" => "bg-amber-100 text-amber-800",
+        "running" => "bg-sky-100 text-sky-800",
         "succeeded" => "bg-emerald-100 text-emerald-800",
         "failed" => "bg-rose-100 text-rose-800",
         "canceled" => "bg-slate-200 text-slate-700",
@@ -920,6 +1137,8 @@ struct InvocationDetailView {
     invocation_id: String,
     status: String,
     status_class: &'static str,
+    is_terminal: bool,
+    can_cancel: bool,
     execution_mode: String,
     worker_queue: String,
     worker_health: String,
@@ -1152,7 +1371,7 @@ fn json_object_pairs(value: &Value) -> Vec<EnvironmentDraftPairView> {
 }
 
 fn invocation_summary_view(invocation: &InvocationStatusResponse) -> InvocationSummaryView {
-    let status = invocation_status_value(&invocation.status).to_string();
+    let status = invocation_display_status(invocation).to_string();
     InvocationSummaryView {
         invocation_id: invocation.invocation_id.to_string(),
         status_class: status_badge_class(&status),
@@ -1167,11 +1386,13 @@ fn invocation_summary_view(invocation: &InvocationStatusResponse) -> InvocationS
 }
 
 fn invocation_detail_view(invocation: &InvocationStatusResponse) -> InvocationDetailView {
-    let status = invocation_status_value(&invocation.status).to_string();
+    let status = invocation_display_status(invocation).to_string();
     InvocationDetailView {
         invocation_id: invocation.invocation_id.to_string(),
         status_class: status_badge_class(&status),
         status,
+        is_terminal: !matches!(invocation.status, InvocationLifecycleStatus::Running),
+        can_cancel: matches!(invocation.status, InvocationLifecycleStatus::Running),
         execution_mode: invocation_mode_value(&invocation.execution_mode).to_string(),
         worker_queue: invocation.worker_queue.clone(),
         worker_health: format!("{:?}", invocation.worker_health).to_lowercase(),
@@ -1304,9 +1525,22 @@ struct InvocationsPageTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "invocations/_results.html")]
+struct InvocationResultsTemplate {
+    invocations: Vec<InvocationSummaryView>,
+}
+
+#[derive(Template)]
 #[template(path = "invocations/_table.html")]
 struct InvocationTableTemplate {
     invocations: Vec<InvocationSummaryView>,
+}
+
+#[derive(Template)]
+#[template(path = "invocations/_detail_panel.html")]
+struct InvocationDetailPanelTemplate {
+    invocation: InvocationDetailView,
+    panel_url: String,
 }
 
 #[derive(Template)]
@@ -1317,6 +1551,7 @@ struct InvocationDetailTemplate {
     initial_log_lines: Vec<String>,
     initial_log_sequence: u64,
     sse_url: String,
+    panel_url: String,
 }
 
 #[derive(Template)]
@@ -1415,6 +1650,87 @@ mod tests {
     }
 
     #[test]
+    fn running_unclaimed_invocations_render_as_queued() {
+        let invocation = InvocationStatusResponse {
+            invocation_id: Uuid::nil(),
+            status: InvocationLifecycleStatus::Running,
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: "generic".to_string(),
+            worker_health: crate::api::InvocationWorkerHealthApi::Unclaimed,
+            cancel_state: InvocationCancelStateApi::None,
+            claimed_at: None,
+            claimed_by: None,
+            last_heartbeat_at: None,
+            cancel_requested_at: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            cancel_requested: false,
+            exit_code: None,
+            error: None,
+        };
+
+        let view = invocation_summary_view(&invocation);
+        assert_eq!(view.status, "queued");
+        assert_eq!(view.status_class, "bg-amber-100 text-amber-800");
+    }
+
+    #[test]
+    fn running_claimed_invocations_render_as_running() {
+        let invocation = InvocationStatusResponse {
+            invocation_id: Uuid::nil(),
+            status: InvocationLifecycleStatus::Running,
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: "generic".to_string(),
+            worker_health: crate::api::InvocationWorkerHealthApi::Claimed,
+            cancel_state: InvocationCancelStateApi::None,
+            claimed_at: Some(Utc::now()),
+            claimed_by: Some("worker-1".to_string()),
+            last_heartbeat_at: Some(Utc::now()),
+            cancel_requested_at: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            cancel_requested: false,
+            exit_code: None,
+            error: None,
+        };
+
+        let view = invocation_detail_view(&invocation);
+        assert_eq!(view.status, "running");
+        assert_eq!(view.status_class, "bg-sky-100 text-sky-800");
+        assert!(!view.is_terminal);
+        assert!(view.can_cancel);
+    }
+
+    #[test]
+    fn invocation_detail_panel_keeps_polling_until_terminal() {
+        let rendered = InvocationDetailPanelTemplate {
+            invocation: InvocationDetailView {
+                invocation_id: Uuid::nil().to_string(),
+                status: "queued".to_string(),
+                status_class: "bg-amber-100 text-amber-800",
+                is_terminal: false,
+                can_cancel: true,
+                execution_mode: "server".to_string(),
+                worker_queue: "default".to_string(),
+                worker_health: "unknown".to_string(),
+                cancel_state: "none".to_string(),
+                claimed_by: "".to_string(),
+                claimed_at: "".to_string(),
+                last_heartbeat_at: "".to_string(),
+                started_at: "2026-03-28 12:00:00 UTC".to_string(),
+                completed_at: "".to_string(),
+                error: "".to_string(),
+            },
+            panel_url: "/ui/invocations/00000000-0000-0000-0000-000000000000/panel".to_string(),
+        }
+        .render()
+        .expect("render invocation detail panel");
+
+        assert!(rendered.contains("hx-get=\"/ui/invocations/00000000-0000-0000-0000-000000000000/panel\""));
+        assert!(rendered.contains("hx-trigger=\"every 2s\""));
+    }
+
+    #[test]
     fn invocation_detail_resumes_stream_after_initial_history() {
         let rendered = InvocationDetailTemplate {
             title: "Invocation",
@@ -1422,6 +1738,8 @@ mod tests {
                 invocation_id: Uuid::nil().to_string(),
                 status: "running".to_string(),
                 status_class: "",
+                is_terminal: false,
+                can_cancel: true,
                 execution_mode: "server".to_string(),
                 worker_queue: "default".to_string(),
                 worker_health: "healthy".to_string(),
@@ -1436,6 +1754,7 @@ mod tests {
             initial_log_lines: vec!["line 1".to_string()],
             initial_log_sequence: 7,
             sse_url: "/v1/invocations/00000000-0000-0000-0000-000000000000/events".to_string(),
+            panel_url: "/ui/invocations/00000000-0000-0000-0000-000000000000/panel".to_string(),
         }
         .render()
         .expect("render invocation detail");

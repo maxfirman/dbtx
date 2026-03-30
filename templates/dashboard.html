@@ -32,7 +32,11 @@
         <h2 class="font-semibold">Recent Invocations</h2>
         <a href="/ui/invocations" class="text-sm text-slate-600 hover:text-slate-900">View all</a>
       </div>
-        <div class="overflow-x-auto px-5 py-4">
+        <div id="dashboard-recent-invocations"
+             class="overflow-x-auto px-5 py-4"
+             hx-get="/ui/dashboard/recent-invocations"
+             hx-trigger="every 2s"
+             hx-swap="innerHTML">
           {% include "invocations/_table.html" %}
         </div>
     </section>
