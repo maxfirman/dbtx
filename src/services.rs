@@ -1051,7 +1051,14 @@ impl<'a> InvocationService<'a> {
                         .map(ToString::to_string);
                 }
                 self.db
-                    .persist_log_event(run_id, project.id, environment.id, sequence_no, &event)
+                    .persist_log_event(
+                        None,
+                        run_id,
+                        project.id,
+                        environment.id,
+                        sequence_no,
+                        &event,
+                    )
                     .await?;
             } else {
                 observer.stdout_line(&line);

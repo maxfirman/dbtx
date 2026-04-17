@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::IsTerminal;
 
+const DBTX_SELECTED_RESOURCES_PREFIX: &str = "DBTX_SELECTED_RESOURCES::";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEvent {
     #[serde(default)]
@@ -41,6 +43,12 @@ pub struct NormalizedNodeEvent {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub execution_time_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelectedResourcesMarker {
+    #[serde(default)]
+    selected_resources: Vec<String>,
 }
 
 impl LogEvent {
@@ -141,6 +149,12 @@ impl LogEvent {
             finished_at: parse_timestamp(node_info.get("node_finished_at").and_then(Value::as_str)),
             execution_time_seconds,
         })
+    }
+
+    pub fn selected_resources(&self) -> Option<Vec<String>> {
+        let payload = self.info.msg.strip_prefix(DBTX_SELECTED_RESOURCES_PREFIX)?;
+        let marker: SelectedResourcesMarker = serde_json::from_str(payload).ok()?;
+        Some(marker.selected_resources)
     }
 }
 
@@ -531,5 +545,17 @@ mod tests {
             style("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold], false),
             "Succeeded"
         );
+    }
+
+    #[test]
+    fn parses_selected_resources_marker() {
+        let raw = r#"{
+          "info":{"name":"Generic","msg":"DBTX_SELECTED_RESOURCES::{\"selected_resources\":[\"model.pkg.orders\",\"seed.pkg.customers\"]}"},
+          "data":{}
+        }"#;
+
+        let event = LogEvent::parse(raw).expect("event should parse");
+        let selected = event.selected_resources().expect("selected resources marker");
+        assert_eq!(selected, vec!["model.pkg.orders", "seed.pkg.customers"]);
     }
 }

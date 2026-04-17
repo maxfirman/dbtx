@@ -2178,6 +2178,18 @@ impl Db {
             .await?;
         }
 
+        self.close_invocation_selected_resources_in_tx(
+            &mut tx,
+            invocation_id,
+            match completion.status {
+                InvocationLifecycleStatus::Succeeded => "invocation_succeeded",
+                InvocationLifecycleStatus::Failed => "invocation_failed",
+                InvocationLifecycleStatus::Canceled => "invocation_canceled",
+                InvocationLifecycleStatus::Running => "invocation_failed",
+            },
+        )
+        .await?;
+
         sqlx::query(
             r#"
             UPDATE invocations
@@ -2938,6 +2950,7 @@ impl Db {
 
     pub(crate) async fn persist_log_event(
         &self,
+        invocation_id: Option<Uuid>,
         run_id: Uuid,
         project_id: i64,
         environment_id: i64,
@@ -2964,7 +2977,24 @@ impl Db {
         .execute(&self.pool)
         .await?;
 
+        if let Some(invocation_id) = invocation_id
+            && let Some(selected_resources) = event.selected_resources()
+        {
+            self.insert_invocation_selected_resources(
+                invocation_id,
+                run_id,
+                project_id,
+                environment_id,
+                &selected_resources,
+            )
+            .await?;
+        }
+
         if let Some(node) = event.normalized_node_event() {
+            if let Some(invocation_id) = invocation_id {
+                self.update_invocation_selected_resource_progress(invocation_id, &node)
+                    .await?;
+            }
             let promote_manifest_state = node.status.as_deref().is_some_and(is_promotable_status);
             let resource_type = node.resource_type.clone();
             let node_name = node.node_name.clone();
@@ -3101,6 +3131,114 @@ impl Db {
             .await?;
         }
 
+        Ok(())
+    }
+
+    async fn insert_invocation_selected_resources(
+        &self,
+        invocation_id: Uuid,
+        run_id: Uuid,
+        project_id: i64,
+        environment_id: i64,
+        selected_resources: &[String],
+    ) -> AppResult<()> {
+        if selected_resources.is_empty() {
+            return Ok(());
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO invocation_selected_resources (
+                invocation_id,
+                run_id,
+                project_id,
+                environment_id,
+                unique_id,
+                resource_type,
+                selected_at,
+                created_at,
+                updated_at
+            )
+            SELECT
+                $1,
+                $2,
+                $3,
+                $4,
+                unique_id,
+                NULLIF(split_part(unique_id, '.', 1), ''),
+                NOW(),
+                NOW(),
+                NOW()
+            FROM unnest($5::text[]) AS unique_id
+            ON CONFLICT (invocation_id, unique_id) DO UPDATE
+            SET resource_type = COALESCE(
+                    invocation_selected_resources.resource_type,
+                    EXCLUDED.resource_type
+                ),
+                updated_at = NOW()
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(run_id)
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(selected_resources)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_invocation_selected_resource_progress(
+        &self,
+        invocation_id: Uuid,
+        node: &crate::event::NormalizedNodeEvent,
+    ) -> AppResult<()> {
+        let close_reason = node.finished_at.map(|_| "completed");
+        sqlx::query(
+            r#"
+            UPDATE invocation_selected_resources
+            SET resource_type = COALESCE($3, resource_type),
+                node_started_at = COALESCE($4, node_started_at),
+                finished_at = COALESCE($5, finished_at),
+                close_reason = COALESCE($6, close_reason),
+                updated_at = NOW()
+            WHERE invocation_id = $1
+              AND unique_id = $2
+              AND finished_at IS NULL
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(&node.unique_id)
+        .bind(node.resource_type.clone())
+        .bind(node.started_at)
+        .bind(node.finished_at)
+        .bind(close_reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn close_invocation_selected_resources_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        invocation_id: Uuid,
+        close_reason: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE invocation_selected_resources
+            SET finished_at = COALESCE(finished_at, NOW()),
+                close_reason = COALESCE(close_reason, $2),
+                updated_at = NOW()
+            WHERE invocation_id = $1
+              AND finished_at IS NULL
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(close_reason)
+        .execute(&mut **tx)
+        .await?;
         Ok(())
     }
 

@@ -236,6 +236,8 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
             db.service_url(),
             "--execution-mode",
             "server",
+            "--queue",
+            "generic",
             "--once",
         ])
         .env("DBTX_GIT_CACHE_DIR", git_cache.path())
@@ -273,6 +275,37 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
     assert_eq!(
         run_row.get::<Option<String>, _>("project_ref").as_deref(),
         Some(project.remote_project_id().as_str())
+    );
+
+    let selected_rows = sqlx::query(
+        r#"
+        SELECT unique_id, resource_type, finished_at, close_reason
+        FROM invocation_selected_resources
+        WHERE invocation_id = $1
+        ORDER BY unique_id
+        "#,
+    )
+    .bind(invocation.invocation_id)
+    .fetch_all(db.pool())
+    .await
+    .expect("selected resource rows");
+    assert_eq!(selected_rows.len(), 1);
+    assert_eq!(
+        selected_rows[0].get::<String, _>("unique_id"),
+        "model.jaffle_shop_project.stg_customers"
+    );
+    assert_eq!(
+        selected_rows[0]
+            .get::<Option<String>, _>("resource_type")
+            .as_deref(),
+        Some("model")
+    );
+    assert!(selected_rows[0].get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at").is_some());
+    assert_eq!(
+        selected_rows[0]
+            .get::<Option<String>, _>("close_reason")
+            .as_deref(),
+        Some("completed")
     );
 
     let repo_hash = short_hash(project.path_str());

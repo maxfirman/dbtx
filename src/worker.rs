@@ -7,6 +7,7 @@ use crate::client::DaemonClient;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::services::read_dbt_project_name_from_root;
+use serde_yaml::Value as YamlValue;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -15,6 +16,16 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tracing::{info, warn};
+
+const DBTX_SELECTED_RESOURCES_HOOK: &str = "{{ dbtx__log_selected_resources() }}";
+const DBTX_SELECTED_RESOURCES_MACRO_FILE: &str = "_dbtx_selected_resources.sql";
+const DBTX_SELECTED_RESOURCES_MACRO: &str = r#"{% macro dbtx__log_selected_resources() %}
+  {% if execute %}
+    {% set payload = {"selected_resources": selected_resources} %}
+    {% do log("DBTX_SELECTED_RESOURCES::" ~ (payload | tojson), info=True) %}
+  {% endif %}
+{% endmacro %}
+"#;
 
 pub async fn execute_claimed_invocation(
     client: &DaemonClient,
@@ -59,6 +70,11 @@ pub async fn execute_claimed_invocation(
         project_dir = %project_dir.display(),
         "starting claimed invocation execution"
     );
+    if let Err(err) = prepare_runtime_project_for_execution(&spec, command_name, &project_dir).await
+    {
+        report_setup_failure(client, &claim, &err.to_string()).await?;
+        return Err(err);
+    }
     let profiles_dir = match write_profiles_dir(spec.profiles_yml()) {
         Ok(profiles_dir) => profiles_dir,
         Err(err) => {
@@ -851,6 +867,103 @@ async fn materialize_execution_project_dir(
     }
 }
 
+async fn prepare_runtime_project_for_execution(
+    spec: &InvocationExecutionSpecApi,
+    command: InvocationCommandApi,
+    project_dir: &Path,
+) -> AppResult<()> {
+    if !persists_state(command) {
+        return Ok(());
+    }
+
+    let InvocationExecutionSpecApi::Remote { repo_url, .. } = spec else {
+        return Ok(());
+    };
+
+    patch_remote_runtime_project(repo_url, project_dir).await
+}
+
+async fn patch_remote_runtime_project(repo_url: &str, project_dir: &Path) -> AppResult<()> {
+    let cache_root = git_cache_root()?;
+    let repo_hash = short_hash(repo_url);
+    let _repo_lock = acquire_repo_lock(&cache_root, &repo_hash).await?;
+    patch_runtime_project_yaml(project_dir)?;
+    Ok(())
+}
+
+fn patch_runtime_project_yaml(project_dir: &Path) -> AppResult<()> {
+    let project_path = project_dir.join("dbt_project.yml");
+    let mut project_yaml: YamlValue =
+        serde_yaml::from_str(&std::fs::read_to_string(&project_path)?)?;
+
+    ensure_on_run_start_hook(&mut project_yaml)?;
+    let macro_file = ensure_selected_resources_macro_file(project_dir, &project_yaml)?;
+
+    std::fs::write(project_path, serde_yaml::to_string(&project_yaml)?)?;
+    std::fs::write(macro_file, DBTX_SELECTED_RESOURCES_MACRO)?;
+    Ok(())
+}
+
+fn ensure_on_run_start_hook(project_yaml: &mut YamlValue) -> AppResult<()> {
+    let mapping = project_yaml.as_mapping_mut().ok_or_else(|| {
+        AppError::Io(std::io::Error::other(
+            "dbt_project.yml must be a YAML mapping",
+        ))
+    })?;
+    let key = YamlValue::String("on-run-start".to_string());
+    let hook = YamlValue::String(DBTX_SELECTED_RESOURCES_HOOK.to_string());
+    let updated = match mapping.remove(&key) {
+        Some(YamlValue::Sequence(mut sequence)) => {
+            if !sequence
+                .iter()
+                .any(|value| value.as_str() == Some(DBTX_SELECTED_RESOURCES_HOOK))
+            {
+                sequence.push(hook);
+            }
+            YamlValue::Sequence(sequence)
+        }
+        Some(YamlValue::String(existing)) => {
+            if existing == DBTX_SELECTED_RESOURCES_HOOK {
+                YamlValue::String(existing)
+            } else {
+                YamlValue::Sequence(vec![YamlValue::String(existing), hook])
+            }
+        }
+        Some(YamlValue::Null) | None => YamlValue::Sequence(vec![hook]),
+        Some(_) => {
+            return Err(AppError::Io(std::io::Error::other(
+                "unsupported on-run-start hook shape in dbt_project.yml",
+            )));
+        }
+    };
+    mapping.insert(key, updated);
+    Ok(())
+}
+
+fn ensure_selected_resources_macro_file(
+    project_dir: &Path,
+    project_yaml: &YamlValue,
+) -> AppResult<PathBuf> {
+    let macro_root = project_yaml
+        .get("macro-paths")
+        .and_then(first_yaml_path)
+        .unwrap_or_else(|| PathBuf::from("macros"));
+    let macro_dir = project_dir.join(macro_root);
+    std::fs::create_dir_all(&macro_dir)?;
+    Ok(macro_dir.join(DBTX_SELECTED_RESOURCES_MACRO_FILE))
+}
+
+fn first_yaml_path(value: &YamlValue) -> Option<PathBuf> {
+    match value {
+        YamlValue::Sequence(sequence) => sequence
+            .iter()
+            .find_map(|item| item.as_str().filter(|path| !path.trim().is_empty()))
+            .map(PathBuf::from),
+        YamlValue::String(path) if !path.trim().is_empty() => Some(PathBuf::from(path)),
+        _ => None,
+    }
+}
+
 async fn ensure_git_worktree(repo_url: &str, commit_sha: &str) -> AppResult<PathBuf> {
     let cache_root = git_cache_root()?;
     ensure_git_worktree_in(&cache_root, repo_url, commit_sha).await
@@ -1348,7 +1461,11 @@ fn write_state_dir(state_manifest: Option<&serde_json::Value>) -> AppResult<Opti
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_git_worktree_in, resolve_remote_git_target, validate_remote_project_root};
+    use super::{
+        DBTX_SELECTED_RESOURCES_HOOK, DBTX_SELECTED_RESOURCES_MACRO_FILE,
+        ensure_git_worktree_in, patch_runtime_project_yaml, resolve_remote_git_target,
+        validate_remote_project_root,
+    };
     use std::path::Path;
     use std::process::Command;
     use tempfile::TempDir;
@@ -1437,6 +1554,33 @@ mod tests {
             error
                 .to_string()
                 .contains("commit deadbeef is not available from remote repository")
+        );
+    }
+
+    #[test]
+    fn patch_runtime_project_yaml_appends_selected_resources_hook() {
+        let project = TempDir::new().expect("project dir");
+        std::fs::create_dir_all(project.path().join("custom_macros")).expect("macro dir");
+        std::fs::write(
+            project.path().join("dbt_project.yml"),
+            "name: demo\nmacro-paths: [custom_macros]\non-run-start: [\"{{ existing_hook() }}\"]\n",
+        )
+        .expect("dbt project");
+
+        patch_runtime_project_yaml(project.path()).expect("patch project");
+        patch_runtime_project_yaml(project.path()).expect("patch project idempotently");
+
+        let patched =
+            std::fs::read_to_string(project.path().join("dbt_project.yml")).expect("patched yaml");
+        assert!(patched.contains("existing_hook"));
+        assert!(patched.contains(DBTX_SELECTED_RESOURCES_HOOK));
+        assert_eq!(patched.matches(DBTX_SELECTED_RESOURCES_HOOK).count(), 1);
+        assert!(
+            project
+                .path()
+                .join("custom_macros")
+                .join(DBTX_SELECTED_RESOURCES_MACRO_FILE)
+                .is_file()
         );
     }
 

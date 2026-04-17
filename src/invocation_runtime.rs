@@ -61,17 +61,26 @@ impl InvocationPersistence {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn persist_log_event(
         &self,
         db: &Db,
+        invocation_id: Uuid,
         run_id: Uuid,
         project_id: i64,
         environment_id: i64,
         sequence: i64,
         log_event: &LogEvent,
     ) -> AppResult<()> {
-        db.persist_log_event(run_id, project_id, environment_id, sequence, log_event)
-            .await
+        db.persist_log_event(
+            Some(invocation_id),
+            run_id,
+            project_id,
+            environment_id,
+            sequence,
+            log_event,
+        )
+        .await
     }
 
     async fn persist_raw_line(
@@ -177,6 +186,7 @@ impl InvocationRecorder {
                         persistence
                             .persist_log_event(
                                 &self.db,
+                                self.invocation_id,
                                 persistence.run_id,
                                 persistence.project_id,
                                 persistence.environment_id,

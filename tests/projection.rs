@@ -212,6 +212,105 @@ async fn lease_tokens_enforce_invocation_ownership() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn selected_resources_are_tracked_until_node_finish_or_invocation_completion() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    .await;
+
+    let created = client
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "remote",
+            InvocationCommandApi::Run,
+        ))
+        .await
+        .expect("create remote invocation");
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec![created.worker_queue.clone()],
+        })
+        .await
+        .expect("claim invocation")
+        .expect("claimed invocation");
+
+    client
+        .invocation_append_events(
+            created.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                events: vec![
+                    sample_dbt_log_event(
+                        r#"{"info":{"name":"Generic","msg":"DBTX_SELECTED_RESOURCES::{\"selected_resources\":[\"model.pkg.orders\",\"seed.pkg.customers\"]}"},"data":{}}"#,
+                    ),
+                    sample_dbt_log_event(
+                        r#"{"info":{"name":"NodeFinished","code":"Q025","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","node_status":"success","node_started_at":"2025-01-01T00:00:00Z","node_finished_at":"2025-01-01T00:00:01Z"},"run_result":{"status":"success","execution_time":1.0}}}"#,
+                    ),
+                ],
+            },
+        )
+        .await
+        .expect("append dbt events");
+
+    client
+        .invocation_complete(
+            created.invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Failed, 1),
+            },
+        )
+        .await
+        .expect("complete invocation");
+
+    let rows = sqlx::query(
+        r#"
+        SELECT unique_id, resource_type, finished_at, close_reason
+        FROM invocation_selected_resources
+        WHERE invocation_id = $1
+        ORDER BY unique_id
+        "#,
+    )
+    .bind(created.invocation_id)
+    .fetch_all(db.pool())
+    .await
+    .expect("selected resource rows");
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get::<String, _>("unique_id"), "model.pkg.orders");
+    assert_eq!(
+        rows[0].get::<Option<String>, _>("close_reason").as_deref(),
+        Some("completed")
+    );
+    assert!(rows[0].get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at").is_some());
+    assert_eq!(rows[1].get::<String, _>("unique_id"), "seed.pkg.customers");
+    assert_eq!(
+        rows[1].get::<Option<String>, _>("resource_type").as_deref(),
+        Some("seed")
+    );
+    assert_eq!(
+        rows[1].get::<Option<String>, _>("close_reason").as_deref(),
+        Some("invocation_failed")
+    );
+    assert!(rows[1].get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at").is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn claimed_invocation_timeout_fails_without_reclaim() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -1546,6 +1645,19 @@ fn sample_execution_event(text: &str) -> ExecutionEvent {
         occurred_at: chrono::Utc::now(),
         text: Some(text.to_string()),
         raw_line: Some(text.to_string()),
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        error: None,
+    }
+}
+
+fn sample_dbt_log_event(raw_line: &str) -> ExecutionEvent {
+    ExecutionEvent {
+        kind: ExecutionEventKind::DbtLog,
+        occurred_at: chrono::Utc::now(),
+        text: None,
+        raw_line: Some(raw_line.to_string()),
         dbt_event_name: None,
         node_unique_id: None,
         level: None,
