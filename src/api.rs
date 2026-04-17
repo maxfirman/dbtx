@@ -53,8 +53,18 @@ pub struct EnvironmentsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentActiveResourcesResponse {
+    pub resources: Vec<crate::db::EnvironmentActiveResourceRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentVersionsResponse {
     pub versions: Vec<EnvironmentVersionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
+pub struct EnvironmentActiveResourcesApiRequest {
+    pub resource_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -140,6 +150,13 @@ pub enum InvocationCommandApi {
 pub enum InvocationExecutionModeApi {
     Server,
     Local,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentActiveResourcePhaseApi {
+    Selected,
+    Running,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

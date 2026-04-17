@@ -1,7 +1,8 @@
 use crate::api::{
-    InvocationCancelStateApi, InvocationClaimResponse, InvocationEvent, InvocationExecutionModeApi,
-    InvocationExecutionSpecApi, InvocationLifecycleStatus, InvocationListApiRequest,
-    InvocationStatusResponse, InvocationWorkerHealthApi, QueueStatusResponse, WorkerStatusResponse,
+    EnvironmentActiveResourcePhaseApi, InvocationCancelStateApi, InvocationClaimResponse,
+    InvocationEvent, InvocationExecutionModeApi, InvocationExecutionSpecApi,
+    InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
+    InvocationWorkerHealthApi, QueueStatusResponse, WorkerStatusResponse,
 };
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
@@ -132,6 +133,17 @@ pub struct EnvironmentVersionRecord {
     pub immutable: bool,
     pub baseline_environment_id: Option<i64>,
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentActiveResourceRecord {
+    pub invocation_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub unique_id: String,
+    pub resource_type: String,
+    pub phase: EnvironmentActiveResourcePhaseApi,
+    pub selected_at: chrono::DateTime<Utc>,
+    pub node_started_at: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1295,6 +1307,43 @@ impl Db {
         let project = self.get_project_by_project_id(project).await?;
         self.get_environment_by_project_id(project.id, &project.project_id, environment_slug)
             .await
+    }
+
+    pub(crate) async fn list_active_environment_resources(
+        &self,
+        project: &str,
+        environment_slug: &str,
+        resource_type: Option<&str>,
+    ) -> AppResult<Vec<EnvironmentActiveResourceRecord>> {
+        let environment = self.get_environment(project, environment_slug).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                invocation_id,
+                run_id,
+                unique_id,
+                resource_type,
+                selected_at,
+                node_started_at,
+                CASE
+                    WHEN node_started_at IS NULL THEN 'selected'
+                    ELSE 'running'
+                END AS phase
+            FROM invocation_selected_resources
+            WHERE project_id = $1
+              AND environment_id = $2
+              AND finished_at IS NULL
+              AND ($3::TEXT IS NULL OR resource_type = $3)
+            ORDER BY COALESCE(node_started_at, selected_at) ASC, unique_id ASC
+            "#,
+        )
+        .bind(environment.project_id)
+        .bind(environment.id)
+        .bind(resource_type)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(active_environment_resource_from_row).collect())
     }
 
     pub(crate) async fn create_invocation(
@@ -3858,6 +3907,21 @@ fn environment_version_record_from_row(row: &sqlx::postgres::PgRow) -> Environme
         immutable: row.get("immutable"),
         baseline_environment_id: row.get("baseline_environment_id"),
         metadata: row.get::<sqlx::types::Json<Value>, _>("metadata").0,
+    }
+}
+
+fn active_environment_resource_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentActiveResourceRecord {
+    EnvironmentActiveResourceRecord {
+        invocation_id: row.get("invocation_id"),
+        run_id: row.get("run_id"),
+        unique_id: row.get("unique_id"),
+        resource_type: row.get("resource_type"),
+        phase: match row.get::<String, _>("phase").as_str() {
+            "running" => EnvironmentActiveResourcePhaseApi::Running,
+            _ => EnvironmentActiveResourcePhaseApi::Selected,
+        },
+        selected_at: row.get("selected_at"),
+        node_started_at: row.get("node_started_at"),
     }
 }
 

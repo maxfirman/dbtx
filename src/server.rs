@@ -1,8 +1,9 @@
 use crate::api::{
-    ApiErrorResponse, EnvironmentDraftResponse, EnvironmentDraftStartResponse,
-    EnvironmentDraftUpdateApiRequest, EnvironmentReleaseApiRequest, EnvironmentResponse,
-    EnvironmentRollbackApiRequest, EnvironmentVersionsResponse, EnvironmentsResponse,
-    HealthResponse, InvocationCancelApiRequest, InvocationCancelStateApi,
+    ApiErrorResponse, EnvironmentActiveResourcesApiRequest, EnvironmentActiveResourcesResponse,
+    EnvironmentDraftResponse, EnvironmentDraftStartResponse, EnvironmentDraftUpdateApiRequest,
+    EnvironmentReleaseApiRequest, EnvironmentResponse, EnvironmentRollbackApiRequest,
+    EnvironmentVersionsResponse, EnvironmentsResponse, HealthResponse,
+    InvocationCancelApiRequest, InvocationCancelStateApi,
     InvocationClaimNextApiRequest, InvocationClaimResponse, InvocationCleanupApiRequest,
     InvocationCleanupResponse, InvocationCommandApi, InvocationCompleteApiRequest,
     InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
@@ -175,6 +176,10 @@ fn environment_routes() -> Router<AppState> {
             get(environment_history),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{slug}/active-resources",
+            get(environment_active_resources),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{slug}/rollback",
             post(environment_rollback),
         )
@@ -261,6 +266,7 @@ struct InvocationEventsQuery {
         environment_get,
         environment_release,
         environment_history,
+        environment_active_resources,
         environment_rollback,
         invocation_create,
         invocation_list,
@@ -290,6 +296,8 @@ struct InvocationEventsQuery {
             EnvironmentDraftUpdateApiRequest,
             EnvironmentResponse,
             EnvironmentsResponse,
+            EnvironmentActiveResourcesResponse,
+            EnvironmentActiveResourcesApiRequest,
             EnvironmentVersionsResponse,
             EnvironmentReleaseApiRequest,
             EnvironmentRollbackApiRequest,
@@ -934,6 +942,33 @@ async fn environment_history(
     let service = EnvironmentService::new(&state.db);
     let versions = service.history(project_id, slug).await?;
     Ok(Json(EnvironmentVersionsResponse { versions }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/environments/{slug}/active-resources",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug"),
+        ("resource_type" = Option<String>, Query, description = "Optional dbt resource type filter, e.g. model")
+    ),
+    responses(
+        (status = 200, description = "Active selected resources for the environment", body = EnvironmentActiveResourcesResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_active_resources(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+    Query(request): Query<EnvironmentActiveResourcesApiRequest>,
+) -> Result<Json<EnvironmentActiveResourcesResponse>, ApiError> {
+    let resources = state
+        .db
+        .list_active_environment_resources(&project_id, &slug, request.resource_type.as_deref())
+        .await?;
+    Ok(Json(EnvironmentActiveResourcesResponse { resources }))
 }
 
 #[utoipa::path(

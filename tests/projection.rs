@@ -1,9 +1,10 @@
 use dbtx::api::{
-    EnvironmentDraftUpdateApiRequest, EnvironmentReleaseApiRequest, EnvironmentRollbackApiRequest,
-    InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationCommandApi,
-    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationEventBatchApiRequest,
-    InvocationExecutionModeApi, InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
-    InvocationListApiRequest, ProjectDraftCreateApiRequest,
+    EnvironmentActiveResourcesApiRequest, EnvironmentDraftUpdateApiRequest,
+    EnvironmentReleaseApiRequest, EnvironmentRollbackApiRequest, InvocationCancelStateApi,
+    InvocationClaimNextApiRequest, InvocationCommandApi, InvocationCompleteApiRequest,
+    InvocationCreateApiRequest, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
+    InvocationHeartbeatApiRequest, InvocationLifecycleStatus, InvocationListApiRequest,
+    ProjectDraftCreateApiRequest,
 };
 use dbtx::client::DaemonClient;
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
@@ -252,18 +253,44 @@ async fn selected_resources_are_tracked_until_node_finish_or_invocation_completi
             InvocationEventBatchApiRequest {
                 worker_id: "worker-a".to_string(),
                 lease_token: claim.lease_token,
-                events: vec![
-                    sample_dbt_log_event(
-                        r#"{"info":{"name":"Generic","msg":"DBTX_SELECTED_RESOURCES::{\"selected_resources\":[\"model.pkg.orders\",\"seed.pkg.customers\"]}"},"data":{}}"#,
-                    ),
-                    sample_dbt_log_event(
-                        r#"{"info":{"name":"NodeFinished","code":"Q025","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","node_status":"success","node_started_at":"2025-01-01T00:00:00Z","node_finished_at":"2025-01-01T00:00:01Z"},"run_result":{"status":"success","execution_time":1.0}}}"#,
-                    ),
-                ],
+                events: vec![sample_dbt_log_event(
+                    r#"{"info":{"name":"Generic","msg":"DBTX_SELECTED_RESOURCES::{\"selected_resources\":[\"model.pkg.orders\",\"seed.pkg.customers\"]}"},"data":{}}"#,
+                )],
             },
         )
         .await
         .expect("append dbt events");
+
+    let active_resources = client
+        .environment_active_resources(
+            &project_id,
+            "remote",
+            EnvironmentActiveResourcesApiRequest {
+                resource_type: Some("model".to_string()),
+            },
+        )
+        .await
+        .expect("active environment resources");
+    assert_eq!(active_resources.resources.len(), 1);
+    assert_eq!(active_resources.resources[0].unique_id, "model.pkg.orders");
+    assert!(matches!(
+        active_resources.resources[0].phase,
+        dbtx::api::EnvironmentActiveResourcePhaseApi::Selected
+    ));
+
+    client
+        .invocation_append_events(
+            created.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                events: vec![sample_dbt_log_event(
+                    r#"{"info":{"name":"NodeFinished","code":"Q025","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","node_status":"success","node_started_at":"2025-01-01T00:00:00Z","node_finished_at":"2025-01-01T00:00:01Z"},"run_result":{"status":"success","execution_time":1.0}}}"#,
+                )],
+            },
+        )
+        .await
+        .expect("append node finished event");
 
     client
         .invocation_complete(

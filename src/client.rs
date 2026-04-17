@@ -1,4 +1,5 @@
 use crate::api::{
+    EnvironmentActiveResourcesApiRequest, EnvironmentActiveResourcesResponse,
     EnvironmentDraftResponse, EnvironmentDraftStartResponse, EnvironmentDraftUpdateApiRequest,
     EnvironmentReleaseApiRequest, EnvironmentResponse, EnvironmentRollbackApiRequest,
     EnvironmentVersionsResponse, EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
@@ -206,6 +207,22 @@ impl DaemonClient {
         self.send(self.http.get(self.url(&format!(
             "/v1/projects/{project_id}/environments/{slug}/history"
         ))))
+        .await
+    }
+
+    pub async fn environment_active_resources(
+        &self,
+        project_id: &str,
+        slug: &str,
+        request: EnvironmentActiveResourcesApiRequest,
+    ) -> AppResult<EnvironmentActiveResourcesResponse> {
+        self.send(
+            self.http
+                .get(self.url(&format!(
+                    "/v1/projects/{project_id}/environments/{slug}/active-resources"
+                )))
+                .query(&request),
+        )
         .await
     }
 
