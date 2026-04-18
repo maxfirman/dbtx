@@ -434,6 +434,7 @@ async fn create_invocation(
                 InvocationCommand::ProjectValidate => api::InvocationCommandApi::ProjectValidate,
                 InvocationCommand::EnvironmentPrepare => api::InvocationCommandApi::EnvironmentPrepare,
                 InvocationCommand::EnvironmentValidate => api::InvocationCommandApi::EnvironmentValidate,
+                InvocationCommand::ManifestPrepare => api::InvocationCommandApi::ManifestPrepare,
             },
             args: args
                 .into_iter()

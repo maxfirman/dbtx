@@ -2,10 +2,11 @@ use crate::api::{
     InvocationCommandApi, InvocationExecutionModeApi, InvocationExecutionSpecApi,
 };
 use crate::db::CreateInvocationInput;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::server::AppState;
-use crate::services::InvocationCommand;
+use crate::services::{InvocationCommand, InvocationService};
 use chrono::{Duration, Utc};
+use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 
 pub fn invocation_claim_deadline_at(
@@ -39,6 +40,7 @@ pub async fn start_project_draft_validation_invocation(
                 project_root: prepared.spec.project_root,
             }),
             promote_base_manifest: false,
+            updates_actual_state: false,
             claim_deadline_at: Some(invocation_claim_deadline_at(
                 InvocationExecutionModeApi::Server,
             )),
@@ -75,6 +77,7 @@ pub async fn start_environment_draft_prepare_invocation(
                 selected_branch: prepared.spec.selected_branch,
             }),
             promote_base_manifest: false,
+            updates_actual_state: false,
             claim_deadline_at: Some(invocation_claim_deadline_at(
                 InvocationExecutionModeApi::Server,
             )),
@@ -114,6 +117,7 @@ pub async fn start_environment_draft_validation_invocation(
                 profiles_yml: prepared.spec.profiles_yml,
             }),
             promote_base_manifest: false,
+            updates_actual_state: false,
             claim_deadline_at: Some(invocation_claim_deadline_at(
                 InvocationExecutionModeApi::Server,
             )),
@@ -131,7 +135,7 @@ pub async fn start_prepared_invocation(
     state: &AppState,
     invocation_id: Uuid,
     command: InvocationCommandApi,
-    plan_id: Uuid,
+    plan_id: Option<Uuid>,
     prepared: crate::services::LocalExecutionPrepared,
 ) -> AppResult<Uuid> {
     let execution_spec = match prepared.spec {
@@ -198,12 +202,13 @@ pub async fn start_prepared_invocation(
         project_id: p.project_id,
         environment_id: p.environment_id,
         promote_base_manifest: p.promote_base_manifest,
+        updates_actual_state: p.updates_actual_state,
     });
     state
         .db()
         .create_invocation(CreateInvocationInput {
             invocation_id,
-            plan_id: Some(plan_id),
+            plan_id,
             run_id: persistence.as_ref().map(|p| p.run_id),
             project_id: prepared.project_id,
             environment_id: prepared.environment_id,
@@ -216,6 +221,10 @@ pub async fn start_prepared_invocation(
             promote_base_manifest: persistence
                 .as_ref()
                 .map(|p| p.promote_base_manifest)
+                .unwrap_or(false),
+            updates_actual_state: persistence
+                .as_ref()
+                .map(|p| p.updates_actual_state)
                 .unwrap_or(false),
             claim_deadline_at: Some(invocation_claim_deadline_at(execution_mode)),
         })
@@ -235,5 +244,92 @@ fn map_command_to_service(command: InvocationCommandApi) -> InvocationCommand {
         InvocationCommandApi::ProjectValidate => InvocationCommand::ProjectValidate,
         InvocationCommandApi::EnvironmentPrepare => InvocationCommand::EnvironmentPrepare,
         InvocationCommandApi::EnvironmentValidate => InvocationCommand::EnvironmentValidate,
+        InvocationCommandApi::ManifestPrepare => InvocationCommand::ManifestPrepare,
+    }
+}
+
+pub async fn ensure_target_manifest_for_reconcile(
+    state: &AppState,
+    project_id: &str,
+    environment_slug: &str,
+) -> AppResult<()> {
+    let environment = state.db().get_environment(project_id, environment_slug).await?;
+    let desired_commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
+        AppError::Io(std::io::Error::other(
+            "reconciliation requires a desired git commit sha",
+        ))
+    })?;
+    if state
+        .db()
+        .latest_manifest_run_id_for_commit(environment.project_id, environment.id, &desired_commit_sha)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let invocation_id = Uuid::new_v4();
+    let prepared = InvocationService::new(state.db())
+        .prepare_remote_manifest_capture(invocation_id, project_id, environment_slug)
+        .await?;
+    start_prepared_invocation(
+        state,
+        invocation_id,
+        InvocationCommandApi::ManifestPrepare,
+        None,
+        prepared,
+    )
+    .await?;
+    wait_for_terminal_invocation(state, invocation_id, std::time::Duration::from_secs(120)).await?;
+    let status = state.db().get_invocation_status(invocation_id).await?;
+    match status.status {
+        crate::api::InvocationLifecycleStatus::Succeeded => {}
+        crate::api::InvocationLifecycleStatus::Failed
+        | crate::api::InvocationLifecycleStatus::Canceled => {
+            return Err(AppError::Io(std::io::Error::other(
+                status
+                    .error
+                    .unwrap_or_else(|| "manifest prepare invocation failed".to_string()),
+            )));
+        }
+        crate::api::InvocationLifecycleStatus::Running => {
+            return Err(AppError::Io(std::io::Error::other(
+                "manifest prepare invocation did not reach a terminal state",
+            )));
+        }
+    }
+
+    if state
+        .db()
+        .latest_manifest_run_id_for_commit(environment.project_id, environment.id, &desired_commit_sha)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::Io(std::io::Error::other(
+            "manifest prepare finished without persisting a manifest snapshot",
+        )));
+    }
+
+    Ok(())
+}
+
+async fn wait_for_terminal_invocation(
+    state: &AppState,
+    invocation_id: Uuid,
+    timeout: std::time::Duration,
+) -> AppResult<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = state.db().get_invocation_status(invocation_id).await?;
+        if !matches!(status.status, crate::api::InvocationLifecycleStatus::Running) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("timed out waiting for invocation {invocation_id}"),
+            )));
+        }
+        sleep(std::time::Duration::from_millis(250)).await;
     }
 }

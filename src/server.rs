@@ -29,6 +29,7 @@ use crate::execution::{
 };
 use crate::invocation_bootstrap::invocation_claim_deadline_at;
 use crate::invocation_bootstrap::{
+    ensure_target_manifest_for_reconcile,
     start_prepared_invocation,
     start_environment_draft_prepare_invocation, start_environment_draft_validation_invocation,
     start_project_draft_validation_invocation,
@@ -1127,6 +1128,7 @@ async fn environment_reconcile(
     Path((project_id, slug)): Path<(String, String)>,
     Json(_request): Json<EnvironmentReconcileApiRequest>,
 ) -> Result<Json<EnvironmentRunPlanResponse>, ApiError> {
+    ensure_target_manifest_for_reconcile(&state, &project_id, &slug).await?;
     let service = EnvironmentService::new(&state.db);
     let plan = service.reconcile(project_id, slug).await?;
     Ok(Json(EnvironmentRunPlanResponse { plan }))
@@ -1154,7 +1156,7 @@ async fn environment_plan_admit(
     let mut plan = prepared.plan;
     if let (Some(invocation_id), Some(prepared_invocation)) = (prepared.invocation_id, prepared.prepared)
     {
-        start_prepared_invocation(&state, invocation_id, InvocationCommandApi::Build, plan_id, prepared_invocation)
+        start_prepared_invocation(&state, invocation_id, InvocationCommandApi::Build, Some(plan_id), prepared_invocation)
             .await?;
         plan = state.db.mark_environment_run_plan_admitted(plan_id, invocation_id).await?;
     }
@@ -1368,6 +1370,7 @@ async fn invocation_create(
         project_id: p.project_id,
         environment_id: p.environment_id,
         promote_base_manifest: p.promote_base_manifest,
+        updates_actual_state: p.updates_actual_state,
     });
     state
         .db
@@ -1386,6 +1389,10 @@ async fn invocation_create(
             promote_base_manifest: persistence
                 .as_ref()
                 .map(|p| p.promote_base_manifest)
+                .unwrap_or(false),
+            updates_actual_state: persistence
+                .as_ref()
+                .map(|p| p.updates_actual_state)
                 .unwrap_or(false),
             claim_deadline_at: Some(invocation_claim_deadline_at(derived_execution_mode)),
         })
@@ -1761,6 +1768,7 @@ fn map_invocation_command(command: InvocationCommandApi) -> InvocationCommand {
         InvocationCommandApi::ProjectValidate => InvocationCommand::ProjectValidate,
         InvocationCommandApi::EnvironmentPrepare => InvocationCommand::EnvironmentPrepare,
         InvocationCommandApi::EnvironmentValidate => InvocationCommand::EnvironmentValidate,
+        InvocationCommandApi::ManifestPrepare => InvocationCommand::ManifestPrepare,
     }
 }
 

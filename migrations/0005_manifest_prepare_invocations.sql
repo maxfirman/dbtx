@@ -1,0 +1,2 @@
+ALTER TABLE invocations
+ADD COLUMN IF NOT EXISTS updates_actual_state BOOLEAN NOT NULL DEFAULT TRUE;

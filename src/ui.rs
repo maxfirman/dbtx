@@ -9,6 +9,7 @@ use crate::db::{
 };
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
+    ensure_target_manifest_for_reconcile,
     start_environment_draft_prepare_invocation, start_environment_draft_validation_invocation,
     start_prepared_invocation, start_project_draft_validation_invocation,
 };
@@ -1333,6 +1334,7 @@ async fn environment_reconcile(
     headers: HeaderMap,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Response, UiError> {
+    ensure_target_manifest_for_reconcile(&state, &project_id, &slug).await?;
     let service = EnvironmentService::new(state.db());
     service.reconcile(project_id.clone(), slug.clone()).await?;
 
@@ -1359,7 +1361,7 @@ async fn environment_plan_admit(
             &state,
             invocation_id,
             InvocationCommandApi::Build,
-            plan_id,
+            Some(plan_id),
             prepared_invocation,
         )
         .await?;

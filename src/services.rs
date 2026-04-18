@@ -41,6 +41,7 @@ pub enum InvocationCommand {
     ProjectValidate,
     EnvironmentPrepare,
     EnvironmentValidate,
+    ManifestPrepare,
 }
 
 impl InvocationCommand {
@@ -55,11 +56,19 @@ impl InvocationCommand {
             Self::ProjectValidate => "project_validate",
             Self::EnvironmentPrepare => "environment_prepare",
             Self::EnvironmentValidate => "environment_validate",
+            Self::ManifestPrepare => "manifest_prepare",
         }
     }
 
     pub fn persists_state(self) -> bool {
-        !matches!(self, Self::Ls | Self::Release | Self::ProjectValidate | Self::EnvironmentPrepare | Self::EnvironmentValidate)
+        !matches!(
+            self,
+            Self::Ls
+                | Self::Release
+                | Self::ProjectValidate
+                | Self::EnvironmentPrepare
+                | Self::EnvironmentValidate
+        )
     }
 }
 
@@ -155,6 +164,7 @@ pub struct LocalExecutionPersistence {
     pub environment_id: i64,
     pub subcommand: String,
     pub promote_base_manifest: bool,
+    pub updates_actual_state: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -959,6 +969,7 @@ impl<'a> InvocationService<'a> {
                 environment_id: environment.id,
                 subcommand: request.command.as_str().to_string(),
                 promote_base_manifest: ctx.is_full_graph_run,
+                updates_actual_state: true,
             })
         } else {
             None
@@ -1082,6 +1093,7 @@ impl<'a> InvocationService<'a> {
                 environment_id: environment.id,
                 subcommand: command.as_str().to_string(),
                 promote_base_manifest: ctx.is_full_graph_run,
+                updates_actual_state: true,
             })
         } else {
             None
@@ -1104,6 +1116,31 @@ impl<'a> InvocationService<'a> {
             project_draft_id: None,
             environment_draft_id: None,
         })
+    }
+
+    pub async fn prepare_remote_manifest_capture(
+        &self,
+        run_id: Uuid,
+        project_id: &str,
+        environment_slug: &str,
+    ) -> AppResult<LocalExecutionPrepared> {
+        let mut prepared = self
+            .prepare_remote_execution(
+                run_id,
+                InvocationCommand::ManifestPrepare,
+                Vec::new(),
+                project_id,
+                environment_slug,
+            )
+            .await?;
+        prepared.worker_queue =
+            validation_worker_queue_from_env(std::env::var("DBTX_VALIDATION_QUEUE").ok().as_deref());
+        if let Some(persistence) = prepared.persistence.as_mut() {
+            persistence.subcommand = InvocationCommand::ManifestPrepare.as_str().to_string();
+            persistence.promote_base_manifest = false;
+            persistence.updates_actual_state = false;
+        }
+        Ok(prepared)
     }
 
     pub async fn prepare_release_validation(

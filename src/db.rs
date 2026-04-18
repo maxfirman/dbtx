@@ -331,6 +331,7 @@ pub(crate) struct CreateInvocationInput {
     pub(crate) worker_queue: String,
     pub(crate) execution_spec: Option<InvocationExecutionSpecApi>,
     pub(crate) promote_base_manifest: bool,
+    pub(crate) updates_actual_state: bool,
     pub(crate) claim_deadline_at: Option<chrono::DateTime<Utc>>,
 }
 
@@ -364,6 +365,7 @@ pub(crate) struct InvocationPersistenceRecord {
     pub(crate) environment_draft_id: Option<Uuid>,
     pub(crate) command: String,
     pub(crate) promote_base_manifest: bool,
+    pub(crate) updates_actual_state: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1883,9 +1885,9 @@ impl Db {
             r#"
             INSERT INTO invocations (
                 invocation_id, plan_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id,
-                command, execution_mode, worker_queue, status, execution_spec, promote_base_manifest, claim_deadline_at
+                command, execution_mode, worker_queue, status, execution_spec, promote_base_manifest, updates_actual_state, claim_deadline_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', $11, $12, $13, $14)
             RETURNING invocation_id, execution_mode, worker_queue, status, exit_code, error,
                 started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
                 cancel_requested, claimed_by
@@ -1906,6 +1908,7 @@ impl Db {
         .bind(&input.worker_queue)
         .bind(input.execution_spec.as_ref().map(sqlx::types::Json))
         .bind(input.promote_base_manifest)
+        .bind(input.updates_actual_state)
         .bind(input.claim_deadline_at)
         .fetch_one(&self.pool)
         .await?;
@@ -2554,7 +2557,7 @@ impl Db {
     ) -> AppResult<InvocationPersistenceRecord> {
         let row = sqlx::query(
             r#"
-            SELECT plan_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id, command, promote_base_manifest
+            SELECT plan_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id, command, promote_base_manifest, updates_actual_state
             FROM invocations
             WHERE invocation_id = $1
               AND ($2::TEXT IS NULL OR claimed_by = $2)
@@ -2581,6 +2584,7 @@ impl Db {
             environment_draft_id: row.get("environment_draft_id"),
             command: row.get("command"),
             promote_base_manifest: row.get("promote_base_manifest"),
+            updates_actual_state: row.get("updates_actual_state"),
         })
     }
 
@@ -2698,22 +2702,24 @@ impl Db {
             )
             .await?;
 
-            self.upsert_environment_actual_state_for_run_in_tx(
-                &mut tx,
-                run_id,
-                persistence.project_id.ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "run invocation missing project scope",
-                    ))
-                })?,
-                persistence.environment_id.ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "run invocation missing environment scope",
-                    ))
-                })?,
-                matches!(completion.status, InvocationLifecycleStatus::Succeeded),
-            )
-            .await?;
+            if persistence.updates_actual_state {
+                self.upsert_environment_actual_state_for_run_in_tx(
+                    &mut tx,
+                    run_id,
+                    persistence.project_id.ok_or_else(|| {
+                        AppError::Io(std::io::Error::other(
+                            "run invocation missing project scope",
+                        ))
+                    })?,
+                    persistence.environment_id.ok_or_else(|| {
+                        AppError::Io(std::io::Error::other(
+                            "run invocation missing environment scope",
+                        ))
+                    })?,
+                    matches!(completion.status, InvocationLifecycleStatus::Succeeded),
+                )
+                .await?;
+            }
         }
 
         if persistence.command == "release"

@@ -49,6 +49,7 @@ pub(crate) struct InvocationPersistence {
     pub(crate) project_id: i64,
     pub(crate) environment_id: i64,
     pub(crate) promote_base_manifest: bool,
+    pub(crate) updates_actual_state: bool,
 }
 
 impl InvocationPersistence {
@@ -58,6 +59,7 @@ impl InvocationPersistence {
             project_id: record.project_id?,
             environment_id: record.environment_id?,
             promote_base_manifest: record.promote_base_manifest,
+            updates_actual_state: record.updates_actual_state,
         })
     }
 

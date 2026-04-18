@@ -1438,6 +1438,7 @@ fn map_command(command: InvocationCommandApi) -> &'static str {
         InvocationCommandApi::ProjectValidate => "project_validate",
         InvocationCommandApi::EnvironmentPrepare => "environment_prepare",
         InvocationCommandApi::EnvironmentValidate => "environment_validate",
+        InvocationCommandApi::ManifestPrepare => "parse",
     }
 }
 

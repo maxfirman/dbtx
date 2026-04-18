@@ -175,6 +175,7 @@ pub enum InvocationCommandApi {
     ProjectValidate,
     EnvironmentPrepare,
     EnvironmentValidate,
+    ManifestPrepare,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
