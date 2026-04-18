@@ -1,11 +1,12 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
     CreateEnvironmentDraftInput, CreateEnvironmentRunPlanInput, CreateProjectDraftInput,
-    CreateProjectInput, Db,
+    CreateProjectInput, CurrentNodeStatePlanningRecord, Db,
     EnvironmentActualStateRecord, EnvironmentDraftRecord, EnvironmentRecord,
     EnvironmentReleaseInput, EnvironmentRunPlanRecord, EnvironmentVersionRecord, GitState,
-    LocalEnvironmentUpsertInput, ProjectDraftRecord, ProjectRecord, SourceStateEventCreateInput,
-    SourceStateEventRecord, RunFinalization, RunStart, UpdateEnvironmentDraftInput,
+    LocalEnvironmentUpsertInput, PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord,
+    SourceStateEventCreateInput, SourceStateEventRecord, RunFinalization, RunStart,
+    UpdateEnvironmentDraftInput,
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
     read_dbt_project_name, read_git_state, spawn_dbt_child,
 };
@@ -16,6 +17,7 @@ use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
 use crate::profile::{EnvironmentProfileRecord, LocalTargetProfile, resolve_runtime_profile, validate_environment_profile};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -667,18 +669,70 @@ impl<'a> EnvironmentService<'a> {
         }
 
         let (reason, selection_spec, selected_resources, source_event_id, metadata) = if code_drift {
-            (
-                "code_change",
-                Some("full_graph".to_string()),
-                self.db.list_manifest_node_unique_ids(baseline_run_id).await?,
-                None,
-                serde_json::json!({
-                    "code_drift": true,
-                    "actual_commit_sha": actual_state.last_successful_commit_sha,
-                    "desired_commit_sha": environment.git_commit_sha,
-                    "source_event_count": source_events.len(),
-                }),
-            )
+            let desired_commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
+                AppError::Io(std::io::Error::other(
+                    "reconciliation requires a desired git commit sha",
+                ))
+            })?;
+            if let Some(target_manifest_run_id) = self
+                .db
+                .latest_manifest_run_id_for_commit(
+                    environment.project_id,
+                    environment.id,
+                    &desired_commit_sha,
+                )
+                .await?
+            {
+                let target_nodes = self
+                    .db
+                    .load_planning_manifest_nodes(target_manifest_run_id)
+                    .await?;
+                let baseline_nodes = self.db.load_planning_manifest_nodes(baseline_run_id).await?;
+                let target_edges = self.db.load_manifest_edges(target_manifest_run_id).await?;
+                let current_nodes = self
+                    .db
+                    .load_current_node_state_for_planning(environment.project_id, environment.id)
+                    .await?;
+                let selected_resources = plan_code_change_selected_resources(
+                    &baseline_nodes,
+                    &target_nodes,
+                    &target_edges,
+                    &current_nodes,
+                );
+                let selection_spec = if selected_resources.is_empty() {
+                    "state_modified_live"
+                } else {
+                    "state_modified_live_plus"
+                };
+                (
+                    "code_change",
+                    Some(selection_spec.to_string()),
+                    selected_resources,
+                    None,
+                    serde_json::json!({
+                        "code_drift": true,
+                        "actual_commit_sha": actual_state.last_successful_commit_sha,
+                        "desired_commit_sha": desired_commit_sha,
+                        "source_event_count": source_events.len(),
+                        "target_manifest_run_id": target_manifest_run_id,
+                        "planning_mode": "live_state_diff",
+                    }),
+                )
+            } else {
+                (
+                    "code_change",
+                    Some("full_graph".to_string()),
+                    self.db.list_manifest_node_unique_ids(baseline_run_id).await?,
+                    None,
+                    serde_json::json!({
+                        "code_drift": true,
+                        "actual_commit_sha": actual_state.last_successful_commit_sha,
+                        "desired_commit_sha": desired_commit_sha,
+                        "source_event_count": source_events.len(),
+                        "planning_mode": "full_graph_fallback_no_target_manifest",
+                    }),
+                )
+            }
         } else {
             let source_keys: Vec<String> = source_events
                 .iter()
@@ -1606,6 +1660,167 @@ fn validation_worker_queue_from_env(value: Option<&str>) -> String {
         .to_string()
 }
 
+fn plan_code_change_selected_resources(
+    baseline_nodes: &[PlanningManifestNodeRecord],
+    target_nodes: &[PlanningManifestNodeRecord],
+    target_edges: &[(String, String)],
+    current_nodes: &[CurrentNodeStatePlanningRecord],
+) -> Vec<String> {
+    let baseline_checksums = baseline_nodes
+        .iter()
+        .map(|node| (node.unique_id.clone(), node.checksum.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let target_by_id = target_nodes
+        .iter()
+        .map(|node| (node.unique_id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    let current_by_id = current_nodes
+        .iter()
+        .map(|node| (node.unique_id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+
+    let directly_modified = target_nodes
+        .iter()
+        .filter(|node| is_build_plannable_resource_type(node.resource_type.as_deref()))
+        .filter(|node| {
+            baseline_checksums
+                .get(&node.unique_id)
+                .cloned()
+                .flatten()
+                != node.checksum
+        })
+        .map(|node| node.unique_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    if directly_modified.is_empty() {
+        return Vec::new();
+    }
+
+    let mut child_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut parent_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (parent, child) in target_edges {
+        child_map
+            .entry(parent.clone())
+            .or_default()
+            .push(child.clone());
+        parent_map
+            .entry(child.clone())
+            .or_default()
+            .push(parent.clone());
+    }
+
+    let mut candidate = directly_modified.clone();
+    let mut stack = directly_modified.iter().cloned().collect::<Vec<_>>();
+    while let Some(parent) = stack.pop() {
+        for child in child_map.get(&parent).into_iter().flatten() {
+            if target_by_id.contains_key(child) && candidate.insert(child.clone()) {
+                stack.push(child.clone());
+            }
+        }
+    }
+
+    let mut memo: BTreeMap<String, AncestorRequirement> = BTreeMap::new();
+    let mut selected = candidate
+        .iter()
+        .filter_map(|unique_id| {
+            let target = target_by_id.get(unique_id)?;
+            let current = current_by_id.get(unique_id).copied();
+            let requirement = compute_ancestor_requirement(
+                unique_id,
+                &candidate,
+                &directly_modified,
+                &parent_map,
+                &target_by_id,
+                &current_by_id,
+                &mut memo,
+            );
+            let current_checksum = current.and_then(|node| node.checksum.clone());
+            let current_success_at = current.and_then(|node| node.last_success_at);
+            let matches_target = current_checksum == target.checksum;
+            let is_stale = !matches_target
+                || requirement.has_unreconciled_ancestor
+                || requirement.latest_reconciled_ancestor_success_at.is_some_and(|ancestor_time| {
+                    current_success_at.map(|node_time| node_time < ancestor_time).unwrap_or(true)
+                });
+            is_stale.then(|| unique_id.clone())
+        })
+        .collect::<Vec<_>>();
+    selected.sort();
+    selected
+}
+
+#[derive(Clone, Copy, Default)]
+struct AncestorRequirement {
+    has_unreconciled_ancestor: bool,
+    latest_reconciled_ancestor_success_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn compute_ancestor_requirement(
+    unique_id: &str,
+    candidate: &BTreeSet<String>,
+    directly_modified: &BTreeSet<String>,
+    parent_map: &BTreeMap<String, Vec<String>>,
+    target_by_id: &BTreeMap<String, &PlanningManifestNodeRecord>,
+    current_by_id: &BTreeMap<String, &CurrentNodeStatePlanningRecord>,
+    memo: &mut BTreeMap<String, AncestorRequirement>,
+) -> AncestorRequirement {
+    if let Some(existing) = memo.get(unique_id).copied() {
+        return existing;
+    }
+
+    let mut requirement = AncestorRequirement::default();
+    if directly_modified.contains(unique_id) {
+        let target_checksum = target_by_id
+            .get(unique_id)
+            .and_then(|node| node.checksum.clone());
+        let current = current_by_id.get(unique_id).copied();
+        let current_checksum = current.and_then(|node| node.checksum.clone());
+        let current_success_at = current.and_then(|node| node.last_success_at);
+        let root_reconciled = current_checksum == target_checksum && current_success_at.is_some();
+        if root_reconciled {
+            requirement.latest_reconciled_ancestor_success_at = current_success_at;
+        } else {
+            requirement.has_unreconciled_ancestor = true;
+        }
+    }
+
+    for parent in parent_map.get(unique_id).into_iter().flatten() {
+        if !candidate.contains(parent) {
+            continue;
+        }
+        let parent_requirement = compute_ancestor_requirement(
+            parent,
+            candidate,
+            directly_modified,
+            parent_map,
+            target_by_id,
+            current_by_id,
+            memo,
+        );
+        requirement.has_unreconciled_ancestor |= parent_requirement.has_unreconciled_ancestor;
+        requirement.latest_reconciled_ancestor_success_at =
+            match (
+                requirement.latest_reconciled_ancestor_success_at,
+                parent_requirement.latest_reconciled_ancestor_success_at,
+            ) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (Some(left), None) => Some(left),
+                (None, Some(right)) => Some(right),
+                (None, None) => None,
+            };
+    }
+
+    memo.insert(unique_id.to_string(), requirement);
+    requirement
+}
+
+fn is_build_plannable_resource_type(resource_type: Option<&str>) -> bool {
+    matches!(
+        resource_type,
+        Some("model" | "seed" | "snapshot" | "test" | "unit_test")
+    )
+}
+
 fn infer_local_identity_hash(current_dir: &Path, project_name: &str) -> AppResult<String> {
     let canonical_project_dir = current_dir.canonicalize()?;
     let machine_scope = local_machine_scope()?;
@@ -1623,8 +1838,10 @@ fn short_hash(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_valid_release_commit_sha, parse_release_target_args, validation_worker_queue_from_env,
+        is_valid_release_commit_sha, plan_code_change_selected_resources,
+        parse_release_target_args, validation_worker_queue_from_env,
     };
+    use crate::db::{CurrentNodeStatePlanningRecord, PlanningManifestNodeRecord};
     use std::ffi::OsString;
 
     #[test]
@@ -1684,5 +1901,52 @@ mod tests {
             validation_worker_queue_from_env(Some("  validation-q  ")),
             "validation-q"
         );
+    }
+
+    #[test]
+    fn code_change_planning_uses_live_current_state_for_completed_roots() {
+        let baseline = vec![
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.orders".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("old-orders".to_string()),
+            },
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.customers".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("same-customers".to_string()),
+            },
+        ];
+        let target = vec![
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.orders".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("new-orders".to_string()),
+            },
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.customers".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("same-customers".to_string()),
+            },
+        ];
+        let edges = vec![(
+            "model.pkg.orders".to_string(),
+            "model.pkg.customers".to_string(),
+        )];
+        let current = vec![
+            CurrentNodeStatePlanningRecord {
+                unique_id: "model.pkg.orders".to_string(),
+                checksum: Some("new-orders".to_string()),
+                last_success_at: Some(chrono::Utc::now()),
+            },
+            CurrentNodeStatePlanningRecord {
+                unique_id: "model.pkg.customers".to_string(),
+                checksum: Some("same-customers".to_string()),
+                last_success_at: Some(chrono::Utc::now() - chrono::Duration::minutes(5)),
+            },
+        ];
+
+        let selected = plan_code_change_selected_resources(&baseline, &target, &edges, &current);
+        assert_eq!(selected, vec!["model.pkg.customers".to_string()]);
     }
 }

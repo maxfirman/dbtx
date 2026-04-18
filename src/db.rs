@@ -414,6 +414,18 @@ struct WorkerRegistryReadModel {
     last_seen_at: chrono::DateTime<Utc>,
 }
 
+pub(crate) struct PlanningManifestNodeRecord {
+    pub(crate) unique_id: String,
+    pub(crate) resource_type: Option<String>,
+    pub(crate) checksum: Option<String>,
+}
+
+pub(crate) struct CurrentNodeStatePlanningRecord {
+    pub(crate) unique_id: String,
+    pub(crate) checksum: Option<String>,
+    pub(crate) last_success_at: Option<chrono::DateTime<Utc>>,
+}
+
 pub(crate) struct InvocationListFilters<'a> {
     pub(crate) display_statuses: &'a [String],
     pub(crate) execution_modes: &'a [String],
@@ -1704,6 +1716,106 @@ impl Db {
         .fetch_all(&self.pool)
         .await
         .map_err(Into::into)
+    }
+
+    pub(crate) async fn latest_manifest_run_id_for_commit(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        commit_sha: &str,
+    ) -> AppResult<Option<Uuid>> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT r.run_id
+            FROM runs r
+            JOIN manifest_snapshots ms ON ms.run_id = r.run_id
+            WHERE r.project_id = $1
+              AND r.environment_id = $2
+              AND r.git_commit_sha = $3
+            ORDER BY r.id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(commit_sha)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub(crate) async fn load_planning_manifest_nodes(
+        &self,
+        run_id: Uuid,
+    ) -> AppResult<Vec<PlanningManifestNodeRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT unique_id, resource_type, checksum
+            FROM manifest_nodes
+            WHERE run_id = $1
+            ORDER BY unique_id ASC
+            "#,
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| PlanningManifestNodeRecord {
+                unique_id: row.get("unique_id"),
+                resource_type: row.get("resource_type"),
+                checksum: row.get("checksum"),
+            })
+            .collect())
+    }
+
+    pub(crate) async fn load_manifest_edges(
+        &self,
+        run_id: Uuid,
+    ) -> AppResult<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT parent_unique_id, child_unique_id
+            FROM manifest_edges
+            WHERE run_id = $1
+            ORDER BY parent_unique_id ASC, child_unique_id ASC
+            "#,
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get("parent_unique_id"), row.get("child_unique_id")))
+            .collect())
+    }
+
+    pub(crate) async fn load_current_node_state_for_planning(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+    ) -> AppResult<Vec<CurrentNodeStatePlanningRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT unique_id, checksum, last_success_at
+            FROM current_node_state
+            WHERE project_id = $1
+              AND environment_id = $2
+            ORDER BY unique_id ASC
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| CurrentNodeStatePlanningRecord {
+                unique_id: row.get("unique_id"),
+                checksum: row.get("checksum"),
+                last_success_at: row.get("last_success_at"),
+            })
+            .collect())
     }
 
     pub(crate) async fn list_source_state_events_since(
