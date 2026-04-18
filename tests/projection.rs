@@ -445,6 +445,93 @@ async fn source_state_reconcile_creates_and_admits_plan() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(desired_commit),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        baseline_commit,
+        &[
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "remote",
+        desired_commit,
+        &[
+            ("model.pkg.orders", "model", Some("new-orders")),
+            ("model.pkg.customers", "model", Some("same-customers")),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+    mark_current_node_state_reconciled(
+        db.pool(),
+        &project_id,
+        "remote",
+        "model.pkg.orders",
+        Some("new-orders"),
+    )
+    .await;
+    mark_current_node_state_reconciled(
+        db.pool(),
+        &project_id,
+        "remote",
+        "model.pkg.customers",
+        Some("same-customers"),
+    )
+    .await;
+    age_current_node_success(
+        db.pool(),
+        &project_id,
+        "remote",
+        "model.pkg.customers",
+        chrono::Duration::minutes(5),
+    )
+    .await;
+
+    let plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create code-change reconciliation plan")
+        .plan;
+
+    assert_eq!(plan.status, "planned");
+    assert_eq!(plan.reason, "code_change");
+    assert_eq!(plan.selection_spec.as_deref(), Some("state_modified_live_plus"));
+    assert_eq!(plan.selected_resources, vec!["model.pkg.customers".to_string()]);
+    assert_eq!(plan.resource_count, 1);
+    assert_eq!(
+        plan.metadata
+            .get("planning_mode")
+            .and_then(serde_json::Value::as_str),
+        Some("live_state_diff")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn claimed_invocation_timeout_fails_without_reclaim() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -1644,6 +1731,37 @@ async fn seed_environment_actual_state_with_manifest(
         .execute(pool)
         .await
         .expect("insert manifest node");
+
+        sqlx::query(
+            r#"
+            INSERT INTO current_node_state (
+                project_id, environment_id, unique_id, last_run_id, status, resource_type,
+                node_name, checksum, finished_at, last_success_at, updated_at
+            )
+            VALUES (
+                $1, $2, $3, $4, 'succeeded', $5,
+                $6, NULL, $7, $7, NOW()
+            )
+            ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE
+            SET last_run_id = EXCLUDED.last_run_id,
+                status = EXCLUDED.status,
+                resource_type = EXCLUDED.resource_type,
+                node_name = EXCLUDED.node_name,
+                finished_at = EXCLUDED.finished_at,
+                last_success_at = EXCLUDED.last_success_at,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(project_pk)
+        .bind(environment_pk)
+        .bind(unique_id)
+        .bind(run_id)
+        .bind(resource_type)
+        .bind(name)
+        .bind(successful_at)
+        .execute(pool)
+        .await
+        .expect("seed current node state");
     }
 
     for (parent_unique_id, child_unique_id) in edges {
@@ -1688,6 +1806,247 @@ async fn seed_environment_actual_state_with_manifest(
     .execute(pool)
     .await
     .expect("seed environment actual state");
+}
+
+async fn seed_manifest_run_only(
+    pool: &PgPool,
+    project_id: &str,
+    slug: &str,
+    commit_sha: &str,
+    nodes: &[(&str, &str, Option<&str>)],
+    edges: &[(&str, &str)],
+) {
+    let scope = sqlx::query(
+        r#"
+        SELECT p.id AS project_pk, p.project_name, p.project_root, p.git_repo_url, e.id AS environment_pk
+        FROM projects p
+        JOIN environments e ON e.project_id = p.id
+        WHERE p.project_id = $1 AND e.slug = $2
+        "#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .fetch_one(pool)
+    .await
+    .expect("load scope for manifest-only run");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let project_name: String = scope.get("project_name");
+    let project_root: Option<String> = scope.get("project_root");
+    let git_repo_url: Option<String> = scope.get("git_repo_url");
+    let run_id = Uuid::new_v4();
+    let finished_at = chrono::Utc::now();
+
+    sqlx::query(
+        r#"
+        INSERT INTO runs (
+            run_id, project_id, environment_id, command, args, is_full_graph_run, execution_mode,
+            git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref,
+            started_at, finished_at, exit_code, terminal_status
+        )
+        VALUES (
+            $1, $2, $3, 'manifest_prepare', '[]'::jsonb, false, 'server',
+            'main', $4, $5, $6, $7, $8,
+            $9, $9, 0, 'success'
+        )
+        "#,
+    )
+    .bind(run_id)
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(commit_sha)
+    .bind(git_repo_url)
+    .bind(project_root)
+    .bind(&project_name)
+    .bind(project_id)
+    .bind(finished_at)
+    .execute(pool)
+    .await
+    .expect("insert manifest-only run");
+
+    let manifest = serde_json::json!({
+        "metadata": {
+            "project_name": project_name,
+            "adapter_type": "duckdb"
+        },
+        "nodes": nodes.iter().map(|(unique_id, resource_type, checksum)| {
+            (
+                (*unique_id).to_string(),
+                serde_json::json!({
+                    "resource_type": resource_type,
+                    "name": unique_id.rsplit('.').next().unwrap_or(*unique_id),
+                    "package_name": "pkg",
+                    "original_file_path": "",
+                    "tags": [],
+                    "fqn": [],
+                    "config": {},
+                    "checksum": { "checksum": checksum },
+                })
+            )
+        }).collect::<serde_json::Map<String, serde_json::Value>>(),
+        "parent_map": edges.iter().fold(serde_json::Map::new(), |mut map, (parent, child)| {
+            let entry = map.entry((*child).to_string()).or_insert_with(|| serde_json::Value::Array(vec![]));
+            entry.as_array_mut().expect("parent map array").push(serde_json::Value::String((*parent).to_string()));
+            map
+        }),
+        "child_map": edges.iter().fold(serde_json::Map::new(), |mut map, (parent, child)| {
+            let entry = map.entry((*parent).to_string()).or_insert_with(|| serde_json::Value::Array(vec![]));
+            entry.as_array_mut().expect("child map array").push(serde_json::Value::String((*child).to_string()));
+            map
+        }),
+        "sources": {},
+        "macros": {},
+        "docs": {},
+        "exposures": {},
+        "groups": {},
+        "group_map": {},
+        "metrics": {},
+        "selectors": {},
+        "semantic_models": {},
+        "saved_queries": {},
+        "unit_tests": {},
+        "disabled": {},
+        "functions": {}
+    });
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_snapshots (run_id, manifest, manifest_size_bytes, checksum)
+        VALUES ($1, $2, $3, 'target-checksum')
+        "#,
+    )
+    .bind(run_id)
+    .bind(sqlx::types::Json(manifest.clone()))
+    .bind(serde_json::to_vec(&manifest).expect("serialize manifest").len() as i64)
+    .execute(pool)
+    .await
+    .expect("insert target manifest snapshot");
+
+    for (unique_id, resource_type, checksum) in nodes {
+        let name = unique_id.rsplit('.').next().expect("node name");
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_nodes (
+                run_id, unique_id, resource_type, name, package_name, original_file_path,
+                tags, fqn, config, checksum, database_name, schema_name, alias, relation_name
+            )
+            VALUES (
+                $1, $2, $3, $4, 'pkg', '', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+                $5, NULL, NULL, NULL, NULL
+            )
+            "#,
+        )
+        .bind(run_id)
+        .bind(unique_id)
+        .bind(resource_type)
+        .bind(name)
+        .bind(checksum.map(ToString::to_string))
+        .execute(pool)
+        .await
+        .expect("insert target manifest node");
+    }
+
+    for (parent_unique_id, child_unique_id) in edges {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_edges (run_id, parent_unique_id, child_unique_id)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(run_id)
+        .bind(parent_unique_id)
+        .bind(child_unique_id)
+        .execute(pool)
+        .await
+        .expect("insert target manifest edge");
+    }
+}
+
+async fn mark_current_node_state_reconciled(
+    pool: &PgPool,
+    project_id: &str,
+    slug: &str,
+    unique_id: &str,
+    checksum: Option<&str>,
+) {
+    let scope = sqlx::query(
+        r#"
+        SELECT p.id AS project_pk, e.id AS environment_pk
+        FROM projects p
+        JOIN environments e ON e.project_id = p.id
+        WHERE p.project_id = $1 AND e.slug = $2
+        "#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .fetch_one(pool)
+    .await
+    .expect("load current state scope");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let now = chrono::Utc::now();
+
+    sqlx::query(
+        r#"
+        UPDATE current_node_state
+        SET checksum = $4,
+            last_success_at = $5,
+            updated_at = NOW()
+        WHERE project_id = $1
+          AND environment_id = $2
+          AND unique_id = $3
+        "#,
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(unique_id)
+    .bind(checksum)
+    .bind(now)
+    .execute(pool)
+    .await
+    .expect("update current node state");
+}
+
+async fn age_current_node_success(
+    pool: &PgPool,
+    project_id: &str,
+    slug: &str,
+    unique_id: &str,
+    age: chrono::Duration,
+) {
+    let scope = sqlx::query(
+        r#"
+        SELECT p.id AS project_pk, e.id AS environment_pk
+        FROM projects p
+        JOIN environments e ON e.project_id = p.id
+        WHERE p.project_id = $1 AND e.slug = $2
+        "#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .fetch_one(pool)
+    .await
+    .expect("load scope for aging current state");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let aged = chrono::Utc::now() - age;
+    sqlx::query(
+        r#"
+        UPDATE current_node_state
+        SET last_success_at = $4,
+            updated_at = NOW()
+        WHERE project_id = $1
+          AND environment_id = $2
+          AND unique_id = $3
+        "#,
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(unique_id)
+    .bind(aged)
+    .execute(pool)
+    .await
+    .expect("age current node success");
 }
 
 async fn mark_project_draft_validated(
