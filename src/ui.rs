@@ -1,12 +1,16 @@
 use crate::api::{
-    InvocationExecutionModeApi, InvocationLifecycleStatus, InvocationListApiRequest,
-    InvocationStatusResponse, QueueStatusResponse, WorkerStatusResponse,
+    EnvironmentActiveResourcePhaseApi, InvocationCommandApi, InvocationExecutionModeApi,
+    InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
+    QueueStatusResponse, WorkerStatusResponse,
 };
-use crate::db::{EnvironmentRecord, EnvironmentVersionRecord, InvocationListFilters, ProjectRecord};
+use crate::db::{
+    EnvironmentActualStateRecord, EnvironmentActiveResourceRecord, EnvironmentRecord,
+    EnvironmentRunPlanRecord, EnvironmentVersionRecord, InvocationListFilters, ProjectRecord,
+};
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
     start_environment_draft_prepare_invocation, start_environment_draft_validation_invocation,
-    start_project_draft_validation_invocation,
+    start_prepared_invocation, start_project_draft_validation_invocation,
 };
 use crate::server::AppState;
 use crate::services::{
@@ -80,8 +84,20 @@ pub fn router() -> Router<AppState> {
             get(environment_detail),
         )
         .route(
+            "/ui/projects/{project_id}/environments/{slug}/panel",
+            get(environment_detail_panel),
+        )
+        .route(
             "/ui/projects/{project_id}/environments/{slug}/release",
             post(environment_release),
+        )
+        .route(
+            "/ui/projects/{project_id}/environments/{slug}/reconcile",
+            post(environment_reconcile),
+        )
+        .route(
+            "/ui/projects/{project_id}/environments/{slug}/plans/{plan_id}/admit",
+            post(environment_plan_admit),
         )
         .route(
             "/ui/projects/{project_id}/environments/{slug}/rollback",
@@ -1257,29 +1273,7 @@ async fn environment_detail(
     headers: HeaderMap,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Html<String>, UiError> {
-    let db = state.db();
-    db.require_current_schema().await?;
-    let project = db.get_project_by_project_id(&project_id).await?;
-    let environment = db
-        .list_environments(&project.project_id)
-        .await?
-        .into_iter()
-        .find(|environment| environment.slug == slug)
-        .ok_or_else(|| {
-            UiError(AppError::EnvironmentNotFound(
-                project.project_id.clone(),
-                slug.clone(),
-            ))
-        })?;
-    let history = db
-        .list_environment_versions(&project.project_id, &slug)
-        .await?;
-    let panel = EnvironmentPanelTemplate {
-        project: project_summary_view(&project),
-        environment: environment_detail_view(&environment),
-        versions: history.iter().map(environment_version_view).collect(),
-        is_remote: project.mode == "remote",
-    };
+    let panel = load_environment_panel(&state, &project_id, &slug).await?;
 
     if is_htmx(&headers) {
         return render_template(&panel);
@@ -1287,12 +1281,20 @@ async fn environment_detail(
 
     render_template(&EnvironmentPageTemplate {
         title: "Environment",
-        project: project_summary_view(&project),
-        environment_slug: environment.slug.clone(),
+        project: panel.project.clone(),
+        environment_slug: slug,
         panel_html: panel
             .render()
             .map_err(|err| UiError(AppError::Io(std::io::Error::other(err.to_string()))))?,
     })
+}
+
+async fn environment_detail_panel(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Html<String>, UiError> {
+    let panel = load_environment_panel(&state, &project_id, &slug).await?;
+    render_template(&panel)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1319,6 +1321,56 @@ async fn environment_release(
 
     if is_htmx(&headers) {
         return environment_detail(State(state), htmx_headers(), Path((project_id, slug)))
+            .await
+            .map(IntoResponse::into_response);
+    }
+
+    Ok(Redirect::to(&format!("/ui/projects/{project_id}/environments/{slug}")).into_response())
+}
+
+async fn environment_reconcile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Response, UiError> {
+    let service = EnvironmentService::new(state.db());
+    service.reconcile(project_id.clone(), slug.clone()).await?;
+
+    if is_htmx(&headers) {
+        return environment_detail_panel(State(state), Path((project_id, slug)))
+            .await
+            .map(IntoResponse::into_response);
+    }
+
+    Ok(Redirect::to(&format!("/ui/projects/{project_id}/environments/{slug}")).into_response())
+}
+
+async fn environment_plan_admit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project_id, slug, plan_id)): Path<(String, String, Uuid)>,
+) -> Result<Response, UiError> {
+    let service = EnvironmentService::new(state.db());
+    let prepared = service.admit_plan(Uuid::new_v4(), plan_id).await?;
+    if let (Some(invocation_id), Some(prepared_invocation)) =
+        (prepared.invocation_id, prepared.prepared)
+    {
+        start_prepared_invocation(
+            &state,
+            invocation_id,
+            InvocationCommandApi::Build,
+            plan_id,
+            prepared_invocation,
+        )
+        .await?;
+        state
+            .db()
+            .mark_environment_run_plan_admitted(plan_id, invocation_id)
+            .await?;
+    }
+
+    if is_htmx(&headers) {
+        return environment_detail_panel(State(state), Path((project_id, slug)))
             .await
             .map(IntoResponse::into_response);
     }
@@ -1353,6 +1405,51 @@ async fn environment_rollback(
     }
 
     Ok(Redirect::to(&format!("/ui/projects/{project_id}/environments/{slug}")).into_response())
+}
+
+async fn load_environment_panel(
+    state: &AppState,
+    project_id: &str,
+    slug: &str,
+) -> Result<EnvironmentPanelTemplate, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let project = db.get_project_by_project_id(project_id).await?;
+    let environment = db
+        .list_environments(&project.project_id)
+        .await?
+        .into_iter()
+        .find(|environment| environment.slug == slug)
+        .ok_or_else(|| {
+            UiError(AppError::EnvironmentNotFound(
+                project.project_id.clone(),
+                slug.to_string(),
+            ))
+        })?;
+    let history = db.list_environment_versions(&project.project_id, slug).await?;
+    let actual_state = db.get_environment_actual_state(&project.project_id, slug).await?;
+    let active_resources = db
+        .list_active_environment_resources(&project.project_id, slug, None)
+        .await?;
+    let plans = db.list_environment_run_plans(&project.project_id, slug).await?;
+
+    Ok(EnvironmentPanelTemplate {
+        project: project_summary_view(&project),
+        environment: environment_detail_view(&environment),
+        actual_state: environment_actual_state_view(&actual_state),
+        active_resources: active_resources
+            .iter()
+            .map(environment_active_resource_view)
+            .collect(),
+        plans: plans
+            .iter()
+            .map(|plan| environment_run_plan_view(&project.project_id, slug, plan))
+            .collect(),
+        versions: history.iter().map(environment_version_view).collect(),
+        is_remote: project.mode == "remote",
+        panel_url: format!("/ui/projects/{project_id}/environments/{slug}/panel"),
+        reconcile_url: format!("/ui/projects/{project_id}/environments/{slug}/reconcile"),
+    })
 }
 
 fn htmx_headers() -> HeaderMap {
@@ -1729,6 +1826,53 @@ struct EnvironmentVersionView {
 }
 
 #[derive(Clone)]
+struct EnvironmentActualStateView {
+    last_attempted_run_id: String,
+    last_attempted_commit_sha: String,
+    last_attempted_at: String,
+    last_successful_run_id: String,
+    last_successful_commit_sha: String,
+    last_successful_at: String,
+    last_admitted_plan_id: String,
+    last_completed_plan_id: String,
+    updated_at: String,
+}
+
+#[derive(Clone)]
+struct EnvironmentRunPlanView {
+    plan_id: String,
+    status: String,
+    status_class: &'static str,
+    reason: String,
+    target_git_branch: String,
+    target_git_commit_sha: String,
+    resource_count: i32,
+    selection_spec: String,
+    blocked_by_invocation_id: String,
+    admitted_invocation_id: String,
+    admitted_invocation_url: String,
+    error: String,
+    created_at: String,
+    admitted_at: String,
+    completed_at: String,
+    selected_resources: Vec<String>,
+    admit_url: String,
+    can_admit: bool,
+}
+
+#[derive(Clone)]
+struct EnvironmentActiveResourceView {
+    invocation_id: String,
+    invocation_url: String,
+    unique_id: String,
+    resource_type: String,
+    phase: String,
+    phase_class: &'static str,
+    selected_at: String,
+    node_started_at: String,
+}
+
+#[derive(Clone)]
 struct SelectOptionView {
     value: String,
     label: String,
@@ -2006,6 +2150,119 @@ fn environment_detail_view(environment: &EnvironmentRecord) -> EnvironmentDetail
     }
 }
 
+fn environment_actual_state_view(
+    actual_state: &EnvironmentActualStateRecord,
+) -> EnvironmentActualStateView {
+    EnvironmentActualStateView {
+        last_attempted_run_id: actual_state
+            .last_attempted_run_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "—".to_string()),
+        last_attempted_commit_sha: actual_state
+            .last_attempted_commit_sha
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
+        last_attempted_at: fmt_optional_ts(actual_state.last_attempted_at),
+        last_successful_run_id: actual_state
+            .last_successful_run_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "—".to_string()),
+        last_successful_commit_sha: actual_state
+            .last_successful_commit_sha
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
+        last_successful_at: fmt_optional_ts(actual_state.last_successful_at),
+        last_admitted_plan_id: actual_state
+            .last_admitted_plan_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "—".to_string()),
+        last_completed_plan_id: actual_state
+            .last_completed_plan_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "—".to_string()),
+        updated_at: fmt_ts(actual_state.updated_at),
+    }
+}
+
+fn environment_run_plan_view(
+    project_id: &str,
+    slug: &str,
+    plan: &EnvironmentRunPlanRecord,
+) -> EnvironmentRunPlanView {
+    let status_class = match plan.status.as_str() {
+        "planned" => "bg-amber-100 text-amber-800",
+        "blocked" => "bg-orange-100 text-orange-800",
+        "admitted" => "bg-sky-100 text-sky-800",
+        "completed" => "bg-emerald-100 text-emerald-800",
+        "failed" | "canceled" => "bg-rose-100 text-rose-800",
+        _ => "bg-slate-100 text-slate-700",
+    };
+    EnvironmentRunPlanView {
+        plan_id: plan.plan_id.to_string(),
+        status: plan.status.clone(),
+        status_class,
+        reason: plan.reason.replace('_', " "),
+        target_git_branch: plan
+            .target_git_branch
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
+        target_git_commit_sha: plan
+            .target_git_commit_sha
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
+        resource_count: plan.resource_count,
+        selection_spec: plan
+            .selection_spec
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
+        blocked_by_invocation_id: plan
+            .blocked_by_invocation_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "—".to_string()),
+        admitted_invocation_id: plan
+            .admitted_invocation_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "—".to_string()),
+        admitted_invocation_url: plan
+            .admitted_invocation_id
+            .map(|id| format!("/ui/invocations/{id}"))
+            .unwrap_or_default(),
+        error: plan.error.clone().unwrap_or_default(),
+        created_at: fmt_ts(plan.created_at),
+        admitted_at: fmt_optional_ts(plan.admitted_at),
+        completed_at: fmt_optional_ts(plan.completed_at),
+        selected_resources: plan.selected_resources.clone(),
+        admit_url: format!(
+            "/ui/projects/{project_id}/environments/{slug}/plans/{}/admit",
+            plan.plan_id
+        ),
+        can_admit: matches!(plan.status.as_str(), "planned" | "blocked"),
+    }
+}
+
+fn environment_active_resource_view(
+    resource: &EnvironmentActiveResourceRecord,
+) -> EnvironmentActiveResourceView {
+    let (phase, phase_class) = match resource.phase {
+        EnvironmentActiveResourcePhaseApi::Selected => {
+            ("selected".to_string(), "bg-amber-100 text-amber-800")
+        }
+        EnvironmentActiveResourcePhaseApi::Running => {
+            ("running".to_string(), "bg-sky-100 text-sky-800")
+        }
+    };
+    EnvironmentActiveResourceView {
+        invocation_id: resource.invocation_id.to_string(),
+        invocation_url: format!("/ui/invocations/{}", resource.invocation_id),
+        unique_id: resource.unique_id.clone(),
+        resource_type: resource.resource_type.clone(),
+        phase,
+        phase_class,
+        selected_at: fmt_ts(resource.selected_at),
+        node_started_at: fmt_optional_ts(resource.node_started_at),
+    }
+}
+
 fn environment_version_view(version: &EnvironmentVersionRecord) -> EnvironmentVersionView {
     EnvironmentVersionView {
         id: version.id,
@@ -2190,8 +2447,13 @@ struct EnvironmentPageTemplate {
 struct EnvironmentPanelTemplate {
     project: ProjectSummaryView,
     environment: EnvironmentDetailView,
+    actual_state: EnvironmentActualStateView,
+    active_resources: Vec<EnvironmentActiveResourceView>,
+    plans: Vec<EnvironmentRunPlanView>,
     versions: Vec<EnvironmentVersionView>,
     is_remote: bool,
+    panel_url: String,
+    reconcile_url: String,
 }
 
 #[derive(Template)]
@@ -2705,5 +2967,89 @@ mod tests {
         );
         assert_eq!(parsed.worker_queue, vec!["generic".to_string()]);
         assert_eq!(parsed.page, Some(2));
+    }
+
+    #[test]
+    fn environment_panel_renders_reconciliation_sections_and_actions() {
+        let rendered = EnvironmentPanelTemplate {
+            project: ProjectSummaryView {
+                project_id: "prj_123".to_string(),
+                project_name: "analytics".to_string(),
+                mode: "remote".to_string(),
+                git_repo_url: "https://example.com/repo.git".to_string(),
+                project_root: ".".to_string(),
+                delete_url: "/ui/projects/prj_123/delete".to_string(),
+                create_environment_url: "/ui/projects/prj_123/environments/new".to_string(),
+            },
+            environment: EnvironmentDetailView {
+                slug: "prod".to_string(),
+                profile_name: "analytics".to_string(),
+                target_name: "prod".to_string(),
+                adapter_type: "duckdb".to_string(),
+                worker_queue: "generic".to_string(),
+                schema_name: "main".to_string(),
+                status: "active".to_string(),
+                status_class: "bg-emerald-100 text-emerald-800",
+                git_branch: "main".to_string(),
+                git_commit_sha: "aaaaaaaa".to_string(),
+            },
+            actual_state: EnvironmentActualStateView {
+                last_attempted_run_id: "run-a".to_string(),
+                last_attempted_commit_sha: "aaaaaaaa".to_string(),
+                last_attempted_at: "2026-01-01 00:00:00".to_string(),
+                last_successful_run_id: "run-a".to_string(),
+                last_successful_commit_sha: "aaaaaaaa".to_string(),
+                last_successful_at: "2026-01-01 00:00:00".to_string(),
+                last_admitted_plan_id: "plan-a".to_string(),
+                last_completed_plan_id: "plan-b".to_string(),
+                updated_at: "2026-01-01 00:00:00".to_string(),
+            },
+            active_resources: vec![EnvironmentActiveResourceView {
+                invocation_id: Uuid::nil().to_string(),
+                invocation_url: format!("/ui/invocations/{}", Uuid::nil()),
+                unique_id: "model.pkg.orders".to_string(),
+                resource_type: "model".to_string(),
+                phase: "running".to_string(),
+                phase_class: "bg-sky-100 text-sky-800",
+                selected_at: "2026-01-01 00:00:00".to_string(),
+                node_started_at: "2026-01-01 00:00:01".to_string(),
+            }],
+            plans: vec![EnvironmentRunPlanView {
+                plan_id: Uuid::nil().to_string(),
+                status: "blocked".to_string(),
+                status_class: "bg-orange-100 text-orange-800",
+                reason: "source state change".to_string(),
+                target_git_branch: "main".to_string(),
+                target_git_commit_sha: "aaaaaaaa".to_string(),
+                resource_count: 2,
+                selection_spec: "source_downstream".to_string(),
+                blocked_by_invocation_id: Uuid::nil().to_string(),
+                admitted_invocation_id: "—".to_string(),
+                admitted_invocation_url: String::new(),
+                error: "plan is blocked".to_string(),
+                created_at: "2026-01-01 00:00:00".to_string(),
+                admitted_at: "—".to_string(),
+                completed_at: "—".to_string(),
+                selected_resources: vec![
+                    "source.pkg.raw_orders".to_string(),
+                    "model.pkg.orders".to_string(),
+                ],
+                admit_url: "/ui/projects/prj_123/environments/prod/plans/00000000-0000-0000-0000-000000000000/admit".to_string(),
+                can_admit: true,
+            }],
+            versions: vec![],
+            is_remote: true,
+            panel_url: "/ui/projects/prj_123/environments/prod/panel".to_string(),
+            reconcile_url: "/ui/projects/prj_123/environments/prod/reconcile".to_string(),
+        }
+        .render()
+        .expect("render environment panel");
+
+        assert!(rendered.contains("Actual State"));
+        assert!(rendered.contains("Active Resources"));
+        assert!(rendered.contains("Reconciliation Plans"));
+        assert!(rendered.contains("/ui/projects/prj_123/environments/prod/reconcile"));
+        assert!(rendered.contains("/ui/projects/prj_123/environments/prod/panel"));
+        assert!(rendered.contains("source.pkg.raw_orders"));
     }
 }
