@@ -1,4 +1,6 @@
-use crate::api::{InvocationExecutionModeApi, InvocationExecutionSpecApi};
+use crate::api::{
+    InvocationCommandApi, InvocationExecutionModeApi, InvocationExecutionSpecApi,
+};
 use crate::db::CreateInvocationInput;
 use crate::error::AppResult;
 use crate::server::AppState;
@@ -23,6 +25,7 @@ pub async fn start_project_draft_validation_invocation(
         .db()
         .create_invocation(CreateInvocationInput {
             invocation_id,
+            plan_id: None,
             run_id: None,
             project_id: None,
             environment_id: None,
@@ -58,6 +61,7 @@ pub async fn start_environment_draft_prepare_invocation(
         .db()
         .create_invocation(CreateInvocationInput {
             invocation_id,
+            plan_id: None,
             run_id: None,
             project_id: None,
             environment_id: None,
@@ -93,6 +97,7 @@ pub async fn start_environment_draft_validation_invocation(
         .db()
         .create_invocation(CreateInvocationInput {
             invocation_id,
+            plan_id: None,
             run_id: None,
             project_id: None,
             environment_id: None,
@@ -120,4 +125,115 @@ pub async fn start_environment_draft_validation_invocation(
         .await?;
     state.bootstrap_invocation_started(invocation_id, None).await?;
     Ok(invocation_id)
+}
+
+pub async fn start_prepared_invocation(
+    state: &AppState,
+    invocation_id: Uuid,
+    command: InvocationCommandApi,
+    plan_id: Uuid,
+    prepared: crate::services::LocalExecutionPrepared,
+) -> AppResult<Uuid> {
+    let execution_spec = match prepared.spec {
+        crate::services::PreparedExecutionSpec::Local(spec) => InvocationExecutionSpecApi::Local {
+            command,
+            args: spec
+                .args
+                .into_iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect(),
+            project_dir: spec.project_dir.display().to_string(),
+            profiles_yml: spec.profiles_yml,
+            state_manifest: spec.state_manifest,
+        },
+        crate::services::PreparedExecutionSpec::Remote(spec) => InvocationExecutionSpecApi::Remote {
+            command,
+            args: spec
+                .args
+                .into_iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect(),
+            repo_url: spec.repo_url,
+            commit_sha: spec.commit_sha,
+            project_root: spec.project_root,
+            profiles_yml: spec.profiles_yml,
+            state_manifest: spec.state_manifest,
+        },
+        crate::services::PreparedExecutionSpec::ReleaseValidation(spec) => {
+            InvocationExecutionSpecApi::ReleaseValidation {
+                repo_url: spec.repo_url,
+                git_ref: spec.git_ref,
+                git_commit_sha: spec.git_commit_sha,
+                git_branch: spec.git_branch,
+            }
+        }
+        crate::services::PreparedExecutionSpec::ProjectValidation(spec) => {
+            InvocationExecutionSpecApi::ProjectValidation {
+                repo_url: spec.repo_url,
+                project_root: spec.project_root,
+            }
+        }
+        crate::services::PreparedExecutionSpec::EnvironmentPrepare(spec) => {
+            InvocationExecutionSpecApi::EnvironmentPrepare {
+                repo_url: spec.repo_url,
+                selected_branch: spec.selected_branch,
+            }
+        }
+        crate::services::PreparedExecutionSpec::EnvironmentValidate(spec) => {
+            InvocationExecutionSpecApi::EnvironmentValidate {
+                repo_url: spec.repo_url,
+                commit_sha: spec.commit_sha,
+                project_root: spec.project_root,
+                selected_branch: spec.selected_branch,
+                profiles_yml: spec.profiles_yml,
+            }
+        }
+    };
+    let execution_mode = match &execution_spec {
+        InvocationExecutionSpecApi::Local { .. } => InvocationExecutionModeApi::Local,
+        _ => InvocationExecutionModeApi::Server,
+    };
+    let persistence = prepared.persistence.map(|p| crate::invocation_runtime::InvocationPersistence {
+        run_id: p.run_id,
+        project_id: p.project_id,
+        environment_id: p.environment_id,
+        promote_base_manifest: p.promote_base_manifest,
+    });
+    state
+        .db()
+        .create_invocation(CreateInvocationInput {
+            invocation_id,
+            plan_id: Some(plan_id),
+            run_id: persistence.as_ref().map(|p| p.run_id),
+            project_id: prepared.project_id,
+            environment_id: prepared.environment_id,
+            project_draft_id: prepared.project_draft_id,
+            environment_draft_id: prepared.environment_draft_id,
+            command: map_command_to_service(command).as_str().to_string(),
+            execution_mode,
+            worker_queue: prepared.worker_queue.clone(),
+            execution_spec: Some(execution_spec),
+            promote_base_manifest: persistence
+                .as_ref()
+                .map(|p| p.promote_base_manifest)
+                .unwrap_or(false),
+            claim_deadline_at: Some(invocation_claim_deadline_at(execution_mode)),
+        })
+        .await?;
+    state.bootstrap_invocation_started(invocation_id, persistence).await?;
+    Ok(invocation_id)
+}
+
+fn map_command_to_service(command: InvocationCommandApi) -> InvocationCommand {
+    match command {
+        InvocationCommandApi::Build => InvocationCommand::Build,
+        InvocationCommandApi::Run => InvocationCommand::Run,
+        InvocationCommandApi::Ls => InvocationCommand::Ls,
+        InvocationCommandApi::Test => InvocationCommand::Test,
+        InvocationCommandApi::Seed => InvocationCommand::Seed,
+        InvocationCommandApi::Release => InvocationCommand::Release,
+        InvocationCommandApi::ProjectValidate => InvocationCommand::ProjectValidate,
+        InvocationCommandApi::EnvironmentPrepare => InvocationCommand::EnvironmentPrepare,
+        InvocationCommandApi::EnvironmentValidate => InvocationCommand::EnvironmentValidate,
+    }
 }

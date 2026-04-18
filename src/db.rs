@@ -136,6 +136,58 @@ pub struct EnvironmentVersionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentActualStateRecord {
+    pub project_id: i64,
+    pub environment_id: i64,
+    pub last_attempted_run_id: Option<Uuid>,
+    pub last_attempted_commit_sha: Option<String>,
+    pub last_attempted_at: Option<chrono::DateTime<Utc>>,
+    pub last_successful_run_id: Option<Uuid>,
+    pub last_successful_commit_sha: Option<String>,
+    pub last_successful_at: Option<chrono::DateTime<Utc>>,
+    pub last_admitted_plan_id: Option<Uuid>,
+    pub last_completed_plan_id: Option<Uuid>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentRunPlanRecord {
+    pub plan_id: Uuid,
+    pub project_id: i64,
+    pub environment_id: i64,
+    pub status: String,
+    pub reason: String,
+    pub target_git_branch: Option<String>,
+    pub target_git_commit_sha: Option<String>,
+    pub baseline_run_id: Option<Uuid>,
+    pub selection_spec: Option<String>,
+    pub selected_resources: Vec<String>,
+    pub resource_count: i32,
+    pub blocked_by_invocation_id: Option<Uuid>,
+    pub admitted_invocation_id: Option<Uuid>,
+    pub source_event_id: Option<i64>,
+    pub error: Option<String>,
+    pub admitted_at: Option<chrono::DateTime<Utc>>,
+    pub completed_at: Option<chrono::DateTime<Utc>>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SourceStateEventRecord {
+    pub id: i64,
+    pub project_id: i64,
+    pub environment_id: Option<i64>,
+    pub source_key: String,
+    pub provider: String,
+    pub state_version: Option<String>,
+    pub payload: Value,
+    pub observed_at: chrono::DateTime<Utc>,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentActiveResourceRecord {
     pub invocation_id: Uuid,
     pub run_id: Option<Uuid>,
@@ -268,6 +320,7 @@ pub(crate) struct RunStart<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct CreateInvocationInput {
     pub(crate) invocation_id: Uuid,
+    pub(crate) plan_id: Option<Uuid>,
     pub(crate) run_id: Option<Uuid>,
     pub(crate) project_id: Option<i64>,
     pub(crate) environment_id: Option<i64>,
@@ -281,8 +334,29 @@ pub(crate) struct CreateInvocationInput {
     pub(crate) claim_deadline_at: Option<chrono::DateTime<Utc>>,
 }
 
+pub(crate) struct SourceStateEventCreateInput {
+    pub(crate) project: String,
+    pub(crate) environment_slug: String,
+    pub(crate) source_key: String,
+    pub(crate) provider: String,
+    pub(crate) state_version: Option<String>,
+    pub(crate) observed_at: Option<chrono::DateTime<Utc>>,
+    pub(crate) payload: Value,
+}
+
+pub(crate) struct CreateEnvironmentRunPlanInput<'a> {
+    pub(crate) environment: &'a EnvironmentRecord,
+    pub(crate) reason: &'a str,
+    pub(crate) baseline_run_id: Option<Uuid>,
+    pub(crate) selection_spec: Option<&'a str>,
+    pub(crate) selected_resources: &'a [String],
+    pub(crate) source_event_id: Option<i64>,
+    pub(crate) metadata: Value,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct InvocationPersistenceRecord {
+    pub(crate) plan_id: Option<Uuid>,
     pub(crate) run_id: Option<Uuid>,
     pub(crate) project_id: Option<i64>,
     pub(crate) environment_id: Option<i64>,
@@ -1346,6 +1420,349 @@ impl Db {
         Ok(rows.iter().map(active_environment_resource_from_row).collect())
     }
 
+    pub(crate) async fn get_environment_actual_state(
+        &self,
+        project: &str,
+        environment_slug: &str,
+    ) -> AppResult<EnvironmentActualStateRecord> {
+        let environment = self.get_environment(project, environment_slug).await?;
+        let row = sqlx::query(
+            r#"
+            SELECT
+                project_id,
+                environment_id,
+                last_attempted_run_id,
+                last_attempted_commit_sha,
+                last_attempted_at,
+                last_successful_run_id,
+                last_successful_commit_sha,
+                last_successful_at,
+                last_admitted_plan_id,
+                last_completed_plan_id,
+                updated_at
+            FROM environment_actual_state
+            WHERE project_id = $1
+              AND environment_id = $2
+            "#,
+        )
+        .bind(environment.project_id)
+        .bind(environment.id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .as_ref()
+            .map(environment_actual_state_from_row)
+            .unwrap_or(EnvironmentActualStateRecord {
+                project_id: environment.project_id,
+                environment_id: environment.id,
+                last_attempted_run_id: None,
+                last_attempted_commit_sha: None,
+                last_attempted_at: None,
+                last_successful_run_id: None,
+                last_successful_commit_sha: None,
+                last_successful_at: None,
+                last_admitted_plan_id: None,
+                last_completed_plan_id: None,
+                updated_at: Utc::now(),
+            }))
+    }
+
+    pub(crate) async fn create_source_state_event(
+        &self,
+        input: SourceStateEventCreateInput,
+    ) -> AppResult<SourceStateEventRecord> {
+        let environment = self
+            .get_environment(&input.project, &input.environment_slug)
+            .await?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO source_state_events (
+                project_id, environment_id, source_key, provider, state_version, payload, observed_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW()))
+            RETURNING id, project_id, environment_id, source_key, provider, state_version, payload, observed_at, created_at
+            "#,
+        )
+        .bind(environment.project_id)
+        .bind(environment.id)
+        .bind(input.source_key)
+        .bind(input.provider)
+        .bind(input.state_version)
+        .bind(sqlx::types::Json(input.payload))
+        .bind(input.observed_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(source_state_event_from_row(&row))
+    }
+
+    pub(crate) async fn list_environment_run_plans(
+        &self,
+        project: &str,
+        environment_slug: &str,
+    ) -> AppResult<Vec<EnvironmentRunPlanRecord>> {
+        let environment = self.get_environment(project, environment_slug).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
+                error, admitted_at, completed_at, created_at, updated_at, metadata
+            FROM environment_run_plans
+            WHERE project_id = $1
+              AND environment_id = $2
+            ORDER BY created_at DESC, plan_id DESC
+            "#,
+        )
+        .bind(environment.project_id)
+        .bind(environment.id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(environment_run_plan_from_row).collect())
+    }
+
+    pub(crate) async fn get_environment_run_plan(
+        &self,
+        plan_id: Uuid,
+    ) -> AppResult<EnvironmentRunPlanRecord> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
+                error, admitted_at, completed_at, created_at, updated_at, metadata
+            FROM environment_run_plans
+            WHERE plan_id = $1
+            "#,
+        )
+        .bind(plan_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "plan not found",
+            ))
+        })?;
+        Ok(environment_run_plan_from_row(&row))
+    }
+
+    pub(crate) async fn create_environment_run_plan(
+        &self,
+        input: CreateEnvironmentRunPlanInput<'_>,
+    ) -> AppResult<EnvironmentRunPlanRecord> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO environment_run_plans (
+                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, source_event_id, metadata
+            )
+            VALUES (
+                $1, $2, $3, 'planned', $4, $5,
+                $6, $7, $8, $9,
+                $10, $11, $12
+            )
+            RETURNING
+                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
+                error, admitted_at, completed_at, created_at, updated_at, metadata
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(input.environment.project_id)
+        .bind(input.environment.id)
+        .bind(input.reason)
+        .bind(input.environment.git_branch.as_deref())
+        .bind(input.environment.git_commit_sha.as_deref())
+        .bind(input.baseline_run_id)
+        .bind(input.selection_spec)
+        .bind(sqlx::types::Json(input.selected_resources))
+        .bind(input.selected_resources.len() as i32)
+        .bind(input.source_event_id)
+        .bind(sqlx::types::Json(input.metadata))
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(environment_run_plan_from_row(&row))
+    }
+
+    pub(crate) async fn mark_environment_run_plan_blocked(
+        &self,
+        plan_id: Uuid,
+        blocked_by_invocation_id: Option<Uuid>,
+        error: &str,
+    ) -> AppResult<EnvironmentRunPlanRecord> {
+        let row = sqlx::query(
+            r#"
+            UPDATE environment_run_plans
+            SET status = 'blocked',
+                blocked_by_invocation_id = $2,
+                error = $3,
+                updated_at = NOW()
+            WHERE plan_id = $1
+            RETURNING
+                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
+                error, admitted_at, completed_at, created_at, updated_at, metadata
+            "#,
+        )
+        .bind(plan_id)
+        .bind(blocked_by_invocation_id)
+        .bind(error)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(environment_run_plan_from_row(&row))
+    }
+
+    pub(crate) async fn mark_environment_run_plan_admitted(
+        &self,
+        plan_id: Uuid,
+        invocation_id: Uuid,
+    ) -> AppResult<EnvironmentRunPlanRecord> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            UPDATE environment_run_plans
+            SET status = 'admitted',
+                admitted_invocation_id = $2,
+                blocked_by_invocation_id = NULL,
+                error = NULL,
+                admitted_at = NOW(),
+                updated_at = NOW()
+            WHERE plan_id = $1
+            RETURNING
+                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
+                error, admitted_at, completed_at, created_at, updated_at, metadata
+            "#,
+        )
+        .bind(plan_id)
+        .bind(invocation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO environment_actual_state (
+                project_id, environment_id, last_admitted_plan_id, updated_at
+            )
+            SELECT project_id, environment_id, $1, NOW()
+            FROM environment_run_plans
+            WHERE plan_id = $1
+            ON CONFLICT (project_id, environment_id) DO UPDATE SET
+                last_admitted_plan_id = EXCLUDED.last_admitted_plan_id,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(plan_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(environment_run_plan_from_row(&row))
+    }
+
+    pub(crate) async fn list_active_conflicting_invocations(
+        &self,
+        plan_id: Uuid,
+    ) -> AppResult<Vec<Uuid>> {
+        let rows = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT DISTINCT isr.invocation_id
+            FROM environment_run_plans plan
+            JOIN LATERAL jsonb_array_elements_text(plan.selected_resources) sel(unique_id) ON TRUE
+            JOIN invocation_selected_resources isr
+              ON isr.project_id = plan.project_id
+             AND isr.environment_id = plan.environment_id
+             AND isr.unique_id = sel.unique_id
+             AND isr.finished_at IS NULL
+            WHERE plan.plan_id = $1
+            ORDER BY isr.invocation_id
+            "#,
+        )
+        .bind(plan_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub(crate) async fn list_manifest_node_unique_ids(
+        &self,
+        run_id: Uuid,
+    ) -> AppResult<Vec<String>> {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT unique_id
+            FROM manifest_nodes
+            WHERE run_id = $1
+            ORDER BY unique_id ASC
+            "#,
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub(crate) async fn list_source_state_events_since(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        observed_after: Option<chrono::DateTime<Utc>>,
+    ) -> AppResult<Vec<SourceStateEventRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, project_id, environment_id, source_key, provider, state_version, payload, observed_at, created_at
+            FROM source_state_events
+            WHERE project_id = $1
+              AND environment_id = $2
+              AND ($3::TIMESTAMPTZ IS NULL OR observed_at > $3)
+            ORDER BY observed_at ASC, id ASC
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(observed_after)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(source_state_event_from_row).collect())
+    }
+
+    pub(crate) async fn list_downstream_manifest_node_unique_ids(
+        &self,
+        run_id: Uuid,
+        source_keys: &[String],
+    ) -> AppResult<Vec<String>> {
+        if source_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_scalar::<_, String>(
+            r#"
+            WITH RECURSIVE reachable(unique_id) AS (
+                SELECT unnest($2::TEXT[])
+                UNION
+                SELECT me.child_unique_id
+                FROM manifest_edges me
+                JOIN reachable r ON r.unique_id = me.parent_unique_id
+                WHERE me.run_id = $1
+            )
+            SELECT DISTINCT mn.unique_id
+            FROM reachable r
+            JOIN manifest_nodes mn
+              ON mn.run_id = $1
+             AND mn.unique_id = r.unique_id
+            ORDER BY mn.unique_id ASC
+            "#,
+        )
+        .bind(run_id)
+        .bind(source_keys)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub(crate) async fn create_invocation(
         &self,
         input: CreateInvocationInput,
@@ -1353,16 +1770,17 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO invocations (
-                invocation_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id,
+                invocation_id, plan_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id,
                 command, execution_mode, worker_queue, status, execution_spec, promote_base_manifest, claim_deadline_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'running', $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', $11, $12, $13)
             RETURNING invocation_id, execution_mode, worker_queue, status, exit_code, error,
                 started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
                 cancel_requested, claimed_by
             "#,
         )
         .bind(input.invocation_id)
+        .bind(input.plan_id)
         .bind(input.run_id)
         .bind(input.project_id)
         .bind(input.environment_id)
@@ -2024,7 +2442,7 @@ impl Db {
     ) -> AppResult<InvocationPersistenceRecord> {
         let row = sqlx::query(
             r#"
-            SELECT run_id, project_id, environment_id, project_draft_id, environment_draft_id, command, promote_base_manifest
+            SELECT plan_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id, command, promote_base_manifest
             FROM invocations
             WHERE invocation_id = $1
               AND ($2::TEXT IS NULL OR claimed_by = $2)
@@ -2043,6 +2461,7 @@ impl Db {
             ))
         })?;
         Ok(InvocationPersistenceRecord {
+            plan_id: row.get("plan_id"),
             run_id: row.get("run_id"),
             project_id: row.get("project_id"),
             environment_id: row.get("environment_id"),
@@ -2166,6 +2585,23 @@ impl Db {
                 },
             )
             .await?;
+
+            self.upsert_environment_actual_state_for_run_in_tx(
+                &mut tx,
+                run_id,
+                persistence.project_id.ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "run invocation missing project scope",
+                    ))
+                })?,
+                persistence.environment_id.ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "run invocation missing environment scope",
+                    ))
+                })?,
+                matches!(completion.status, InvocationLifecycleStatus::Succeeded),
+            )
+            .await?;
         }
 
         if persistence.command == "release"
@@ -2238,6 +2674,15 @@ impl Db {
             },
         )
         .await?;
+
+        if let Some(plan_id) = persistence.plan_id {
+            self.complete_environment_run_plan_in_tx(
+                &mut tx,
+                plan_id,
+                completion.status.clone(),
+            )
+            .await?;
+        }
 
         sqlx::query(
             r#"
@@ -2915,7 +3360,7 @@ impl Db {
         Ok(environment_record_from_row(&row))
     }
 
-    async fn get_environment_by_id(&self, environment_id: i64) -> AppResult<EnvironmentRecord> {
+    pub(crate) async fn get_environment_by_id(&self, environment_id: i64) -> AppResult<EnvironmentRecord> {
         let row = sqlx::query(
             r#"
             SELECT
@@ -3286,6 +3731,102 @@ impl Db {
         )
         .bind(invocation_id)
         .bind(close_reason)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn upsert_environment_actual_state_for_run_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        run_id: Uuid,
+        project_id: i64,
+        environment_id: i64,
+        succeeded: bool,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO environment_actual_state (
+                project_id,
+                environment_id,
+                last_attempted_run_id,
+                last_attempted_commit_sha,
+                last_attempted_at,
+                last_successful_run_id,
+                last_successful_commit_sha,
+                last_successful_at,
+                updated_at
+            )
+            SELECT
+                $2,
+                $3,
+                r.run_id,
+                r.git_commit_sha,
+                NOW(),
+                CASE WHEN $4 THEN r.run_id ELSE NULL END,
+                CASE WHEN $4 THEN r.git_commit_sha ELSE NULL END,
+                CASE WHEN $4 THEN NOW() ELSE NULL END,
+                NOW()
+            FROM runs r
+            WHERE r.run_id = $1
+            ON CONFLICT (project_id, environment_id) DO UPDATE SET
+                last_attempted_run_id = EXCLUDED.last_attempted_run_id,
+                last_attempted_commit_sha = EXCLUDED.last_attempted_commit_sha,
+                last_attempted_at = EXCLUDED.last_attempted_at,
+                last_successful_run_id = COALESCE(EXCLUDED.last_successful_run_id, environment_actual_state.last_successful_run_id),
+                last_successful_commit_sha = COALESCE(EXCLUDED.last_successful_commit_sha, environment_actual_state.last_successful_commit_sha),
+                last_successful_at = COALESCE(EXCLUDED.last_successful_at, environment_actual_state.last_successful_at),
+                updated_at = NOW()
+            "#,
+        )
+        .bind(run_id)
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(succeeded)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn complete_environment_run_plan_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        plan_id: Uuid,
+        invocation_status: InvocationLifecycleStatus,
+    ) -> AppResult<()> {
+        let status = match invocation_status {
+            InvocationLifecycleStatus::Succeeded => "completed",
+            InvocationLifecycleStatus::Failed => "failed",
+            InvocationLifecycleStatus::Canceled => "canceled",
+            InvocationLifecycleStatus::Running => "failed",
+        };
+        sqlx::query(
+            r#"
+            UPDATE environment_run_plans
+            SET status = $2,
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE plan_id = $1
+            "#,
+        )
+        .bind(plan_id)
+        .bind(status)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO environment_actual_state (
+                project_id, environment_id, last_completed_plan_id, updated_at
+            )
+            SELECT project_id, environment_id, $1, NOW()
+            FROM environment_run_plans
+            WHERE plan_id = $1
+            ON CONFLICT (project_id, environment_id) DO UPDATE SET
+                last_completed_plan_id = EXCLUDED.last_completed_plan_id,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(plan_id)
         .execute(&mut **tx)
         .await?;
         Ok(())
@@ -3907,6 +4448,63 @@ fn environment_version_record_from_row(row: &sqlx::postgres::PgRow) -> Environme
         immutable: row.get("immutable"),
         baseline_environment_id: row.get("baseline_environment_id"),
         metadata: row.get::<sqlx::types::Json<Value>, _>("metadata").0,
+    }
+}
+
+fn environment_actual_state_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentActualStateRecord {
+    EnvironmentActualStateRecord {
+        project_id: row.get("project_id"),
+        environment_id: row.get("environment_id"),
+        last_attempted_run_id: row.get("last_attempted_run_id"),
+        last_attempted_commit_sha: row.get("last_attempted_commit_sha"),
+        last_attempted_at: row.get("last_attempted_at"),
+        last_successful_run_id: row.get("last_successful_run_id"),
+        last_successful_commit_sha: row.get("last_successful_commit_sha"),
+        last_successful_at: row.get("last_successful_at"),
+        last_admitted_plan_id: row.get("last_admitted_plan_id"),
+        last_completed_plan_id: row.get("last_completed_plan_id"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn environment_run_plan_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRunPlanRecord {
+    EnvironmentRunPlanRecord {
+        plan_id: row.get("plan_id"),
+        project_id: row.get("project_id"),
+        environment_id: row.get("environment_id"),
+        status: row.get("status"),
+        reason: row.get("reason"),
+        target_git_branch: row.get("target_git_branch"),
+        target_git_commit_sha: row.get("target_git_commit_sha"),
+        baseline_run_id: row.get("baseline_run_id"),
+        selection_spec: row.get("selection_spec"),
+        selected_resources: row
+            .get::<sqlx::types::Json<Vec<String>>, _>("selected_resources")
+            .0,
+        resource_count: row.get("resource_count"),
+        blocked_by_invocation_id: row.get("blocked_by_invocation_id"),
+        admitted_invocation_id: row.get("admitted_invocation_id"),
+        source_event_id: row.get("source_event_id"),
+        error: row.get("error"),
+        admitted_at: row.get("admitted_at"),
+        completed_at: row.get("completed_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        metadata: row.get::<sqlx::types::Json<Value>, _>("metadata").0,
+    }
+}
+
+fn source_state_event_from_row(row: &sqlx::postgres::PgRow) -> SourceStateEventRecord {
+    SourceStateEventRecord {
+        id: row.get("id"),
+        project_id: row.get("project_id"),
+        environment_id: row.get("environment_id"),
+        source_key: row.get("source_key"),
+        provider: row.get("provider"),
+        state_version: row.get("state_version"),
+        payload: row.get::<sqlx::types::Json<Value>, _>("payload").0,
+        observed_at: row.get("observed_at"),
+        created_at: row.get("created_at"),
     }
 }
 

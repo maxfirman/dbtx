@@ -1,5 +1,7 @@
 use crate::api::{
     EnvironmentActiveResourcesApiRequest, EnvironmentActiveResourcesResponse,
+    EnvironmentActualStateResponse, EnvironmentReconcileApiRequest, EnvironmentRunPlanResponse,
+    EnvironmentRunPlansResponse,
     EnvironmentDraftResponse, EnvironmentDraftStartResponse, EnvironmentDraftUpdateApiRequest,
     EnvironmentReleaseApiRequest, EnvironmentResponse, EnvironmentRollbackApiRequest,
     EnvironmentVersionsResponse, EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
@@ -9,7 +11,8 @@ use crate::api::{
     InvocationHeartbeatResponse, InvocationListApiRequest, InvocationStatusResponse,
     InvocationsResponse, MigrateResponse, ProjectDeleteResponse, ProjectDraftCreateApiRequest,
     ProjectDraftResponse, ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest,
-    ProjectsResponse, QueuesResponse, WorkersResponse,
+    ProjectsResponse, QueuesResponse, SourceStateEventCreateApiRequest, SourceStateEventResponse,
+    WorkersResponse,
 };
 use crate::error::{AppError, AppResult};
 use futures_util::StreamExt;
@@ -222,6 +225,79 @@ impl DaemonClient {
                     "/v1/projects/{project_id}/environments/{slug}/active-resources"
                 )))
                 .query(&request),
+        )
+        .await
+    }
+
+    pub async fn environment_actual_state(
+        &self,
+        project_id: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentActualStateResponse> {
+        self.send(
+            self.http
+                .get(self.url(&format!(
+                    "/v1/projects/{project_id}/environments/{slug}/actual-state"
+                ))),
+        )
+        .await
+    }
+
+    pub async fn environment_source_state_event_create(
+        &self,
+        project_id: &str,
+        slug: &str,
+        request: SourceStateEventCreateApiRequest,
+    ) -> AppResult<SourceStateEventResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!(
+                    "/v1/projects/{project_id}/environments/{slug}/source-state-events"
+                )))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn environment_plan_list(
+        &self,
+        project_id: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentRunPlansResponse> {
+        self.send(
+            self.http
+                .get(self.url(&format!(
+                    "/v1/projects/{project_id}/environments/{slug}/plans"
+                ))),
+        )
+        .await
+    }
+
+    pub async fn environment_reconcile(
+        &self,
+        project_id: &str,
+        slug: &str,
+        request: EnvironmentReconcileApiRequest,
+    ) -> AppResult<EnvironmentRunPlanResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!(
+                    "/v1/projects/{project_id}/environments/{slug}/reconcile"
+                )))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn environment_plan_get(&self, plan_id: Uuid) -> AppResult<EnvironmentRunPlanResponse> {
+        self.send(self.http.get(self.url(&format!("/v1/plans/{plan_id}"))))
+            .await
+    }
+
+    pub async fn environment_plan_admit(&self, plan_id: Uuid) -> AppResult<EnvironmentRunPlanResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/v1/plans/{plan_id}/admit"))),
         )
         .await
     }

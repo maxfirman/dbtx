@@ -48,6 +48,11 @@ pub struct EnvironmentResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentActualStateResponse {
+    pub actual_state: crate::db::EnvironmentActualStateRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentsResponse {
     pub environments: Vec<EnvironmentRecord>,
 }
@@ -58,14 +63,41 @@ pub struct EnvironmentActiveResourcesResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentRunPlanResponse {
+    pub plan: crate::db::EnvironmentRunPlanRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentRunPlansResponse {
+    pub plans: Vec<crate::db::EnvironmentRunPlanRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentVersionsResponse {
     pub versions: Vec<EnvironmentVersionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SourceStateEventResponse {
+    pub event: crate::db::SourceStateEventRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
 pub struct EnvironmentActiveResourcesApiRequest {
     pub resource_type: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SourceStateEventCreateApiRequest {
+    pub source_key: String,
+    pub provider: String,
+    pub state_version: Option<String>,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
+pub struct EnvironmentReconcileApiRequest {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProjectUpdateApiRequest {

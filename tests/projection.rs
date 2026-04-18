@@ -1,5 +1,6 @@
 use dbtx::api::{
-    EnvironmentActiveResourcesApiRequest, EnvironmentDraftUpdateApiRequest,
+    EnvironmentActiveResourcesApiRequest, EnvironmentReconcileApiRequest,
+    EnvironmentDraftUpdateApiRequest, SourceStateEventCreateApiRequest,
     EnvironmentReleaseApiRequest, EnvironmentRollbackApiRequest, InvocationCancelStateApi,
     InvocationClaimNextApiRequest, InvocationCommandApi, InvocationCompleteApiRequest,
     InvocationCreateApiRequest, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
@@ -334,6 +335,112 @@ async fn selected_resources_are_tracked_until_node_finish_or_invocation_completi
         Some("invocation_failed")
     );
     assert!(rows[1].get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at").is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn source_state_reconcile_creates_and_admits_plan() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    let actual_state = client
+        .environment_actual_state(&project_id, "remote")
+        .await
+        .expect("environment actual state");
+    assert_eq!(
+        actual_state.actual_state.last_successful_commit_sha.as_deref(),
+        Some(commit_sha)
+    );
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({
+                    "reason": "new upstream data"
+                }),
+            },
+        )
+        .await
+        .expect("create source state event");
+
+    let plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create reconciliation plan")
+        .plan;
+    assert_eq!(plan.status, "planned");
+    assert_eq!(plan.reason, "source_state_change");
+    assert_eq!(plan.selection_spec.as_deref(), Some("source_downstream"));
+    assert_eq!(
+        plan.selected_resources,
+        vec![
+            "model.pkg.customers".to_string(),
+            "model.pkg.orders".to_string(),
+            "source.pkg.raw_orders".to_string(),
+        ]
+    );
+    assert_eq!(plan.resource_count, 3);
+    assert!(plan.source_event_id.is_some());
+
+    let admitted = client
+        .environment_plan_admit(plan.plan_id)
+        .await
+        .expect("admit reconciliation plan")
+        .plan;
+    assert_eq!(admitted.status, "admitted");
+    assert!(admitted.admitted_invocation_id.is_some());
+
+    let reloaded = client
+        .environment_plan_get(plan.plan_id)
+        .await
+        .expect("reload admitted plan")
+        .plan;
+    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.admitted_invocation_id, admitted.admitted_invocation_id);
+
+    let linked_plan_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT plan_id FROM invocations WHERE invocation_id = $1",
+    )
+    .bind(admitted.admitted_invocation_id.expect("admitted invocation id"))
+    .fetch_one(db.pool())
+    .await
+    .expect("load linked invocation plan id");
+    assert_eq!(linked_plan_id, Some(plan.plan_id));
 }
 
 #[tokio::test]
@@ -1446,6 +1553,141 @@ async fn bootstrap_remote_project_only(pool: &PgPool, project_dir: &Path, projec
     .execute(pool)
     .await
     .expect("upsert remote project");
+}
+
+async fn seed_environment_actual_state_with_manifest(
+    pool: &PgPool,
+    project_id: &str,
+    slug: &str,
+    commit_sha: &str,
+    nodes: &[(&str, &str)],
+    edges: &[(&str, &str)],
+) {
+    let scope = sqlx::query(
+        r#"
+        SELECT p.id AS project_pk, p.project_name, p.project_root, p.git_repo_url, e.id AS environment_pk
+        FROM projects p
+        JOIN environments e ON e.project_id = p.id
+        WHERE p.project_id = $1 AND e.slug = $2
+        "#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .fetch_one(pool)
+    .await
+    .expect("load project/environment scope");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let project_name: String = scope.get("project_name");
+    let project_root: Option<String> = scope.get("project_root");
+    let git_repo_url: Option<String> = scope.get("git_repo_url");
+    let run_id = Uuid::new_v4();
+    let successful_at = chrono::Utc::now() - chrono::Duration::hours(1);
+
+    sqlx::query(
+        r#"
+        INSERT INTO runs (
+            run_id, project_id, environment_id, command, args, is_full_graph_run, execution_mode,
+            git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref,
+            started_at, finished_at, exit_code, terminal_status
+        )
+        VALUES (
+            $1, $2, $3, 'build', '[]'::jsonb, true, 'server',
+            'main', $4, $5, $6, $7, $8,
+            $9, $10, 0, 'succeeded'
+        )
+        "#,
+    )
+    .bind(run_id)
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(commit_sha)
+    .bind(git_repo_url)
+    .bind(project_root)
+    .bind(&project_name)
+    .bind(project_id)
+    .bind(successful_at)
+    .bind(successful_at)
+    .execute(pool)
+    .await
+    .expect("insert baseline run");
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_snapshots (run_id, manifest, manifest_size_bytes, checksum)
+        VALUES ($1, '{}'::jsonb, 2, 'fixture-checksum')
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .expect("insert manifest snapshot");
+
+    for (unique_id, resource_type) in nodes {
+        let name = unique_id.rsplit('.').next().expect("node name");
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_nodes (
+                run_id, unique_id, resource_type, name, package_name, original_file_path,
+                tags, fqn, config, checksum, database_name, schema_name, alias, relation_name
+            )
+            VALUES (
+                $1, $2, $3, $4, 'pkg', '', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+                NULL, NULL, NULL, NULL, NULL
+            )
+            "#,
+        )
+        .bind(run_id)
+        .bind(unique_id)
+        .bind(resource_type)
+        .bind(name)
+        .execute(pool)
+        .await
+        .expect("insert manifest node");
+    }
+
+    for (parent_unique_id, child_unique_id) in edges {
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_edges (run_id, parent_unique_id, child_unique_id)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(run_id)
+        .bind(parent_unique_id)
+        .bind(child_unique_id)
+        .execute(pool)
+        .await
+        .expect("insert manifest edge");
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO environment_actual_state (
+            project_id, environment_id,
+            last_attempted_run_id, last_attempted_commit_sha, last_attempted_at,
+            last_successful_run_id, last_successful_commit_sha, last_successful_at,
+            updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $3, $4, $5, $5)
+        ON CONFLICT (project_id, environment_id) DO UPDATE
+        SET last_attempted_run_id = EXCLUDED.last_attempted_run_id,
+            last_attempted_commit_sha = EXCLUDED.last_attempted_commit_sha,
+            last_attempted_at = EXCLUDED.last_attempted_at,
+            last_successful_run_id = EXCLUDED.last_successful_run_id,
+            last_successful_commit_sha = EXCLUDED.last_successful_commit_sha,
+            last_successful_at = EXCLUDED.last_successful_at,
+            updated_at = EXCLUDED.updated_at
+        "#,
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(run_id)
+    .bind(commit_sha)
+    .bind(successful_at)
+    .execute(pool)
+    .await
+    .expect("seed environment actual state");
 }
 
 async fn mark_project_draft_validated(

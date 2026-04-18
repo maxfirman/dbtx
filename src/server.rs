@@ -1,19 +1,20 @@
 use crate::api::{
     ApiErrorResponse, EnvironmentActiveResourcesApiRequest, EnvironmentActiveResourcesResponse,
-    EnvironmentDraftResponse, EnvironmentDraftStartResponse, EnvironmentDraftUpdateApiRequest,
-    EnvironmentReleaseApiRequest, EnvironmentResponse, EnvironmentRollbackApiRequest,
-    EnvironmentVersionsResponse, EnvironmentsResponse, HealthResponse,
+    EnvironmentActualStateResponse, EnvironmentDraftResponse, EnvironmentDraftStartResponse,
+    EnvironmentDraftUpdateApiRequest, EnvironmentReconcileApiRequest, EnvironmentReleaseApiRequest,
+    EnvironmentResponse, EnvironmentRollbackApiRequest, EnvironmentRunPlanResponse,
+    EnvironmentRunPlansResponse, EnvironmentVersionsResponse, EnvironmentsResponse, HealthResponse,
     InvocationCancelApiRequest, InvocationCancelStateApi,
     InvocationClaimNextApiRequest, InvocationClaimResponse, InvocationCleanupApiRequest,
     InvocationCleanupResponse, InvocationCommandApi, InvocationCompleteApiRequest,
     InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
     InvocationEventBatchApiRequest, InvocationExecutionModeApi, InvocationExecutionSpecApi,
     InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
-    InvocationListApiRequest, InvocationStatusResponse, InvocationWorkerHealthApi,
-    InvocationsResponse, MigrateResponse, ProjectDeleteResponse, ProjectDraftCreateApiRequest,
-    ProjectDraftResponse, ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest,
-    ProjectsResponse, QueueStatusResponse, QueuesResponse, ReadyResponse, WorkerStatusResponse,
-    WorkersResponse,
+    InvocationListApiRequest, InvocationStatusResponse, InvocationWorkerHealthApi, InvocationsResponse,
+    MigrateResponse, ProjectDeleteResponse, ProjectDraftCreateApiRequest, ProjectDraftResponse,
+    ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse,
+    QueueStatusResponse, QueuesResponse, ReadyResponse, SourceStateEventCreateApiRequest,
+    SourceStateEventResponse, WorkerStatusResponse, WorkersResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{
@@ -28,6 +29,7 @@ use crate::execution::{
 };
 use crate::invocation_bootstrap::invocation_claim_deadline_at;
 use crate::invocation_bootstrap::{
+    start_prepared_invocation,
     start_environment_draft_prepare_invocation, start_environment_draft_validation_invocation,
     start_project_draft_validation_invocation,
 };
@@ -37,8 +39,8 @@ use crate::invocation_runtime::{
 };
 use crate::services::{
     EnvironmentReleaseRequest, EnvironmentRollbackRequest, EnvironmentService, InvocationCommand,
-    InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectCreateRequest,
-    ProjectService, ProjectUpdateRequest,
+    InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectCreateRequest, ProjectService,
+    ProjectUpdateRequest, SourceStateEventCreateRequest,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -168,6 +170,10 @@ fn environment_routes() -> Router<AppState> {
             get(environment_get),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{slug}/actual-state",
+            get(environment_actual_state),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{slug}/release",
             post(environment_release),
         )
@@ -180,9 +186,23 @@ fn environment_routes() -> Router<AppState> {
             get(environment_active_resources),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{slug}/source-state-events",
+            post(environment_source_state_event_create),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{slug}/plans",
+            get(environment_plan_list),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{slug}/reconcile",
+            post(environment_reconcile),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{slug}/rollback",
             post(environment_rollback),
         )
+        .route("/v1/plans/{plan_id}", get(environment_plan_get))
+        .route("/v1/plans/{plan_id}/admit", post(environment_plan_admit))
 }
 
 fn invocation_routes() -> Router<AppState> {
@@ -264,9 +284,15 @@ struct InvocationEventsQuery {
         project_delete,
         environment_list,
         environment_get,
+        environment_actual_state,
         environment_release,
         environment_history,
         environment_active_resources,
+        environment_source_state_event_create,
+        environment_plan_list,
+        environment_plan_get,
+        environment_reconcile,
+        environment_plan_admit,
         environment_rollback,
         invocation_create,
         invocation_list,
@@ -295,12 +321,18 @@ struct InvocationEventsQuery {
             EnvironmentDraftStartResponse,
             EnvironmentDraftUpdateApiRequest,
             EnvironmentResponse,
+            EnvironmentActualStateResponse,
             EnvironmentsResponse,
             EnvironmentActiveResourcesResponse,
+            EnvironmentRunPlanResponse,
+            EnvironmentRunPlansResponse,
             EnvironmentActiveResourcesApiRequest,
             EnvironmentVersionsResponse,
             EnvironmentReleaseApiRequest,
             EnvironmentRollbackApiRequest,
+            EnvironmentReconcileApiRequest,
+            SourceStateEventCreateApiRequest,
+            SourceStateEventResponse,
             InvocationCreateApiRequest,
             InvocationCreateResponse,
             InvocationsResponse,
@@ -883,6 +915,29 @@ async fn environment_get(
 }
 
 #[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/environments/{slug}/actual-state",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    responses(
+        (status = 200, description = "Environment actual state", body = EnvironmentActualStateResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_actual_state(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Json<EnvironmentActualStateResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let actual_state = service.actual_state(project_id, slug).await?;
+    Ok(Json(EnvironmentActualStateResponse { actual_state }))
+}
+
+#[utoipa::path(
     post,
     path = "/v1/projects/{project_id}/environments/{slug}/release",
     tag = "environments",
@@ -969,6 +1024,141 @@ async fn environment_active_resources(
         .list_active_environment_resources(&project_id, &slug, request.resource_type.as_deref())
         .await?;
     Ok(Json(EnvironmentActiveResourcesResponse { resources }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/environments/{slug}/source-state-events",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    request_body = SourceStateEventCreateApiRequest,
+    responses(
+        (status = 200, description = "Created source state event", body = SourceStateEventResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_source_state_event_create(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+    Json(request): Json<SourceStateEventCreateApiRequest>,
+) -> Result<Json<SourceStateEventResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let event = service
+        .create_source_state_event(SourceStateEventCreateRequest {
+            project: project_id,
+            slug,
+            source_key: request.source_key,
+            provider: request.provider,
+            state_version: request.state_version,
+            observed_at: request.observed_at,
+            payload: request.payload,
+        })
+        .await?;
+    Ok(Json(SourceStateEventResponse { event }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/environments/{slug}/plans",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    responses(
+        (status = 200, description = "Environment run plans", body = EnvironmentRunPlansResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_plan_list(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Json<EnvironmentRunPlansResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let plans = service.list_plans(project_id, slug).await?;
+    Ok(Json(EnvironmentRunPlansResponse { plans }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/plans/{plan_id}",
+    tag = "environments",
+    params(
+        ("plan_id" = Uuid, Path, description = "Plan identifier")
+    ),
+    responses(
+        (status = 200, description = "Environment run plan", body = EnvironmentRunPlanResponse),
+        (status = 404, description = "Plan not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_plan_get(
+    State(state): State<AppState>,
+    Path(plan_id): Path<Uuid>,
+) -> Result<Json<EnvironmentRunPlanResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let plan = service.get_plan(plan_id).await?;
+    Ok(Json(EnvironmentRunPlanResponse { plan }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/environments/{slug}/reconcile",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    request_body = EnvironmentReconcileApiRequest,
+    responses(
+        (status = 200, description = "Created reconciliation plan", body = EnvironmentRunPlanResponse),
+        (status = 400, description = "No reconciliation work available", body = ApiErrorResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_reconcile(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+    Json(_request): Json<EnvironmentReconcileApiRequest>,
+) -> Result<Json<EnvironmentRunPlanResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let plan = service.reconcile(project_id, slug).await?;
+    Ok(Json(EnvironmentRunPlanResponse { plan }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/plans/{plan_id}/admit",
+    tag = "environments",
+    params(
+        ("plan_id" = Uuid, Path, description = "Plan identifier")
+    ),
+    responses(
+        (status = 200, description = "Admitted or blocked plan", body = EnvironmentRunPlanResponse),
+        (status = 404, description = "Plan not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_plan_admit(
+    State(state): State<AppState>,
+    Path(plan_id): Path<Uuid>,
+) -> Result<Json<EnvironmentRunPlanResponse>, ApiError> {
+    let service = EnvironmentService::new(&state.db);
+    let prepared = service.admit_plan(Uuid::new_v4(), plan_id).await?;
+    let mut plan = prepared.plan;
+    if let (Some(invocation_id), Some(prepared_invocation)) = (prepared.invocation_id, prepared.prepared)
+    {
+        start_prepared_invocation(&state, invocation_id, InvocationCommandApi::Build, plan_id, prepared_invocation)
+            .await?;
+        plan = state.db.mark_environment_run_plan_admitted(plan_id, invocation_id).await?;
+    }
+    Ok(Json(EnvironmentRunPlanResponse { plan }))
 }
 
 #[utoipa::path(
@@ -1183,6 +1373,7 @@ async fn invocation_create(
         .db
         .create_invocation(CreateInvocationInput {
             invocation_id,
+            plan_id: None,
             run_id: persistence.as_ref().map(|p| p.run_id),
             project_id: prepared.project_id,
             environment_id: prepared.environment_id,

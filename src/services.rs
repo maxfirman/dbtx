@@ -1,9 +1,11 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
-    CreateEnvironmentDraftInput, CreateProjectDraftInput, CreateProjectInput, Db,
-    EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput, EnvironmentVersionRecord,
-    GitState, LocalEnvironmentUpsertInput, ProjectDraftRecord, ProjectRecord, RunFinalization,
-    RunStart, UpdateEnvironmentDraftInput,
+    CreateEnvironmentDraftInput, CreateEnvironmentRunPlanInput, CreateProjectDraftInput,
+    CreateProjectInput, Db,
+    EnvironmentActualStateRecord, EnvironmentDraftRecord, EnvironmentRecord,
+    EnvironmentReleaseInput, EnvironmentRunPlanRecord, EnvironmentVersionRecord, GitState,
+    LocalEnvironmentUpsertInput, ProjectDraftRecord, ProjectRecord, SourceStateEventCreateInput,
+    SourceStateEventRecord, RunFinalization, RunStart, UpdateEnvironmentDraftInput,
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
     read_dbt_project_name, read_git_state, spawn_dbt_child,
 };
@@ -222,6 +224,23 @@ pub struct EnvironmentRollbackRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct SourceStateEventCreateRequest {
+    pub project: String,
+    pub slug: String,
+    pub source_key: String,
+    pub provider: String,
+    pub state_version: Option<String>,
+    pub observed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentPlanAdmission {
+    pub plan: EnvironmentRunPlanRecord,
+    pub invocation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone)]
 struct ReleaseTargetRequest {
     git_branch: Option<String>,
     git_commit_sha: Option<String>,
@@ -334,6 +353,13 @@ impl<'a> ProjectService<'a> {
 
 pub struct EnvironmentService<'a> {
     db: &'a Db,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentPlanAdmitPrepared {
+    pub plan: EnvironmentRunPlanRecord,
+    pub invocation_id: Option<Uuid>,
+    pub prepared: Option<LocalExecutionPrepared>,
 }
 
 impl<'a> EnvironmentService<'a> {
@@ -567,6 +593,176 @@ impl<'a> EnvironmentService<'a> {
     ) -> AppResult<EnvironmentRecord> {
         self.db.require_current_schema().await?;
         self.db.get_environment(&project, &slug).await
+    }
+
+    pub async fn actual_state(
+        &self,
+        project: String,
+        slug: String,
+    ) -> AppResult<EnvironmentActualStateRecord> {
+        self.db.require_current_schema().await?;
+        self.db.get_environment_actual_state(&project, &slug).await
+    }
+
+    pub async fn create_source_state_event(
+        &self,
+        request: SourceStateEventCreateRequest,
+    ) -> AppResult<SourceStateEventRecord> {
+        self.db.require_current_schema().await?;
+        self.db
+            .create_source_state_event(SourceStateEventCreateInput {
+                project: request.project,
+                environment_slug: request.slug,
+                source_key: request.source_key,
+                provider: request.provider,
+                state_version: request.state_version,
+                observed_at: request.observed_at,
+                payload: request.payload,
+            })
+            .await
+    }
+
+    pub async fn list_plans(
+        &self,
+        project: String,
+        slug: String,
+    ) -> AppResult<Vec<EnvironmentRunPlanRecord>> {
+        self.db.require_current_schema().await?;
+        self.db.list_environment_run_plans(&project, &slug).await
+    }
+
+    pub async fn get_plan(&self, plan_id: Uuid) -> AppResult<EnvironmentRunPlanRecord> {
+        self.db.require_current_schema().await?;
+        self.db.get_environment_run_plan(plan_id).await
+    }
+
+    pub async fn reconcile(
+        &self,
+        project: String,
+        slug: String,
+    ) -> AppResult<EnvironmentRunPlanRecord> {
+        self.db.require_current_schema().await?;
+        let environment = self.db.get_environment(&project, &slug).await?;
+        let actual_state = self.db.get_environment_actual_state(&project, &slug).await?;
+        let baseline_run_id = actual_state.last_successful_run_id.ok_or_else(|| {
+            AppError::Io(std::io::Error::other(
+                "reconciliation requires a successful baseline run",
+            ))
+        })?;
+
+        let source_events = self
+            .db
+            .list_source_state_events_since(
+                environment.project_id,
+                environment.id,
+                actual_state.last_successful_at,
+            )
+            .await?;
+        let code_drift = environment.git_commit_sha != actual_state.last_successful_commit_sha;
+
+        if !code_drift && source_events.is_empty() {
+            return Err(AppError::Io(std::io::Error::other(
+                "environment is already reconciled to known desired state",
+            )));
+        }
+
+        let (reason, selection_spec, selected_resources, source_event_id, metadata) = if code_drift {
+            (
+                "code_change",
+                Some("full_graph".to_string()),
+                self.db.list_manifest_node_unique_ids(baseline_run_id).await?,
+                None,
+                serde_json::json!({
+                    "code_drift": true,
+                    "actual_commit_sha": actual_state.last_successful_commit_sha,
+                    "desired_commit_sha": environment.git_commit_sha,
+                    "source_event_count": source_events.len(),
+                }),
+            )
+        } else {
+            let source_keys: Vec<String> = source_events
+                .iter()
+                .map(|event| event.source_key.clone())
+                .collect();
+            (
+                "source_state_change",
+                Some("source_downstream".to_string()),
+                self.db
+                    .list_downstream_manifest_node_unique_ids(baseline_run_id, &source_keys)
+                    .await?,
+                source_events.first().map(|event| event.id),
+                serde_json::json!({
+                    "source_keys": source_keys,
+                    "source_event_count": source_events.len(),
+                }),
+            )
+        };
+
+        if selected_resources.is_empty() {
+            return Err(AppError::Io(std::io::Error::other(
+                "reconciliation plan resolved to no selected resources",
+            )));
+        }
+
+        self.db
+            .create_environment_run_plan(CreateEnvironmentRunPlanInput {
+                environment: &environment,
+                reason,
+                baseline_run_id: Some(baseline_run_id),
+                selection_spec: selection_spec.as_deref(),
+                selected_resources: &selected_resources,
+                source_event_id,
+                metadata,
+            })
+            .await
+    }
+
+    pub async fn admit_plan(
+        &self,
+        invocation_id: Uuid,
+        plan_id: Uuid,
+    ) -> AppResult<EnvironmentPlanAdmitPrepared> {
+        self.db.require_current_schema().await?;
+        let plan = self.db.get_environment_run_plan(plan_id).await?;
+        if !matches!(plan.status.as_str(), "planned" | "blocked") {
+            return Err(AppError::Io(std::io::Error::other(format!(
+                "plan {plan_id} is not admissible from status {}",
+                plan.status
+            ))));
+        }
+        let blockers = self.db.list_active_conflicting_invocations(plan_id).await?;
+        if let Some(blocking_invocation_id) = blockers.first().copied() {
+            let blocked = self
+                .db
+                .mark_environment_run_plan_blocked(
+                    plan_id,
+                    Some(blocking_invocation_id),
+                    "plan is blocked by active resource overlap",
+                )
+                .await?;
+            return Ok(EnvironmentPlanAdmitPrepared {
+                plan: blocked,
+                invocation_id: None,
+                prepared: None,
+            });
+        }
+
+        let project = self.db.get_project_by_id(plan.project_id).await?;
+        let environment = self.db.get_environment_by_id(plan.environment_id).await?;
+        let prepared = InvocationService::new(self.db)
+            .prepare_remote_execution(
+                invocation_id,
+                InvocationCommand::Build,
+                Vec::new(),
+                &project.project_id,
+                &environment.slug,
+            )
+            .await?;
+        Ok(EnvironmentPlanAdmitPrepared {
+            plan,
+            invocation_id: Some(invocation_id),
+            prepared: Some(prepared),
+        })
     }
 
 }
