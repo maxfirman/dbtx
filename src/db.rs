@@ -159,6 +159,8 @@ pub struct EnvironmentReconcilePreparationRecord {
     pub status: String,
     pub invocation_id: Option<Uuid>,
     pub error: Option<String>,
+    pub failure_count: i32,
+    pub next_attempt_at: Option<chrono::DateTime<Utc>>,
     pub started_at: Option<chrono::DateTime<Utc>>,
     pub completed_at: Option<chrono::DateTime<Utc>>,
     pub updated_at: chrono::DateTime<Utc>,
@@ -183,6 +185,8 @@ pub struct EnvironmentRunPlanRecord {
     pub admitted_invocation_id: Option<Uuid>,
     pub source_event_id: Option<i64>,
     pub error: Option<String>,
+    pub failure_count: i32,
+    pub next_attempt_at: Option<chrono::DateTime<Utc>>,
     pub first_blocked_at: Option<chrono::DateTime<Utc>>,
     pub last_blocked_at: Option<chrono::DateTime<Utc>>,
     pub last_checked_at: Option<chrono::DateTime<Utc>>,
@@ -1580,6 +1584,8 @@ impl Db {
                 status,
                 invocation_id,
                 error,
+                failure_count,
+                next_attempt_at,
                 started_at,
                 completed_at,
                 updated_at
@@ -1637,7 +1643,8 @@ impl Db {
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
+                first_blocked_at,
                 last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
                 updated_at, metadata
             FROM environment_run_plans
@@ -1704,7 +1711,8 @@ impl Db {
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
+                first_blocked_at,
                 last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
                 updated_at, metadata
             FROM environment_run_plans
@@ -1743,7 +1751,8 @@ impl Db {
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
+                first_blocked_at,
                 last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
                 updated_at, metadata
             "#,
@@ -1775,7 +1784,8 @@ impl Db {
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
+                first_blocked_at,
                 last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
                 updated_at, metadata
             FROM environment_run_plans
@@ -1894,6 +1904,7 @@ impl Db {
                 blocked_by_invocation_id = $2,
                 error = $3,
                 retry_count = retry_count + 1,
+                next_attempt_at = NULL,
                 first_blocked_at = COALESCE(first_blocked_at, NOW()),
                 last_blocked_at = NOW(),
                 last_checked_at = NOW(),
@@ -1903,7 +1914,8 @@ impl Db {
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
+                first_blocked_at,
                 last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
                 updated_at, metadata
             "#,
@@ -1930,6 +1942,7 @@ impl Db {
                 superseded_by_plan_id = NULL,
                 blocked_by_invocation_id = NULL,
                 error = NULL,
+                next_attempt_at = NULL,
                 last_checked_at = NOW(),
                 admitted_at = NOW(),
                 updated_at = NOW()
@@ -1938,7 +1951,8 @@ impl Db {
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
+                first_blocked_at,
                 last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
                 updated_at, metadata
             "#,
@@ -1981,6 +1995,7 @@ impl Db {
                 selected_resources = $3,
                 resource_count = $4,
                 metadata = $5,
+                next_attempt_at = NULL,
                 last_checked_at = NOW(),
                 updated_at = NOW()
             WHERE plan_id = $1
@@ -1988,7 +2003,8 @@ impl Db {
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
+                first_blocked_at,
                 last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
                 updated_at, metadata
             "#,
@@ -2018,6 +2034,8 @@ impl Db {
                 resource_count = 0,
                 blocked_by_invocation_id = NULL,
                 error = $2,
+                failure_count = 0,
+                next_attempt_at = NULL,
                 metadata = $3,
                 last_checked_at = NOW(),
                 completed_at = NOW(),
@@ -2182,6 +2200,29 @@ impl Db {
         Ok(exists)
     }
 
+    pub(crate) async fn get_environment_reconcile_retry_not_before(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+    ) -> AppResult<Option<chrono::DateTime<Utc>>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT next_attempt_at
+            FROM environment_run_plans
+            WHERE project_id = $1
+              AND environment_id = $2
+              AND status IN ('failed', 'canceled')
+            ORDER BY created_at DESC, plan_id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub(crate) async fn mark_manifest_prepare_running(
         &self,
         project_id: i64,
@@ -2199,16 +2240,19 @@ impl Db {
                 status,
                 invocation_id,
                 error,
+                failure_count,
+                next_attempt_at,
                 started_at,
                 completed_at,
                 updated_at
             )
-            VALUES ($1, $2, 'target_manifest', $3, 'running', $4, NULL, NOW(), NULL, NOW())
+            VALUES ($1, $2, 'target_manifest', $3, 'running', $4, NULL, 0, NULL, NOW(), NULL, NOW())
             ON CONFLICT (project_id, environment_id, kind) DO UPDATE SET
                 target_git_commit_sha = EXCLUDED.target_git_commit_sha,
                 status = EXCLUDED.status,
                 invocation_id = EXCLUDED.invocation_id,
                 error = NULL,
+                next_attempt_at = NULL,
                 started_at = NOW(),
                 completed_at = NULL,
                 updated_at = NOW()
@@ -3421,6 +3465,7 @@ impl Db {
                 tx,
                 plan_id,
                 completion.status.clone(),
+                completion.error.as_deref(),
             )
             .await?;
         }
@@ -3440,11 +3485,39 @@ impl Db {
             InvocationLifecycleStatus::Failed | InvocationLifecycleStatus::Canceled => "failed",
             InvocationLifecycleStatus::Running => "failed",
         };
+        let existing_failure_count: i32 = sqlx::query_scalar(
+            r#"
+            SELECT failure_count
+            FROM environment_reconcile_preparations
+            WHERE project_id = $1
+              AND environment_id = $2
+              AND kind = 'target_manifest'
+              AND invocation_id = $3
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(invocation_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or(0);
+        let next_failure_count = if status == "succeeded" {
+            0
+        } else {
+            existing_failure_count + 1
+        };
+        let next_attempt_at = if status == "succeeded" {
+            None
+        } else {
+            Some(Utc::now() + automatic_retry_backoff(next_failure_count))
+        };
         sqlx::query(
             r#"
             UPDATE environment_reconcile_preparations
             SET status = $4,
                 error = $5,
+                failure_count = $6,
+                next_attempt_at = $7,
                 completed_at = NOW(),
                 updated_at = NOW()
             WHERE project_id = $1
@@ -3458,6 +3531,8 @@ impl Db {
         .bind(invocation_id)
         .bind(status)
         .bind(completion.error.as_deref())
+        .bind(next_failure_count)
+        .bind(next_attempt_at)
         .execute(&mut **tx)
         .await?;
         Ok(())
@@ -4546,6 +4621,7 @@ impl Db {
         tx: &mut Transaction<'_, Postgres>,
         plan_id: Uuid,
         invocation_status: InvocationLifecycleStatus,
+        invocation_error: Option<&str>,
     ) -> AppResult<()> {
         let status = match invocation_status {
             InvocationLifecycleStatus::Succeeded => "completed",
@@ -4553,10 +4629,34 @@ impl Db {
             InvocationLifecycleStatus::Canceled => "canceled",
             InvocationLifecycleStatus::Running => "failed",
         };
+        let existing_failure_count: i32 = sqlx::query_scalar(
+            r#"
+            SELECT failure_count
+            FROM environment_run_plans
+            WHERE plan_id = $1
+            "#,
+        )
+        .bind(plan_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or(0);
+        let next_failure_count = if status == "completed" {
+            0
+        } else {
+            existing_failure_count + 1
+        };
+        let next_attempt_at = if status == "completed" {
+            None
+        } else {
+            Some(Utc::now() + automatic_retry_backoff(next_failure_count))
+        };
         sqlx::query(
             r#"
             UPDATE environment_run_plans
             SET status = $2,
+                error = CASE WHEN $2 = 'completed' THEN NULL ELSE COALESCE($3, error) END,
+                failure_count = $4,
+                next_attempt_at = $5,
                 completed_at = NOW(),
                 updated_at = NOW()
             WHERE plan_id = $1
@@ -4564,6 +4664,9 @@ impl Db {
         )
         .bind(plan_id)
         .bind(status)
+        .bind(invocation_error)
+        .bind(next_failure_count)
+        .bind(next_attempt_at)
         .execute(&mut **tx)
         .await?;
         if matches!(invocation_status, InvocationLifecycleStatus::Succeeded) {
@@ -5322,6 +5425,8 @@ fn environment_reconcile_preparation_from_row(
         status: row.get("status"),
         invocation_id: row.get("invocation_id"),
         error: row.get("error"),
+        failure_count: row.get("failure_count"),
+        next_attempt_at: row.get("next_attempt_at"),
         started_at: row.get("started_at"),
         completed_at: row.get("completed_at"),
         updated_at: row.get("updated_at"),
@@ -5349,6 +5454,8 @@ fn environment_run_plan_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRunP
         admitted_invocation_id: row.get("admitted_invocation_id"),
         source_event_id: row.get("source_event_id"),
         error: row.get("error"),
+        failure_count: row.get("failure_count"),
+        next_attempt_at: row.get("next_attempt_at"),
         first_blocked_at: row.get("first_blocked_at"),
         last_blocked_at: row.get("last_blocked_at"),
         last_checked_at: row.get("last_checked_at"),
@@ -5372,6 +5479,12 @@ fn source_state_event_from_row(row: &sqlx::postgres::PgRow) -> SourceStateEventR
         observed_at: row.get("observed_at"),
         created_at: row.get("created_at"),
     }
+}
+
+fn automatic_retry_backoff(failure_count: i32) -> chrono::Duration {
+    let exponent = failure_count.saturating_sub(1).clamp(0, 6) as u32;
+    let seconds = (5_i64 * (1_i64 << exponent)).min(300);
+    chrono::Duration::seconds(seconds)
 }
 
 fn plan_source_event_ids(source_event_id: Option<i64>, metadata: &Value) -> Vec<i64> {

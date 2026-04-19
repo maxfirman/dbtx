@@ -1863,6 +1863,8 @@ struct EnvironmentReconcilePreparationView {
     invocation_id: String,
     invocation_url: String,
     error: String,
+    failure_count: i32,
+    next_attempt_at: String,
     started_at: String,
     completed_at: String,
     updated_at: String,
@@ -1877,8 +1879,10 @@ struct EnvironmentReconciliationSummaryView {
     latest_plan_status: String,
     latest_plan_status_class: &'static str,
     latest_plan_reason: String,
+    latest_plan_retry_at: String,
     preparation_status: String,
     preparation_status_class: &'static str,
+    preparation_retry_at: String,
     active_resource_count: usize,
     blocked_plan_count: usize,
 }
@@ -1897,6 +1901,8 @@ struct EnvironmentRunPlanView {
     admitted_invocation_id: String,
     admitted_invocation_url: String,
     error: String,
+    failure_count: i32,
+    next_attempt_at: String,
     created_at: String,
     admitted_at: String,
     completed_at: String,
@@ -2257,6 +2263,8 @@ fn environment_reconcile_preparation_view(
         invocation_id,
         invocation_url,
         error: preparation.error.clone().unwrap_or_default(),
+        failure_count: preparation.failure_count,
+        next_attempt_at: fmt_optional_ts(preparation.next_attempt_at),
         started_at: fmt_optional_ts(preparation.started_at),
         completed_at: fmt_optional_ts(preparation.completed_at),
         updated_at: fmt_ts(preparation.updated_at),
@@ -2310,6 +2318,10 @@ fn environment_reconciliation_summary_view(
                 "—".to_string(),
             )
         });
+    let latest_plan_retry_at = latest_plan
+        .and_then(|plan| plan.next_attempt_at)
+        .map(fmt_ts)
+        .unwrap_or_else(|| "—".to_string());
     let (preparation_status, preparation_status_class) = preparation
         .map(|preparation| {
             (
@@ -2323,6 +2335,10 @@ fn environment_reconciliation_summary_view(
             )
         })
         .unwrap_or_else(|| ("idle".to_string(), "bg-slate-100 text-slate-700"));
+    let preparation_retry_at = preparation
+        .and_then(|preparation| preparation.next_attempt_at)
+        .map(fmt_ts)
+        .unwrap_or_else(|| "—".to_string());
     let blocked_plan_count = plans.iter().filter(|plan| plan.status == "blocked").count();
     EnvironmentReconciliationSummaryView {
         state,
@@ -2332,8 +2348,10 @@ fn environment_reconciliation_summary_view(
         latest_plan_status,
         latest_plan_status_class,
         latest_plan_reason,
+        latest_plan_retry_at,
         preparation_status,
         preparation_status_class,
+        preparation_retry_at,
         active_resource_count,
         blocked_plan_count,
     }
@@ -2383,6 +2401,8 @@ fn environment_run_plan_view(
             .map(|id| format!("/ui/invocations/{id}"))
             .unwrap_or_default(),
         error: plan.error.clone().unwrap_or_default(),
+        failure_count: plan.failure_count,
+        next_attempt_at: fmt_optional_ts(plan.next_attempt_at),
         created_at: fmt_ts(plan.created_at),
         admitted_at: fmt_optional_ts(plan.admitted_at),
         completed_at: fmt_optional_ts(plan.completed_at),
@@ -3158,8 +3178,10 @@ mod tests {
                 latest_plan_status: "blocked".to_string(),
                 latest_plan_status_class: "bg-orange-100 text-orange-800",
                 latest_plan_reason: "source_state_change".to_string(),
+                latest_plan_retry_at: "2026-01-01 00:05:00".to_string(),
                 preparation_status: "running".to_string(),
                 preparation_status_class: "bg-sky-100 text-sky-800",
+                preparation_retry_at: "—".to_string(),
                 active_resource_count: 1,
                 blocked_plan_count: 1,
             },
@@ -3182,6 +3204,8 @@ mod tests {
                 invocation_id: Uuid::nil().to_string(),
                 invocation_url: format!("/ui/invocations/{}", Uuid::nil()),
                 error: String::new(),
+                failure_count: 0,
+                next_attempt_at: "—".to_string(),
                 started_at: "2026-01-01 00:00:00".to_string(),
                 completed_at: "—".to_string(),
                 updated_at: "2026-01-01 00:00:00".to_string(),
@@ -3209,6 +3233,8 @@ mod tests {
                 admitted_invocation_id: "—".to_string(),
                 admitted_invocation_url: String::new(),
                 error: "plan is blocked".to_string(),
+                failure_count: 1,
+                next_attempt_at: "2026-01-01 00:05:00".to_string(),
                 created_at: "2026-01-01 00:00:00".to_string(),
                 admitted_at: "—".to_string(),
                 completed_at: "—".to_string(),

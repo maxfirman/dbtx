@@ -43,6 +43,7 @@
         <div class="mt-2 space-y-2 text-sm">
           <div><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ summary.latest_plan_status_class }}">{{ summary.latest_plan_status }}</span></div>
           <div class="text-slate-600">{{ summary.latest_plan_reason }}</div>
+          <div class="text-slate-500">Retry After {{ summary.latest_plan_retry_at }}</div>
         </div>
       </div>
       <div class="rounded-lg bg-slate-50 p-4">
@@ -50,6 +51,7 @@
         <div class="mt-2 space-y-2 text-sm">
           <div><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ summary.preparation_status_class }}">{{ summary.preparation_status }}</span></div>
           <div class="text-slate-600">Manifest prerequisites and other pre-plan work.</div>
+          <div class="text-slate-500">Retry After {{ summary.preparation_retry_at }}</div>
         </div>
       </div>
       <div class="rounded-lg bg-slate-50 p-4">
@@ -141,6 +143,8 @@
           <span class="font-mono text-xs">{{ preparation.invocation_id }}</span>
           {% endif %}
         </div>
+        <div class="flex justify-between gap-4"><span class="text-slate-500">Failure Count</span><span>{{ preparation.failure_count }}</span></div>
+        <div class="flex justify-between gap-4"><span class="text-slate-500">Next Attempt</span><span>{{ preparation.next_attempt_at }}</span></div>
         <div class="flex justify-between gap-4"><span class="text-slate-500">Started</span><span>{{ preparation.started_at }}</span></div>
         <div class="flex justify-between gap-4"><span class="text-slate-500">Completed</span><span>{{ preparation.completed_at }}</span></div>
         <div class="flex justify-between gap-4"><span class="text-slate-500">Updated</span><span>{{ preparation.updated_at }}</span></div>
@@ -214,6 +218,9 @@
             {% endif %}
             <div class="text-xs text-slate-500">
               Created {{ plan.created_at }} · Admitted {{ plan.admitted_at }} · Completed {{ plan.completed_at }}
+            </div>
+            <div class="text-xs text-slate-500">
+              Failure Count {{ plan.failure_count }} · Retry After {{ plan.next_attempt_at }}
             </div>
             <div class="text-xs text-slate-500">
               Blocked by {{ plan.blocked_by_invocation_id }}

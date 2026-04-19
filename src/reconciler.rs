@@ -3,6 +3,7 @@ use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::start_prepared_invocation;
 use crate::server::AppState;
 use crate::services::{EnvironmentService, InvocationService};
+use chrono::Utc;
 use std::time::Duration;
 use tracing::{error, info};
 use uuid::Uuid;
@@ -57,6 +58,20 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
     let environments = state.db().list_auto_deploy_remote_environments().await?;
     let mut planned = 0usize;
     for environment in environments {
+        if let Some(next_attempt_at) = state
+            .db()
+            .get_environment_reconcile_retry_not_before(environment.project_id, environment.id)
+            .await?
+            .filter(|next_attempt_at| *next_attempt_at > Utc::now())
+        {
+            info!(
+                project_id = %environment.project_ref,
+                environment_slug = %environment.slug,
+                next_attempt_at = %next_attempt_at,
+                "skipping automatic reconcile until retry backoff expires"
+            );
+            continue;
+        }
         let actual_state = state
             .db()
             .get_environment_actual_state(&environment.project_ref, &environment.slug)
@@ -141,6 +156,23 @@ async fn ensure_target_manifest_for_reconcile_async(
             &desired_commit_sha,
         )
         .await?
+    {
+        return Ok(true);
+    }
+    if state
+        .db()
+        .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
+        .await?
+        .filter(|preparation| {
+            preparation.kind == "target_manifest"
+                && preparation.target_git_commit_sha.as_deref() == Some(desired_commit_sha.as_str())
+                && preparation.status == "failed"
+                && preparation
+                    .next_attempt_at
+                    .map(|next_attempt_at| next_attempt_at > Utc::now())
+                    .unwrap_or(false)
+        })
+        .is_some()
     {
         return Ok(true);
     }
