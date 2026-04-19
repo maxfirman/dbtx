@@ -106,16 +106,45 @@ pub fn router(state: AppState) -> Router {
         .merge(environment_routes())
         .merge(invocation_routes())
         .merge(operator_routes())
+        .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+                let request_id = request
+                    .headers()
+                    .get("x-request-id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-");
                 info_span!(
                     "http_request",
                     method = %request.method(),
                     uri = %request.uri(),
+                    request_id = %request_id,
                 )
             }),
         )
         .with_state(state)
+}
+
+async fn request_id_middleware(
+    mut request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let request_id = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    request.headers_mut().insert(
+        "x-request-id",
+        axum::http::HeaderValue::from_str(&request_id)
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("-")),
+    );
+    let mut response = next.run(request).await;
+    if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
 }
 
 fn system_routes() -> Router<AppState> {

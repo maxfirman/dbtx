@@ -18,6 +18,7 @@ pub(crate) struct DbtChild {
 }
 
 /// Result of waiting for a dbt child process to complete.
+#[must_use]
 pub(crate) struct DbtChildResult {
     pub exit_code: i32,
     pub stderr_lines: Vec<String>,

@@ -800,39 +800,8 @@ impl Db {
         project_ref: &str,
         environment_slug: &str,
     ) -> AppResult<EnvironmentRecord> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                e.id,
-                e.project_id,
-                p.project_id AS project_ref,
-                p.project_name,
-                e.slug,
-                e.profile_name,
-                e.target_name,
-                e.baseline_environment_id,
-                be.slug AS baseline_environment_slug,
-                e.git_branch,
-                e.git_commit_sha,
-                e.use_latest_commit,
-                e.auto_deploy,
-                e.immutable,
-                e.pr_number,
-                e.status,
-                e.adapter_type,
-                e.worker_queue,
-                e.schema_name,
-                e.threads,
-                e.profile_config,
-                e.profile_secrets,
-                e.metadata
-            FROM environments e
-            JOIN projects p ON p.id = e.project_id
-            LEFT JOIN environments be ON be.id = e.baseline_environment_id
-            WHERE e.project_id = $1
-              AND e.slug = $2
-            "#,
-        )
+        let query = environment_query("WHERE e.project_id = $1 AND e.slug = $2");
+        let row = sqlx::query(&query)
         .bind(project_id)
         .bind(environment_slug)
         .fetch_optional(&self.pool)
@@ -844,38 +813,8 @@ impl Db {
     }
 
     pub(crate) async fn get_environment_by_id(&self, environment_id: i64) -> AppResult<EnvironmentRecord> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                e.id,
-                e.project_id,
-                p.project_id AS project_ref,
-                p.project_name,
-                e.slug,
-                e.profile_name,
-                e.target_name,
-                e.baseline_environment_id,
-                be.slug AS baseline_environment_slug,
-                e.git_branch,
-                e.git_commit_sha,
-                e.use_latest_commit,
-                e.auto_deploy,
-                e.immutable,
-                e.pr_number,
-                e.status,
-                e.adapter_type,
-                e.worker_queue,
-                e.schema_name,
-                e.threads,
-                e.profile_config,
-                e.profile_secrets,
-                e.metadata
-            FROM environments e
-            JOIN projects p ON p.id = e.project_id
-            LEFT JOIN environments be ON be.id = e.baseline_environment_id
-            WHERE e.id = $1
-            "#,
-        )
+        let query = environment_query("WHERE e.id = $1");
+        let row = sqlx::query(&query)
         .bind(environment_id)
         .fetch_one(&self.pool)
         .await?;
@@ -887,38 +826,8 @@ impl Db {
         tx: &mut Transaction<'_, Postgres>,
         environment_id: i64,
     ) -> AppResult<EnvironmentRecord> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                e.id,
-                e.project_id,
-                p.project_id AS project_ref,
-                p.project_name,
-                e.slug,
-                e.profile_name,
-                e.target_name,
-                e.baseline_environment_id,
-                be.slug AS baseline_environment_slug,
-                e.git_branch,
-                e.git_commit_sha,
-                e.use_latest_commit,
-                e.auto_deploy,
-                e.immutable,
-                e.pr_number,
-                e.status,
-                e.adapter_type,
-                e.worker_queue,
-                e.schema_name,
-                e.threads,
-                e.profile_config,
-                e.profile_secrets,
-                e.metadata
-            FROM environments e
-            JOIN projects p ON p.id = e.project_id
-            LEFT JOIN environments be ON be.id = e.baseline_environment_id
-            WHERE e.id = $1
-            "#,
-        )
+        let query = environment_query("WHERE e.id = $1");
+        let row = sqlx::query(&query)
         .bind(environment_id)
         .fetch_one(&mut **tx)
         .await?;

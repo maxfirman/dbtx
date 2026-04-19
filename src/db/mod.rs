@@ -37,6 +37,47 @@ pub struct Db {
     pool: PgPool,
 }
 
+/// Standard SELECT columns for environment queries with project join.
+pub(crate) const ENVIRONMENT_SELECT_COLUMNS: &str = r#"
+    e.id,
+    e.project_id,
+    p.project_id AS project_ref,
+    p.project_name,
+    e.slug,
+    e.profile_name,
+    e.target_name,
+    e.baseline_environment_id,
+    be.slug AS baseline_environment_slug,
+    e.git_branch,
+    e.git_commit_sha,
+    e.use_latest_commit,
+    e.auto_deploy,
+    e.immutable,
+    e.pr_number,
+    e.status,
+    e.adapter_type,
+    e.worker_queue,
+    e.schema_name,
+    e.threads,
+    e.profile_config,
+    e.profile_secrets,
+    e.metadata
+"#;
+
+/// Standard FROM/JOIN clause for environment queries.
+pub(crate) const ENVIRONMENT_FROM_CLAUSE: &str = r#"
+    FROM environments e
+    JOIN projects p ON p.id = e.project_id
+    LEFT JOIN environments be ON be.id = e.baseline_environment_id
+"#;
+
+/// Build a full environment SELECT query with a WHERE clause suffix.
+pub(crate) fn environment_query(where_and_suffix: &str) -> String {
+    format!(
+        "SELECT {ENVIRONMENT_SELECT_COLUMNS} {ENVIRONMENT_FROM_CLAUSE} {where_and_suffix}"
+    )
+}
+
 impl Db {
     pub async fn connect(database_url: &str) -> AppResult<Self> {
         let max_connections = std::env::var("DBTX_DB_MAX_CONNECTIONS")

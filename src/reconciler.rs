@@ -121,6 +121,14 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
         };
         planned += 1;
         let invocation_id = Uuid::new_v4();
+        info!(
+            project_id = %environment.project_ref,
+            environment_slug = %environment.slug,
+            plan_id = %plan.plan_id,
+            plan_reason = %plan.reason,
+            resource_count = plan.resource_count,
+            "created reconciliation plan"
+        );
         let prepared = match service.admit_plan(invocation_id, plan.plan_id).await {
             Ok(prepared) => prepared,
             Err(err) if should_ignore_reconcile_error(&err) => continue,
@@ -320,6 +328,13 @@ pub async fn auto_admit_blocked_plans_for_environment(
         let Some(prepared_invocation) = prepared.prepared else {
             continue;
         };
+        info!(
+            plan_id = %plan_id,
+            invocation_id = %invocation_id,
+            project_id = project_id,
+            environment_id = environment_id,
+            "admitting blocked plan"
+        );
         start_prepared_invocation(
             state,
             invocation_id,
