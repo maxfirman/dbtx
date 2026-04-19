@@ -652,6 +652,120 @@ async fn newer_source_state_event_after_satisfaction_creates_a_new_plan() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn periodic_reconciler_creates_and_admits_source_state_plan() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    let source_event = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "new upstream data" }),
+            },
+        )
+        .await
+        .expect("create source state event")
+        .event;
+
+    let created_plan =
+        wait_for_plan_reason(&client, &project_id, "remote", "source_state_change").await;
+    assert_eq!(created_plan.source_event_id, Some(source_event.id));
+    let admitted = wait_for_plan_status(&client, created_plan.plan_id, "admitted").await;
+    assert!(admitted.admitted_invocation_id.is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn periodic_reconciler_creates_and_admits_code_change_plan() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(desired_commit),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        baseline_commit,
+        &[
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "remote",
+        desired_commit,
+        &[
+            ("model.pkg.orders", "model", Some("new-orders")),
+            ("model.pkg.customers", "model", Some("same-customers")),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+
+    let created_plan = wait_for_plan_reason(&client, &project_id, "remote", "code_change").await;
+    let plan = wait_for_plan_status(&client, created_plan.plan_id, "admitted").await;
+    assert!(plan.admitted_invocation_id.is_some());
+    assert_eq!(
+        plan.selected_resources,
+        vec![
+            "model.pkg.customers".to_string(),
+            "model.pkg.orders".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -3482,6 +3596,7 @@ impl TestDaemon {
         let reconciler_child = Command::new(env!("CARGO_BIN_EXE_dbtx-reconciler"))
             .env("DBTX_DATABASE_URL", database_url)
             .env("DBTX_SECRET_KEY", "test-secret-key")
+            .env("DBTX_RECONCILE_INTERVAL_MS", "200")
             .env("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS", "200")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -3550,6 +3665,32 @@ async fn wait_for_plan_status(
             Instant::now() < deadline,
             "timed out waiting for plan {plan_id} to reach status {expected_status}, last status was {}",
             plan.plan.status
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_plan_reason(
+    client: &DaemonClient,
+    project_id: &str,
+    slug: &str,
+    expected_reason: &str,
+) -> dbtx::db::EnvironmentRunPlanRecord {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let plans = client
+            .environment_plan_list(project_id, slug)
+            .await
+            .expect("list plans while waiting")
+            .plans;
+        if let Some(plan) = plans.into_iter().find(|plan| plan.reason == expected_reason)
+            && matches!(plan.status.as_str(), "planned" | "blocked" | "admitted" | "completed")
+        {
+            return plan;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for plan with reason {expected_reason} in {project_id}/{slug}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

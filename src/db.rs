@@ -1318,6 +1318,49 @@ impl Db {
         Ok(rows.iter().map(environment_record_from_row).collect())
     }
 
+    pub(crate) async fn list_auto_deploy_remote_environments(
+        &self,
+    ) -> AppResult<Vec<EnvironmentRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                e.id,
+                e.project_id,
+                p.project_id AS project_ref,
+                p.project_name,
+                e.slug,
+                e.profile_name,
+                e.target_name,
+                e.baseline_environment_id,
+                be.slug AS baseline_environment_slug,
+                e.git_branch,
+                e.git_commit_sha,
+                e.use_latest_commit,
+                e.auto_deploy,
+                e.immutable,
+                e.pr_number,
+                e.status,
+                e.adapter_type,
+                e.worker_queue,
+                e.schema_name,
+                e.threads,
+                e.profile_config,
+                e.profile_secrets,
+                e.metadata
+            FROM environments e
+            JOIN projects p ON p.id = e.project_id
+            LEFT JOIN environments be ON be.id = e.baseline_environment_id
+            WHERE p.mode = 'remote'
+              AND e.auto_deploy = TRUE
+              AND e.status = 'active'
+            ORDER BY p.project_id ASC, e.slug ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(environment_record_from_row).collect())
+    }
+
     pub async fn list_environment_versions(
         &self,
         project: &str,
