@@ -794,6 +794,29 @@ async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_befo
 
     wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", desired_commit).await;
 
+    let row = sqlx::query(
+        r#"
+        SELECT status, target_git_commit_sha, invocation_id
+        FROM environment_reconcile_preparations
+        WHERE project_id = (SELECT id FROM projects WHERE project_id = $1)
+          AND environment_id = (
+              SELECT e.id
+              FROM environments e
+              JOIN projects p ON p.id = e.project_id
+              WHERE p.project_id = $1 AND e.slug = $2
+          )
+          AND kind = 'target_manifest'
+        "#,
+    )
+    .bind(&project_id)
+    .bind("remote")
+    .fetch_one(db.pool())
+    .await
+    .expect("load reconcile preparation record");
+    assert_eq!(row.get::<String, _>("status"), "running");
+    assert_eq!(row.get::<Option<String>, _>("target_git_commit_sha").as_deref(), Some(desired_commit));
+    assert!(row.get::<Option<Uuid>, _>("invocation_id").is_some());
+
     let code_change_plan_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)

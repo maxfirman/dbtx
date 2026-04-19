@@ -151,6 +151,20 @@ pub struct EnvironmentActualStateRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentReconcilePreparationRecord {
+    pub project_id: i64,
+    pub environment_id: i64,
+    pub kind: String,
+    pub target_git_commit_sha: Option<String>,
+    pub status: String,
+    pub invocation_id: Option<Uuid>,
+    pub error: Option<String>,
+    pub started_at: Option<chrono::DateTime<Utc>>,
+    pub completed_at: Option<chrono::DateTime<Utc>>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentRunPlanRecord {
     pub plan_id: Uuid,
     pub project_id: i64,
@@ -1541,6 +1555,48 @@ impl Db {
             }))
     }
 
+    pub(crate) async fn get_environment_reconcile_preparation(
+        &self,
+        project: &str,
+        environment_slug: &str,
+    ) -> AppResult<Option<EnvironmentReconcilePreparationRecord>> {
+        let environment = self.get_environment(project, environment_slug).await?;
+        self.get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
+            .await
+    }
+
+    pub(crate) async fn get_environment_reconcile_preparation_by_scope(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+    ) -> AppResult<Option<EnvironmentReconcilePreparationRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                project_id,
+                environment_id,
+                kind,
+                target_git_commit_sha,
+                status,
+                invocation_id,
+                error,
+                started_at,
+                completed_at,
+                updated_at
+            FROM environment_reconcile_preparations
+            WHERE project_id = $1
+              AND environment_id = $2
+            ORDER BY updated_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(environment_reconcile_preparation_from_row))
+    }
+
     pub(crate) async fn create_source_state_event(
         &self,
         input: SourceStateEventCreateInput,
@@ -2124,6 +2180,47 @@ impl Db {
         .fetch_one(&self.pool)
         .await?;
         Ok(exists)
+    }
+
+    pub(crate) async fn mark_manifest_prepare_running(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        target_git_commit_sha: &str,
+        invocation_id: Uuid,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO environment_reconcile_preparations (
+                project_id,
+                environment_id,
+                kind,
+                target_git_commit_sha,
+                status,
+                invocation_id,
+                error,
+                started_at,
+                completed_at,
+                updated_at
+            )
+            VALUES ($1, $2, 'target_manifest', $3, 'running', $4, NULL, NOW(), NULL, NOW())
+            ON CONFLICT (project_id, environment_id, kind) DO UPDATE SET
+                target_git_commit_sha = EXCLUDED.target_git_commit_sha,
+                status = EXCLUDED.status,
+                invocation_id = EXCLUDED.invocation_id,
+                error = NULL,
+                started_at = NOW(),
+                completed_at = NULL,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(target_git_commit_sha)
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn load_planning_manifest_nodes(
@@ -3288,6 +3385,25 @@ impl Db {
             .await?;
         }
 
+        if persistence.command == "manifest_prepare" {
+            self.apply_manifest_prepare_completion_in_tx(
+                tx,
+                persistence.project_id.ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "manifest prepare invocation missing project scope",
+                    ))
+                })?,
+                persistence.environment_id.ok_or_else(|| {
+                    AppError::Io(std::io::Error::other(
+                        "manifest prepare invocation missing environment scope",
+                    ))
+                })?,
+                invocation_id,
+                completion,
+            )
+            .await?;
+        }
+
         self.close_invocation_selected_resources_in_tx(
             tx,
             invocation_id,
@@ -3308,6 +3424,42 @@ impl Db {
             )
             .await?;
         }
+        Ok(())
+    }
+
+    async fn apply_manifest_prepare_completion_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        project_id: i64,
+        environment_id: i64,
+        invocation_id: Uuid,
+        completion: &crate::execution::ExecutionCompletion,
+    ) -> AppResult<()> {
+        let status = match completion.status {
+            InvocationLifecycleStatus::Succeeded => "succeeded",
+            InvocationLifecycleStatus::Failed | InvocationLifecycleStatus::Canceled => "failed",
+            InvocationLifecycleStatus::Running => "failed",
+        };
+        sqlx::query(
+            r#"
+            UPDATE environment_reconcile_preparations
+            SET status = $4,
+                error = $5,
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE project_id = $1
+              AND environment_id = $2
+              AND kind = 'target_manifest'
+              AND invocation_id = $3
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(invocation_id)
+        .bind(status)
+        .bind(completion.error.as_deref())
+        .execute(&mut **tx)
+        .await?;
         Ok(())
     }
 
@@ -5155,6 +5307,23 @@ fn environment_actual_state_from_row(row: &sqlx::postgres::PgRow) -> Environment
         last_successful_at: row.get("last_successful_at"),
         last_admitted_plan_id: row.get("last_admitted_plan_id"),
         last_completed_plan_id: row.get("last_completed_plan_id"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn environment_reconcile_preparation_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> EnvironmentReconcilePreparationRecord {
+    EnvironmentReconcilePreparationRecord {
+        project_id: row.get("project_id"),
+        environment_id: row.get("environment_id"),
+        kind: row.get("kind"),
+        target_git_commit_sha: row.get("target_git_commit_sha"),
+        status: row.get("status"),
+        invocation_id: row.get("invocation_id"),
+        error: row.get("error"),
+        started_at: row.get("started_at"),
+        completed_at: row.get("completed_at"),
         updated_at: row.get("updated_at"),
     }
 }

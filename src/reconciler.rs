@@ -161,6 +161,15 @@ async fn ensure_target_manifest_for_reconcile_async(
         prepared,
     )
     .await?;
+    state
+        .db()
+        .mark_manifest_prepare_running(
+            environment.project_id,
+            environment.id,
+            &desired_commit_sha,
+            invocation_id,
+        )
+        .await?;
     Ok(true)
 }
 

@@ -53,6 +53,11 @@ pub struct EnvironmentActualStateResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnvironmentReconcilePreparationResponse {
+    pub preparation: Option<crate::db::EnvironmentReconcilePreparationRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentsResponse {
     pub environments: Vec<EnvironmentRecord>,
 }

@@ -1,8 +1,9 @@
 use crate::api::{
     ApiErrorResponse, EnvironmentActiveResourcesApiRequest, EnvironmentActiveResourcesResponse,
     EnvironmentActualStateResponse, EnvironmentDraftResponse, EnvironmentDraftStartResponse,
-    EnvironmentDraftUpdateApiRequest, EnvironmentReconcileApiRequest, EnvironmentReleaseApiRequest,
-    EnvironmentResponse, EnvironmentRollbackApiRequest, EnvironmentRunPlanResponse,
+    EnvironmentDraftUpdateApiRequest, EnvironmentReconcileApiRequest,
+    EnvironmentReconcilePreparationResponse, EnvironmentReleaseApiRequest, EnvironmentResponse,
+    EnvironmentRollbackApiRequest, EnvironmentRunPlanResponse,
     EnvironmentRunPlansResponse, EnvironmentVersionsResponse, EnvironmentsResponse, HealthResponse,
     InvocationCancelApiRequest, InvocationCancelStateApi,
     InvocationClaimNextApiRequest, InvocationClaimResponse, InvocationCleanupApiRequest,
@@ -174,6 +175,10 @@ fn environment_routes() -> Router<AppState> {
         .route(
             "/v1/projects/{project_id}/environments/{slug}/actual-state",
             get(environment_actual_state),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{slug}/reconcile-preparation",
+            get(environment_reconcile_preparation),
         )
         .route(
             "/v1/projects/{project_id}/environments/{slug}/release",
@@ -956,6 +961,31 @@ async fn environment_actual_state(
     let service = EnvironmentService::new(&state.db);
     let actual_state = service.actual_state(project_id, slug).await?;
     Ok(Json(EnvironmentActualStateResponse { actual_state }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/environments/{slug}/reconcile-preparation",
+    tag = "environments",
+    params(
+        ("project_id" = String, Path, description = "Project identifier"),
+        ("slug" = String, Path, description = "Environment slug")
+    ),
+    responses(
+        (status = 200, description = "Environment reconciliation preparation state", body = EnvironmentReconcilePreparationResponse),
+        (status = 404, description = "Environment not found", body = ApiErrorResponse),
+        (status = 500, description = "Server error", body = ApiErrorResponse)
+    )
+)]
+async fn environment_reconcile_preparation(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Json<EnvironmentReconcilePreparationResponse>, ApiError> {
+    let preparation = state
+        .db()
+        .get_environment_reconcile_preparation(&project_id, &slug)
+        .await?;
+    Ok(Json(EnvironmentReconcilePreparationResponse { preparation }))
 }
 
 #[utoipa::path(

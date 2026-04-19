@@ -5,7 +5,8 @@ use crate::api::{
 };
 use crate::db::{
     EnvironmentActualStateRecord, EnvironmentActiveResourceRecord, EnvironmentRecord,
-    EnvironmentRunPlanRecord, EnvironmentVersionRecord, InvocationListFilters, ProjectRecord,
+    EnvironmentReconcilePreparationRecord, EnvironmentRunPlanRecord, EnvironmentVersionRecord,
+    InvocationListFilters, ProjectRecord,
 };
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
@@ -1430,6 +1431,9 @@ async fn load_environment_panel(
         })?;
     let history = db.list_environment_versions(&project.project_id, slug).await?;
     let actual_state = db.get_environment_actual_state(&project.project_id, slug).await?;
+    let preparation = db
+        .get_environment_reconcile_preparation(&project.project_id, slug)
+        .await?;
     let active_resources = db
         .list_active_environment_resources(&project.project_id, slug, None)
         .await?;
@@ -1439,6 +1443,9 @@ async fn load_environment_panel(
         project: project_summary_view(&project),
         environment: environment_detail_view(&environment),
         actual_state: environment_actual_state_view(&actual_state),
+        preparation: preparation
+            .as_ref()
+            .map(environment_reconcile_preparation_view),
         active_resources: active_resources
             .iter()
             .map(environment_active_resource_view)
@@ -1841,6 +1848,20 @@ struct EnvironmentActualStateView {
 }
 
 #[derive(Clone)]
+struct EnvironmentReconcilePreparationView {
+    kind: String,
+    status: String,
+    status_class: &'static str,
+    target_git_commit_sha: String,
+    invocation_id: String,
+    invocation_url: String,
+    error: String,
+    started_at: String,
+    completed_at: String,
+    updated_at: String,
+}
+
+#[derive(Clone)]
 struct EnvironmentRunPlanView {
     plan_id: String,
     status: String,
@@ -2186,6 +2207,40 @@ fn environment_actual_state_view(
     }
 }
 
+fn environment_reconcile_preparation_view(
+    preparation: &EnvironmentReconcilePreparationRecord,
+) -> EnvironmentReconcilePreparationView {
+    let status_class = match preparation.status.as_str() {
+        "running" => "bg-sky-100 text-sky-800",
+        "succeeded" => "bg-emerald-100 text-emerald-800",
+        "failed" => "bg-rose-100 text-rose-800",
+        _ => "bg-slate-100 text-slate-700",
+    };
+    let invocation_id = preparation
+        .invocation_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "—".to_string());
+    let invocation_url = preparation
+        .invocation_id
+        .map(|id| format!("/ui/invocations/{id}"))
+        .unwrap_or_default();
+    EnvironmentReconcilePreparationView {
+        kind: preparation.kind.replace('_', " "),
+        status: preparation.status.clone(),
+        status_class,
+        target_git_commit_sha: preparation
+            .target_git_commit_sha
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
+        invocation_id,
+        invocation_url,
+        error: preparation.error.clone().unwrap_or_default(),
+        started_at: fmt_optional_ts(preparation.started_at),
+        completed_at: fmt_optional_ts(preparation.completed_at),
+        updated_at: fmt_ts(preparation.updated_at),
+    }
+}
+
 fn environment_run_plan_view(
     project_id: &str,
     slug: &str,
@@ -2450,6 +2505,7 @@ struct EnvironmentPanelTemplate {
     project: ProjectSummaryView,
     environment: EnvironmentDetailView,
     actual_state: EnvironmentActualStateView,
+    preparation: Option<EnvironmentReconcilePreparationView>,
     active_resources: Vec<EnvironmentActiveResourceView>,
     plans: Vec<EnvironmentRunPlanView>,
     versions: Vec<EnvironmentVersionView>,
@@ -3006,6 +3062,18 @@ mod tests {
                 last_completed_plan_id: "plan-b".to_string(),
                 updated_at: "2026-01-01 00:00:00".to_string(),
             },
+            preparation: Some(EnvironmentReconcilePreparationView {
+                kind: "target manifest".to_string(),
+                status: "running".to_string(),
+                status_class: "bg-sky-100 text-sky-800",
+                target_git_commit_sha: "bbbbbbbb".to_string(),
+                invocation_id: Uuid::nil().to_string(),
+                invocation_url: format!("/ui/invocations/{}", Uuid::nil()),
+                error: String::new(),
+                started_at: "2026-01-01 00:00:00".to_string(),
+                completed_at: "—".to_string(),
+                updated_at: "2026-01-01 00:00:00".to_string(),
+            }),
             active_resources: vec![EnvironmentActiveResourceView {
                 invocation_id: Uuid::nil().to_string(),
                 invocation_url: format!("/ui/invocations/{}", Uuid::nil()),
