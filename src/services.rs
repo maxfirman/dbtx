@@ -399,6 +399,126 @@ impl<'a> EnvironmentService<'a> {
         }
     }
 
+    async fn replan_pending_plan(
+        &self,
+        plan: EnvironmentRunPlanRecord,
+    ) -> AppResult<EnvironmentRunPlanRecord> {
+        let Some(baseline_run_id) = plan.baseline_run_id else {
+            return Ok(plan);
+        };
+
+        match plan.reason.as_str() {
+            "code_change" => {
+                let Some(target_git_commit_sha) = plan.target_git_commit_sha.clone() else {
+                    return Ok(plan);
+                };
+                let Some(target_manifest_run_id) = self
+                    .db
+                    .latest_manifest_run_id_for_commit(
+                        plan.project_id,
+                        plan.environment_id,
+                        &target_git_commit_sha,
+                    )
+                    .await?
+                else {
+                    return Ok(plan);
+                };
+                let target_nodes = self
+                    .db
+                    .load_planning_manifest_nodes(target_manifest_run_id)
+                    .await?;
+                let baseline_nodes = self.db.load_planning_manifest_nodes(baseline_run_id).await?;
+                let target_edges = self.db.load_manifest_edges(target_manifest_run_id).await?;
+                let current_nodes = self
+                    .db
+                    .load_current_node_state_for_planning(plan.project_id, plan.environment_id)
+                    .await?;
+                let selected_resources = plan_code_change_selected_resources(
+                    &baseline_nodes,
+                    &target_nodes,
+                    &target_edges,
+                    &current_nodes,
+                );
+                let selection_spec = if selected_resources.is_empty() {
+                    Some("state_modified_live".to_string())
+                } else {
+                    Some("state_modified_live_plus".to_string())
+                };
+                let mut metadata = plan.metadata.clone();
+                metadata["last_replanned_at"] = Value::String(chrono::Utc::now().to_rfc3339());
+                metadata["replanning_mode"] = Value::String("live_state_diff".to_string());
+                if selected_resources.is_empty() {
+                    return self
+                        .db
+                        .mark_environment_run_plan_completed_noop(
+                            plan.plan_id,
+                            "plan already reconciled by prior run progress",
+                            metadata,
+                        )
+                        .await;
+                }
+                if selected_resources != plan.selected_resources
+                    || selection_spec.as_deref() != plan.selection_spec.as_deref()
+                {
+                    return self
+                        .db
+                        .update_environment_run_plan_selection(
+                            plan.plan_id,
+                            selection_spec.as_deref(),
+                            &selected_resources,
+                            metadata,
+                        )
+                        .await;
+                }
+                self.db
+                    .update_environment_run_plan_selection(
+                        plan.plan_id,
+                        plan.selection_spec.as_deref(),
+                        &plan.selected_resources,
+                        metadata,
+                    )
+                    .await
+            }
+            "source_state_change" => {
+                let source_event_ids = plan_source_event_ids(plan.source_event_id, &plan.metadata);
+                if source_event_ids.is_empty() {
+                    return Ok(plan);
+                }
+                let mut metadata = plan.metadata.clone();
+                metadata["last_replanned_at"] = Value::String(chrono::Utc::now().to_rfc3339());
+                metadata["replanning_mode"] =
+                    Value::String("source_state_satisfaction".to_string());
+                let satisfied = self
+                    .db
+                    .are_source_state_events_satisfied(
+                        plan.project_id,
+                        plan.environment_id,
+                        &source_event_ids,
+                    )
+                    .await?;
+                if satisfied {
+                    return self
+                        .db
+                        .mark_environment_run_plan_completed_noop(
+                            plan.plan_id,
+                            "source-triggered plan already satisfied by a successful plan",
+                            metadata,
+                        )
+                        .await;
+                }
+                self.db
+                    .update_environment_run_plan_selection(
+                        plan.plan_id,
+                        plan.selection_spec.as_deref(),
+                        &plan.selected_resources,
+                        metadata,
+                    )
+                    .await
+            }
+            _ => Ok(plan),
+        }
+    }
+
     pub async fn create_draft(&self, project: String) -> AppResult<EnvironmentDraftRecord> {
         self.db.require_current_schema().await?;
         let project = self.db.get_project_by_project_id(&project).await?;
@@ -687,11 +807,7 @@ impl<'a> EnvironmentService<'a> {
 
             let source_events = self
                 .db
-                .list_source_state_events_since(
-                    environment.project_id,
-                    environment.id,
-                    actual_state.last_successful_at,
-                )
+                .list_unsatisfied_source_state_events(environment.project_id, environment.id)
                 .await?;
             let code_drift = environment.git_commit_sha != actual_state.last_successful_commit_sha;
 
@@ -776,6 +892,8 @@ impl<'a> EnvironmentService<'a> {
                         .iter()
                         .map(|event| event.source_key.clone())
                         .collect();
+                    let source_event_ids: Vec<i64> =
+                        source_events.iter().map(|event| event.id).collect();
                     (
                         "source_state_change",
                         Some("source_downstream".to_string()),
@@ -785,6 +903,7 @@ impl<'a> EnvironmentService<'a> {
                         source_events.first().map(|event| event.id),
                         serde_json::json!({
                             "source_keys": source_keys,
+                            "source_event_ids": source_event_ids,
                             "source_event_count": source_events.len(),
                         }),
                     )
@@ -857,6 +976,14 @@ impl<'a> EnvironmentService<'a> {
                     "plan {plan_id} is not admissible from status {}",
                     plan.status
                 ))));
+            }
+            let plan = self.replan_pending_plan(plan).await?;
+            if plan.status == "completed" {
+                return Ok(EnvironmentPlanAdmitPrepared {
+                    plan,
+                    invocation_id: None,
+                    prepared: None,
+                });
             }
             let blockers = self.db.list_active_conflicting_invocations(plan_id).await?;
             if let Some(blocking_invocation_id) = blockers.first().copied() {
@@ -1927,6 +2054,22 @@ fn is_build_plannable_resource_type(resource_type: Option<&str>) -> bool {
         resource_type,
         Some("model" | "seed" | "snapshot" | "test" | "unit_test")
     )
+}
+
+fn plan_source_event_ids(source_event_id: Option<i64>, metadata: &Value) -> Vec<i64> {
+    let mut event_ids = metadata
+        .get("source_event_ids")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_i64())
+        .collect::<Vec<_>>();
+    if event_ids.is_empty() && let Some(source_event_id) = source_event_id {
+        event_ids.push(source_event_id);
+    }
+    event_ids.sort_unstable();
+    event_ids.dedup();
+    event_ids
 }
 
 fn infer_local_identity_hash(current_dir: &Path, project_name: &str) -> AppResult<String> {

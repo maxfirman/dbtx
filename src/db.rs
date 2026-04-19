@@ -1849,6 +1849,96 @@ impl Db {
         Ok(environment_run_plan_from_row(&row))
     }
 
+    pub(crate) async fn update_environment_run_plan_selection(
+        &self,
+        plan_id: Uuid,
+        selection_spec: Option<&str>,
+        selected_resources: &[String],
+        metadata: Value,
+    ) -> AppResult<EnvironmentRunPlanRecord> {
+        let row = sqlx::query(
+            r#"
+            UPDATE environment_run_plans
+            SET selection_spec = $2,
+                selected_resources = $3,
+                resource_count = $4,
+                metadata = $5,
+                last_checked_at = NOW(),
+                updated_at = NOW()
+            WHERE plan_id = $1
+            RETURNING
+                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
+                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
+                updated_at, metadata
+            "#,
+        )
+        .bind(plan_id)
+        .bind(selection_spec)
+        .bind(sqlx::types::Json(selected_resources))
+        .bind(selected_resources.len() as i32)
+        .bind(sqlx::types::Json(metadata))
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(environment_run_plan_from_row(&row))
+    }
+
+    pub(crate) async fn mark_environment_run_plan_completed_noop(
+        &self,
+        plan_id: Uuid,
+        error: &str,
+        metadata: Value,
+    ) -> AppResult<EnvironmentRunPlanRecord> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            UPDATE environment_run_plans
+            SET status = 'completed',
+                selected_resources = '[]'::jsonb,
+                resource_count = 0,
+                blocked_by_invocation_id = NULL,
+                error = $2,
+                metadata = $3,
+                last_checked_at = NOW(),
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE plan_id = $1
+            RETURNING
+                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
+                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
+                updated_at, metadata
+            "#,
+        )
+        .bind(plan_id)
+        .bind(error)
+        .bind(sqlx::types::Json(metadata))
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO environment_actual_state (
+                project_id, environment_id, last_completed_plan_id, updated_at
+            )
+            SELECT project_id, environment_id, $1, NOW()
+            FROM environment_run_plans
+            WHERE plan_id = $1
+            ON CONFLICT (project_id, environment_id) DO UPDATE SET
+                last_completed_plan_id = EXCLUDED.last_completed_plan_id,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(plan_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(environment_run_plan_from_row(&row))
+    }
+
     pub(crate) async fn list_active_conflicting_invocations(
         &self,
         plan_id: Uuid,
@@ -2019,28 +2109,75 @@ impl Db {
             .collect())
     }
 
-    pub(crate) async fn list_source_state_events_since(
+    pub(crate) async fn list_unsatisfied_source_state_events(
         &self,
         project_id: i64,
         environment_id: i64,
-        observed_after: Option<chrono::DateTime<Utc>>,
     ) -> AppResult<Vec<SourceStateEventRecord>> {
         let rows = sqlx::query(
             r#"
+            WITH latest_unsatisfied AS (
+                SELECT DISTINCT ON (e.source_key)
+                    e.id,
+                    e.project_id,
+                    e.environment_id,
+                    e.source_key,
+                    e.provider,
+                    e.state_version,
+                    e.payload,
+                    e.observed_at,
+                    e.created_at
+                FROM source_state_events e
+                LEFT JOIN environment_source_state_status s
+                  ON s.project_id = e.project_id
+                 AND s.environment_id = e.environment_id
+                 AND s.source_key = e.source_key
+                WHERE e.project_id = $1
+                  AND e.environment_id = $2
+                  AND (s.latest_satisfied_event_id IS NULL OR e.id > s.latest_satisfied_event_id)
+                ORDER BY e.source_key ASC, e.id DESC
+            )
             SELECT id, project_id, environment_id, source_key, provider, state_version, payload, observed_at, created_at
-            FROM source_state_events
-            WHERE project_id = $1
-              AND environment_id = $2
-              AND ($3::TIMESTAMPTZ IS NULL OR observed_at > $3)
+            FROM latest_unsatisfied
             ORDER BY observed_at ASC, id ASC
             "#,
         )
         .bind(project_id)
         .bind(environment_id)
-        .bind(observed_after)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(source_state_event_from_row).collect())
+    }
+
+    pub(crate) async fn are_source_state_events_satisfied(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        source_event_ids: &[i64],
+    ) -> AppResult<bool> {
+        if source_event_ids.is_empty() {
+            return Ok(true);
+        }
+        let unsatisfied = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM source_state_events e
+            LEFT JOIN environment_source_state_status s
+              ON s.project_id = e.project_id
+             AND s.environment_id = e.environment_id
+             AND s.source_key = e.source_key
+            WHERE e.project_id = $1
+              AND e.environment_id = $2
+              AND e.id = ANY($3::BIGINT[])
+              AND (s.latest_satisfied_event_id IS NULL OR e.id > s.latest_satisfied_event_id)
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(source_event_ids)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(unsatisfied == 0)
     }
 
     pub(crate) async fn list_downstream_manifest_node_unique_ids(
@@ -4186,6 +4323,41 @@ impl Db {
         .bind(status)
         .execute(&mut **tx)
         .await?;
+        if matches!(invocation_status, InvocationLifecycleStatus::Succeeded) {
+            let plan_row = sqlx::query(
+                r#"
+                SELECT project_id, environment_id, reason, source_event_id, metadata
+                FROM environment_run_plans
+                WHERE plan_id = $1
+                "#,
+            )
+            .bind(plan_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            if let Some(plan_row) = plan_row {
+                let reason: String = plan_row.get("reason");
+                if reason == "source_state_change" {
+                    let project_id: i64 = plan_row.get("project_id");
+                    let environment_id: i64 = plan_row.get("environment_id");
+                    let source_event_id: Option<i64> = plan_row.get("source_event_id");
+                    let metadata = plan_row
+                        .try_get::<sqlx::types::Json<Value>, _>("metadata")
+                        .map(|json| json.0)
+                        .unwrap_or(Value::Null);
+                    let source_event_ids = plan_source_event_ids(source_event_id, &metadata);
+                    for source_event_id in source_event_ids {
+                        self.mark_source_state_event_satisfied_in_tx(
+                            tx,
+                            project_id,
+                            environment_id,
+                            source_event_id,
+                            plan_id,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
         sqlx::query(
             r#"
             INSERT INTO environment_actual_state (
@@ -4200,6 +4372,62 @@ impl Db {
             "#,
         )
         .bind(plan_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_source_state_event_satisfied_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        project_id: i64,
+        environment_id: i64,
+        source_event_id: i64,
+        plan_id: Uuid,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO environment_source_state_status (
+                project_id,
+                environment_id,
+                source_key,
+                latest_satisfied_event_id,
+                latest_satisfied_state_version,
+                latest_satisfied_observed_at,
+                last_satisfied_run_id,
+                last_satisfied_plan_id,
+                updated_at
+            )
+            SELECT
+                e.project_id,
+                e.environment_id,
+                e.source_key,
+                e.id,
+                e.state_version,
+                e.observed_at,
+                inv.run_id,
+                $2,
+                NOW()
+            FROM source_state_events e
+            JOIN environment_run_plans erp ON erp.plan_id = $2
+            LEFT JOIN invocations inv ON inv.invocation_id = erp.admitted_invocation_id
+            WHERE e.id = $1
+              AND e.project_id = $3
+              AND e.environment_id = $4
+            ON CONFLICT (project_id, environment_id, source_key) DO UPDATE SET
+                latest_satisfied_event_id = EXCLUDED.latest_satisfied_event_id,
+                latest_satisfied_state_version = EXCLUDED.latest_satisfied_state_version,
+                latest_satisfied_observed_at = EXCLUDED.latest_satisfied_observed_at,
+                last_satisfied_run_id = EXCLUDED.last_satisfied_run_id,
+                last_satisfied_plan_id = EXCLUDED.last_satisfied_plan_id,
+                updated_at = NOW()
+            WHERE environment_source_state_status.latest_satisfied_event_id < EXCLUDED.latest_satisfied_event_id
+            "#,
+        )
+        .bind(source_event_id)
+        .bind(plan_id)
+        .bind(project_id)
+        .bind(environment_id)
         .execute(&mut **tx)
         .await?;
         Ok(())
@@ -4884,6 +5112,22 @@ fn source_state_event_from_row(row: &sqlx::postgres::PgRow) -> SourceStateEventR
         observed_at: row.get("observed_at"),
         created_at: row.get("created_at"),
     }
+}
+
+fn plan_source_event_ids(source_event_id: Option<i64>, metadata: &Value) -> Vec<i64> {
+    let mut event_ids = metadata
+        .get("source_event_ids")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_i64())
+        .collect::<Vec<_>>();
+    if event_ids.is_empty() && let Some(source_event_id) = source_event_id {
+        event_ids.push(source_event_id);
+    }
+    event_ids.sort_unstable();
+    event_ids.dedup();
+    event_ids
 }
 
 fn active_environment_resource_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentActiveResourceRecord {
