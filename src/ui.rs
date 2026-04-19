@@ -1859,6 +1859,8 @@ struct EnvironmentReconcilePreparationView {
     kind: String,
     status: String,
     status_class: &'static str,
+    input_summary: String,
+    input_fingerprint: String,
     target_git_commit_sha: String,
     invocation_id: String,
     invocation_url: String,
@@ -1879,9 +1881,11 @@ struct EnvironmentReconciliationSummaryView {
     latest_plan_status: String,
     latest_plan_status_class: &'static str,
     latest_plan_reason: String,
+    latest_plan_input_summary: String,
     latest_plan_retry_at: String,
     preparation_status: String,
     preparation_status_class: &'static str,
+    preparation_input_summary: String,
     preparation_retry_at: String,
     active_resource_count: usize,
     blocked_plan_count: usize,
@@ -1893,6 +1897,8 @@ struct EnvironmentRunPlanView {
     status: String,
     status_class: &'static str,
     reason: String,
+    input_summary: String,
+    input_fingerprint: String,
     target_git_branch: String,
     target_git_commit_sha: String,
     resource_count: i32,
@@ -2256,6 +2262,11 @@ fn environment_reconcile_preparation_view(
         kind: preparation.kind.replace('_', " "),
         status: preparation.status.clone(),
         status_class,
+        input_summary: reconcile_preparation_input_summary(preparation),
+        input_fingerprint: preparation
+            .input_fingerprint
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
         target_git_commit_sha: preparation
             .target_git_commit_sha
             .clone()
@@ -2318,6 +2329,9 @@ fn environment_reconciliation_summary_view(
                 "—".to_string(),
             )
         });
+    let latest_plan_input_summary = latest_plan
+        .map(reconcile_plan_input_summary)
+        .unwrap_or_else(|| "—".to_string());
     let latest_plan_retry_at = latest_plan
         .and_then(|plan| plan.next_attempt_at)
         .map(fmt_ts)
@@ -2335,6 +2349,9 @@ fn environment_reconciliation_summary_view(
             )
         })
         .unwrap_or_else(|| ("idle".to_string(), "bg-slate-100 text-slate-700"));
+    let preparation_input_summary = preparation
+        .map(reconcile_preparation_input_summary)
+        .unwrap_or_else(|| "—".to_string());
     let preparation_retry_at = preparation
         .and_then(|preparation| preparation.next_attempt_at)
         .map(fmt_ts)
@@ -2348,9 +2365,11 @@ fn environment_reconciliation_summary_view(
         latest_plan_status,
         latest_plan_status_class,
         latest_plan_reason,
+        latest_plan_input_summary,
         latest_plan_retry_at,
         preparation_status,
         preparation_status_class,
+        preparation_input_summary,
         preparation_retry_at,
         active_resource_count,
         blocked_plan_count,
@@ -2375,6 +2394,11 @@ fn environment_run_plan_view(
         status: plan.status.clone(),
         status_class,
         reason: plan.reason.replace('_', " "),
+        input_summary: reconcile_plan_input_summary(plan),
+        input_fingerprint: plan
+            .input_fingerprint
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
         target_git_branch: plan
             .target_git_branch
             .clone()
@@ -2413,6 +2437,67 @@ fn environment_run_plan_view(
         ),
         can_admit: matches!(plan.status.as_str(), "planned" | "blocked"),
     }
+}
+
+fn reconcile_preparation_input_summary(
+    preparation: &EnvironmentReconcilePreparationRecord,
+) -> String {
+    match preparation.kind.as_str() {
+        "target_manifest" => preparation
+            .target_git_commit_sha
+            .as_deref()
+            .map(|sha| format!("Prepare target manifest for {}", short_commit_sha(sha)))
+            .unwrap_or_else(|| "Prepare target manifest".to_string()),
+        _ => preparation.kind.replace('_', " "),
+    }
+}
+
+fn reconcile_plan_input_summary(plan: &EnvironmentRunPlanRecord) -> String {
+    match plan.reason.as_str() {
+        "code_change" => {
+            let target = plan
+                .target_git_commit_sha
+                .as_deref()
+                .map(short_commit_sha)
+                .unwrap_or("—");
+            let baseline = plan
+                .baseline_run_id
+                .map(|run_id| run_id.to_string())
+                .map(|run_id| run_id.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "—".to_string());
+            format!("Code drift to {target} from baseline run {baseline}")
+        }
+        "source_state_change" => {
+            let source_keys = plan
+                .metadata
+                .get("source_keys")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if source_keys.is_empty() {
+                "Unsatisfied source state change".to_string()
+            } else if source_keys.len() == 1 {
+                format!("Source update from {}", source_keys[0])
+            } else {
+                format!(
+                    "Source updates from {} and {} more",
+                    source_keys[0],
+                    source_keys.len() - 1
+                )
+            }
+        }
+        other => other.replace('_', " "),
+    }
+}
+
+fn short_commit_sha(sha: &str) -> &str {
+    let end = sha.len().min(8);
+    &sha[..end]
 }
 
 fn environment_active_resource_view(
@@ -3178,9 +3263,11 @@ mod tests {
                 latest_plan_status: "blocked".to_string(),
                 latest_plan_status_class: "bg-orange-100 text-orange-800",
                 latest_plan_reason: "source_state_change".to_string(),
+                latest_plan_input_summary: "Source update from source.pkg.raw_orders".to_string(),
                 latest_plan_retry_at: "2026-01-01 00:05:00".to_string(),
                 preparation_status: "running".to_string(),
                 preparation_status_class: "bg-sky-100 text-sky-800",
+                preparation_input_summary: "Prepare target manifest for bbbbbbbb".to_string(),
                 preparation_retry_at: "—".to_string(),
                 active_resource_count: 1,
                 blocked_plan_count: 1,
@@ -3200,6 +3287,8 @@ mod tests {
                 kind: "target manifest".to_string(),
                 status: "running".to_string(),
                 status_class: "bg-sky-100 text-sky-800",
+                input_summary: "Prepare target manifest for bbbbbbbb".to_string(),
+                input_fingerprint: "target_manifest:code_change:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:run-a".to_string(),
                 target_git_commit_sha: "bbbbbbbb".to_string(),
                 invocation_id: Uuid::nil().to_string(),
                 invocation_url: format!("/ui/invocations/{}", Uuid::nil()),
@@ -3225,6 +3314,8 @@ mod tests {
                 status: "blocked".to_string(),
                 status_class: "bg-orange-100 text-orange-800",
                 reason: "source state change".to_string(),
+                input_summary: "Source update from source.pkg.raw_orders".to_string(),
+                input_fingerprint: "source_state_change:123".to_string(),
                 target_git_branch: "main".to_string(),
                 target_git_commit_sha: "aaaaaaaa".to_string(),
                 resource_count: 2,
@@ -3259,5 +3350,7 @@ mod tests {
         assert!(rendered.contains("/ui/projects/prj_123/environments/prod/reconcile"));
         assert!(rendered.contains("/ui/projects/prj_123/environments/prod/panel"));
         assert!(rendered.contains("source.pkg.raw_orders"));
+        assert!(rendered.contains("Input Fingerprint"));
+        assert!(rendered.contains("Prepare target manifest for bbbbbbbb"));
     }
 }
