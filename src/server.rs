@@ -408,6 +408,25 @@ async fn reconcile_timed_out_invocations(state: &AppState) -> AppResult<usize> {
             heartbeat_stale_timeout(crate::api::InvocationExecutionModeApi::Server),
         )
         .await?;
+    for timed_out_invocation in &timed_out {
+        if let Some((project_id, environment_id)) = state
+            .db
+            .force_complete_invocation(
+                timed_out_invocation.invocation_id,
+                &crate::execution::ExecutionCompletion {
+                    status: timed_out_invocation.status.clone(),
+                    exit_code: timed_out_invocation.exit_code,
+                    error: Some(timed_out_invocation.error.clone()),
+                    dbt_version: None,
+                    result: None,
+                    manifest: None,
+                },
+            )
+            .await?
+        {
+            auto_admit_blocked_plans_for_environment(state, project_id, environment_id).await?;
+        }
+    }
     publish_timed_out_invocations(state, &timed_out).await?;
     Ok(timed_out.len())
 }
@@ -459,6 +478,42 @@ async fn publish_terminal_invocation(
     runtime.push_event(sequence, completed_event).await;
     state.invocations.schedule_cleanup(invocation_id);
     Ok(())
+}
+
+async fn auto_admit_blocked_plans_for_environment(
+    state: &AppState,
+    project_id: i64,
+    environment_id: i64,
+) -> AppResult<usize> {
+    let blocked_plan_ids = state
+        .db
+        .list_blocked_environment_run_plan_ids(project_id, environment_id)
+        .await?;
+    let service = EnvironmentService::new(&state.db);
+    let mut admitted = 0usize;
+
+    for plan_id in blocked_plan_ids {
+        let invocation_id = Uuid::new_v4();
+        let prepared = service.admit_plan(invocation_id, plan_id).await?;
+        let Some(prepared_invocation) = prepared.prepared else {
+            continue;
+        };
+        start_prepared_invocation(
+            state,
+            invocation_id,
+            InvocationCommandApi::Build,
+            Some(plan_id),
+            prepared_invocation,
+        )
+        .await?;
+        state
+            .db
+            .mark_environment_run_plan_admitted(plan_id, invocation_id)
+            .await?;
+        admitted += 1;
+    }
+
+    Ok(admitted)
 }
 
 async fn healthz() -> Json<HealthResponse> {
@@ -1518,6 +1573,23 @@ async fn invocation_cancel(
         error,
     }) = state.db.request_cancel_invocation(id).await?
     {
+        if let Some((project_id, environment_id)) = state
+            .db
+            .force_complete_invocation(
+                invocation_id,
+                &crate::execution::ExecutionCompletion {
+                    status: status.clone(),
+                    exit_code,
+                    error: Some(error.clone()),
+                    dbt_version: None,
+                    result: None,
+                    manifest: None,
+                },
+            )
+            .await?
+        {
+            auto_admit_blocked_plans_for_environment(&state, project_id, environment_id).await?;
+        }
         publish_terminal_invocation(&state, invocation_id, exit_code, error.clone()).await?;
         info!(invocation_id = %id, status = ?status, error = %error, "canceled unclaimed invocation immediately");
         return Ok(StatusCode::NO_CONTENT);
@@ -1700,13 +1772,27 @@ async fn invocation_complete(
     reconcile_timed_out_invocations(&state).await?;
     let runtime = state.invocations.get_or_create(id, None).await;
     let recorder = InvocationRecorder::new(state.db.clone(), id, runtime);
-    state
+    let persistence = state
         .db
         .get_invocation_persistence(id, Some(&request.worker_id), Some(request.lease_token))
         .await?;
     recorder
         .complete(&request.worker_id, request.lease_token, request.completion)
         .await?;
+    if let (Some(project_id), Some(environment_id)) = (persistence.project_id, persistence.environment_id)
+    {
+        let admitted = auto_admit_blocked_plans_for_environment(&state, project_id, environment_id)
+            .await?;
+        if admitted > 0 {
+            info!(
+                invocation_id = %id,
+                project_id,
+                environment_id,
+                admitted,
+                "auto-admitted blocked reconciliation plans"
+            );
+        }
+    }
     state.invocations.schedule_cleanup(id);
     info!(invocation_id = %id, "completed invocation via api");
     Ok(StatusCode::NO_CONTENT)
