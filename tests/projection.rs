@@ -766,6 +766,55 @@ async fn periodic_reconciler_creates_and_admits_code_change_plan() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_before_planning() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(desired_commit),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        baseline_commit,
+        &[("model.pkg.orders", "model")],
+        &[],
+    )
+    .await;
+
+    wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", desired_commit).await;
+
+    let code_change_plan_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM environment_run_plans erp
+        JOIN projects p ON p.id = erp.project_id
+        JOIN environments e ON e.id = erp.environment_id
+        WHERE p.project_id = $1
+          AND e.slug = $2
+          AND erp.reason = 'code_change'
+        "#,
+    )
+    .bind(&project_id)
+    .bind("remote")
+    .fetch_one(db.pool())
+    .await
+    .expect("count code-change plans");
+    assert_eq!(code_change_plan_count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -3691,6 +3740,46 @@ async fn wait_for_plan_reason(
         assert!(
             Instant::now() < deadline,
             "timed out waiting for plan with reason {expected_reason} in {project_id}/{slug}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_manifest_prepare_invocation(
+    pool: &PgPool,
+    project_id: &str,
+    slug: &str,
+    commit_sha: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM invocations i
+            JOIN runs r ON r.run_id = i.run_id
+            JOIN projects p ON p.id = i.project_id
+            JOIN environments e ON e.id = i.environment_id
+            WHERE p.project_id = $1
+              AND e.slug = $2
+              AND i.command = 'manifest_prepare'
+              AND i.status = 'running'
+              AND i.completed_at IS NULL
+              AND r.git_commit_sha = $3
+            "#,
+        )
+        .bind(project_id)
+        .bind(slug)
+        .bind(commit_sha)
+        .fetch_one(pool)
+        .await
+        .expect("count manifest prepare invocations");
+        if count > 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for manifest prepare invocation for {project_id}/{slug} at {commit_sha}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

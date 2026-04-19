@@ -2097,6 +2097,35 @@ impl Db {
         .map_err(Into::into)
     }
 
+    pub(crate) async fn has_active_manifest_prepare_for_commit(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        commit_sha: &str,
+    ) -> AppResult<bool> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM invocations i
+                JOIN runs r ON r.run_id = i.run_id
+                WHERE i.project_id = $1
+                  AND i.environment_id = $2
+                  AND i.command = 'manifest_prepare'
+                  AND i.status = 'running'
+                  AND i.completed_at IS NULL
+                  AND r.git_commit_sha = $3
+            )
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(commit_sha)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
     pub(crate) async fn load_planning_manifest_nodes(
         &self,
         run_id: Uuid,

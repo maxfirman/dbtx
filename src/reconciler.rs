@@ -2,7 +2,7 @@ use crate::api::InvocationCommandApi;
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::start_prepared_invocation;
 use crate::server::AppState;
-use crate::services::EnvironmentService;
+use crate::services::{EnvironmentService, InvocationService};
 use std::time::Duration;
 use tracing::{error, info};
 use uuid::Uuid;
@@ -57,6 +57,15 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
     let environments = state.db().list_auto_deploy_remote_environments().await?;
     let mut planned = 0usize;
     for environment in environments {
+        let actual_state = state
+            .db()
+            .get_environment_actual_state(&environment.project_ref, &environment.slug)
+            .await?;
+        if environment.git_commit_sha != actual_state.last_successful_commit_sha
+            && ensure_target_manifest_for_reconcile_async(state, &environment).await?
+        {
+            continue;
+        }
         let service = EnvironmentService::new(state.db());
         let plan = match service
             .reconcile(environment.project_ref.clone(), environment.slug.clone())
@@ -107,6 +116,52 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
             .await?;
     }
     Ok(planned)
+}
+
+async fn ensure_target_manifest_for_reconcile_async(
+    state: &AppState,
+    environment: &crate::db::EnvironmentRecord,
+) -> AppResult<bool> {
+    let Some(desired_commit_sha) = environment.git_commit_sha.clone() else {
+        return Ok(false);
+    };
+    if state
+        .db()
+        .latest_manifest_run_id_for_commit(environment.project_id, environment.id, &desired_commit_sha)
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    if state
+        .db()
+        .has_active_manifest_prepare_for_commit(
+            environment.project_id,
+            environment.id,
+            &desired_commit_sha,
+        )
+        .await?
+    {
+        return Ok(true);
+    }
+
+    let invocation_id = Uuid::new_v4();
+    let prepared = InvocationService::new(state.db())
+        .prepare_remote_manifest_capture(
+            invocation_id,
+            &environment.project_ref,
+            &environment.slug,
+        )
+        .await?;
+    start_prepared_invocation(
+        state,
+        invocation_id,
+        InvocationCommandApi::ManifestPrepare,
+        None,
+        prepared,
+    )
+    .await?;
+    Ok(true)
 }
 
 pub async fn sweep_blocked_plans_once(state: &AppState) -> AppResult<usize> {
