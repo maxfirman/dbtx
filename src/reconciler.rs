@@ -1,9 +1,11 @@
 use crate::api::InvocationCommandApi;
+use crate::db::{EnvironmentRecord, EnvironmentRunPlanRecord, SourceStateEventRecord};
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::start_prepared_invocation;
 use crate::server::AppState;
 use crate::services::{EnvironmentService, InvocationService};
 use chrono::Utc;
+use serde_json::Value;
 use std::time::Duration;
 use tracing::{error, info};
 use uuid::Uuid;
@@ -58,11 +60,22 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
     let environments = state.db().list_auto_deploy_remote_environments().await?;
     let mut planned = 0usize;
     for environment in environments {
-        if let Some(next_attempt_at) = state
+        let actual_state = state
             .db()
-            .get_environment_reconcile_retry_not_before(environment.project_id, environment.id)
-            .await?
-            .filter(|next_attempt_at| *next_attempt_at > Utc::now())
+            .get_environment_actual_state(&environment.project_ref, &environment.slug)
+            .await?;
+        let source_events = state
+            .db()
+            .list_unsatisfied_source_state_events(environment.project_id, environment.id)
+            .await?;
+        if let Some(next_attempt_at) = automatic_reconcile_backoff_until(
+            state,
+            &environment,
+            actual_state.last_successful_commit_sha.as_deref(),
+            &source_events,
+        )
+        .await?
+        .filter(|next_attempt_at| *next_attempt_at > Utc::now())
         {
             info!(
                 project_id = %environment.project_ref,
@@ -72,10 +85,6 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
             );
             continue;
         }
-        let actual_state = state
-            .db()
-            .get_environment_actual_state(&environment.project_ref, &environment.slug)
-            .await?;
         if environment.git_commit_sha != actual_state.last_successful_commit_sha
             && ensure_target_manifest_for_reconcile_async(state, &environment).await?
         {
@@ -131,6 +140,50 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
             .await?;
     }
     Ok(planned)
+}
+
+async fn automatic_reconcile_backoff_until(
+    state: &AppState,
+    environment: &EnvironmentRecord,
+    last_successful_commit_sha: Option<&str>,
+    source_events: &[SourceStateEventRecord],
+) -> AppResult<Option<chrono::DateTime<Utc>>> {
+    if let Some(preparation) = state
+        .db()
+        .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
+        .await?
+    {
+        let code_drift = environment.git_commit_sha.as_deref() != last_successful_commit_sha;
+        if preparation.kind == "target_manifest"
+            && preparation.status == "failed"
+            && code_drift
+            && preparation.target_git_commit_sha == environment.git_commit_sha
+        {
+            return Ok(preparation.next_attempt_at);
+        }
+    }
+
+    let latest_failed_plan = state
+        .db()
+        .list_environment_run_plans_by_scope(environment.project_id, environment.id)
+        .await?
+        .into_iter()
+        .find(|plan| matches!(plan.status.as_str(), "failed" | "canceled"));
+    let Some(plan) = latest_failed_plan else {
+        return Ok(None);
+    };
+    let should_apply = match plan.reason.as_str() {
+        "code_change" => {
+            environment.git_commit_sha.as_deref() != last_successful_commit_sha
+                && plan.target_git_commit_sha == environment.git_commit_sha
+        }
+        "source_state_change" => {
+            let current_event_ids = source_events.iter().map(|event| event.id).collect::<Vec<_>>();
+            !current_event_ids.is_empty() && current_event_ids == plan_source_event_ids(&plan)
+        }
+        _ => false,
+    };
+    Ok(if should_apply { plan.next_attempt_at } else { None })
 }
 
 async fn ensure_target_manifest_for_reconcile_async(
@@ -262,4 +315,21 @@ fn should_ignore_reconcile_error(err: &AppError) -> bool {
         }
         _ => false,
     }
+}
+
+fn plan_source_event_ids(plan: &EnvironmentRunPlanRecord) -> Vec<i64> {
+    let mut event_ids = plan
+        .metadata
+        .get("source_event_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|values| values.iter())
+        .filter_map(Value::as_i64)
+        .collect::<Vec<_>>();
+    if event_ids.is_empty() && let Some(source_event_id) = plan.source_event_id {
+        event_ids.push(source_event_id);
+    }
+    event_ids.sort_unstable();
+    event_ids.dedup();
+    event_ids
 }

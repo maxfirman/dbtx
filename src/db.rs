@@ -1637,6 +1637,15 @@ impl Db {
         environment_slug: &str,
     ) -> AppResult<Vec<EnvironmentRunPlanRecord>> {
         let environment = self.get_environment(project, environment_slug).await?;
+        self.list_environment_run_plans_by_scope(environment.project_id, environment.id)
+            .await
+    }
+
+    pub(crate) async fn list_environment_run_plans_by_scope(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+    ) -> AppResult<Vec<EnvironmentRunPlanRecord>> {
         let rows = sqlx::query(
             r#"
             SELECT
@@ -1653,8 +1662,8 @@ impl Db {
             ORDER BY created_at DESC, plan_id DESC
             "#,
         )
-        .bind(environment.project_id)
-        .bind(environment.id)
+        .bind(project_id)
+        .bind(environment_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(environment_run_plan_from_row).collect())
@@ -2198,29 +2207,6 @@ impl Db {
         .fetch_one(&self.pool)
         .await?;
         Ok(exists)
-    }
-
-    pub(crate) async fn get_environment_reconcile_retry_not_before(
-        &self,
-        project_id: i64,
-        environment_id: i64,
-    ) -> AppResult<Option<chrono::DateTime<Utc>>> {
-        sqlx::query_scalar(
-            r#"
-            SELECT next_attempt_at
-            FROM environment_run_plans
-            WHERE project_id = $1
-              AND environment_id = $2
-              AND status IN ('failed', 'canceled')
-            ORDER BY created_at DESC, plan_id DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Into::into)
     }
 
     pub(crate) async fn mark_manifest_prepare_running(

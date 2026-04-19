@@ -1058,6 +1058,216 @@ async fn periodic_reconciler_respects_failed_plan_retry_backoff() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desired_commit() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let old_desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let new_desired_commit = "cccccccccccccccccccccccccccccccccccccccc";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(new_desired_commit),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        baseline_commit,
+        &[("model.pkg.orders", "model")],
+        &[],
+    )
+    .await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO environment_reconcile_preparations (
+            project_id,
+            environment_id,
+            kind,
+            target_git_commit_sha,
+            status,
+            invocation_id,
+            error,
+            failure_count,
+            next_attempt_at,
+            started_at,
+            completed_at,
+            updated_at
+        )
+        SELECT
+            p.id,
+            e.id,
+            'target_manifest',
+            $3,
+            'failed',
+            NULL,
+            'manifest prepare failed',
+            2,
+            NOW() + INTERVAL '5 minutes',
+            NOW() - INTERVAL '1 minute',
+            NOW() - INTERVAL '1 minute',
+            NOW()
+        FROM projects p
+        JOIN environments e ON e.project_id = p.id
+        WHERE p.project_id = $1
+          AND e.slug = $2
+        "#,
+    )
+    .bind(&project_id)
+    .bind("remote")
+    .bind(old_desired_commit)
+    .execute(db.pool())
+    .await
+    .expect("insert failed old reconcile preparation");
+
+    wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", new_desired_commit).await;
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    let first = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now() - chrono::Duration::minutes(2)),
+                payload: serde_json::json!({ "reason": "first upstream data change" }),
+            },
+        )
+        .await
+        .expect("create first source event")
+        .event;
+
+    sqlx::query(
+        r#"
+        INSERT INTO environment_run_plans (
+            plan_id,
+            project_id,
+            environment_id,
+            status,
+            reason,
+            target_git_branch,
+            target_git_commit_sha,
+            baseline_run_id,
+            selection_spec,
+            selected_resources,
+            resource_count,
+            source_event_id,
+            error,
+            failure_count,
+            next_attempt_at,
+            created_at,
+            updated_at,
+            metadata
+        )
+        SELECT
+            $3,
+            p.id,
+            e.id,
+            'failed',
+            'source_state_change',
+            'main',
+            $4,
+            (
+                SELECT run_id
+                FROM runs r
+                WHERE r.project_id = p.id
+                  AND r.environment_id = e.id
+                  AND r.git_commit_sha = $4
+                ORDER BY r.id DESC
+                LIMIT 1
+            ),
+            'source_downstream',
+            '["model.pkg.orders","model.pkg.customers"]'::jsonb,
+            2,
+            $5,
+            'source rebuild failed',
+            1,
+            NOW() + INTERVAL '5 minutes',
+            NOW(),
+            NOW(),
+            jsonb_build_object('source_keys', '["source.pkg.raw_orders"]'::jsonb, 'source_event_ids', jsonb_build_array($5))
+        FROM projects p
+        JOIN environments e ON e.project_id = p.id
+        WHERE p.project_id = $1
+          AND e.slug = $2
+        "#,
+    )
+    .bind(&project_id)
+    .bind("remote")
+    .bind(Uuid::new_v4())
+    .bind(commit_sha)
+    .bind(first.id)
+    .execute(db.pool())
+    .await
+    .expect("insert failed source-state plan");
+
+    let second = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "newer upstream data change" }),
+            },
+        )
+        .await
+        .expect("create second source event")
+        .event;
+
+    let new_plan = wait_for_plan_reason(&client, &project_id, "remote", "source_state_change").await;
+    assert_eq!(new_plan.source_event_id, Some(second.id));
+    assert_eq!(new_plan.status, "admitted");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
