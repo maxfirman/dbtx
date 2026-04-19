@@ -5193,3 +5193,161 @@ fn sample_execution_completion(
         result: None,
     }
 }
+
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn reconcile_already_reconciled_environment_returns_conflict() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "prod",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "prod",
+        commit_sha,
+        &[("model.pkg.orders", "model")],
+        &[],
+    )
+    .await;
+
+    // Environment is already reconciled (desired == actual commit)
+    let err = client
+        .environment_reconcile(&project_id, "prod", dbtx::api::EnvironmentReconcileApiRequest {})
+        .await
+        .expect_err("should fail with conflict");
+    assert!(
+        err.to_string().contains("already reconciled"),
+        "expected 'already reconciled' error, got: {err}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn admit_completed_plan_returns_conflict() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let baseline_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let desired_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "prod",
+        Some(desired_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "prod",
+        baseline_sha,
+        &[("model.pkg.orders", "model")],
+        &[],
+    )
+    .await;
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "prod",
+        desired_sha,
+        &[("model.pkg.orders", "model", Some("new-checksum"))],
+        &[],
+    )
+    .await;
+
+    let plan = client
+        .environment_reconcile(&project_id, "prod", dbtx::api::EnvironmentReconcileApiRequest {})
+        .await
+        .expect("reconcile should create plan")
+        .plan;
+    assert_eq!(plan.status, PlanStatus::Planned);
+
+    // Admit the plan
+    let admitted = client
+        .environment_plan_admit(plan.plan_id)
+        .await
+        .expect("admit should succeed");
+    assert_eq!(admitted.plan.status, PlanStatus::Admitted);
+
+    // Complete the plan's invocation
+    let invocation_id = admitted.plan.admitted_invocation_id.expect("has invocation");
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "test-worker".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim")
+        .expect("has claim");
+    client
+        .invocation_complete(
+            invocation_id,
+            dbtx::api::InvocationCompleteApiRequest {
+                worker_id: "test-worker".to_string(),
+                lease_token: claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Succeeded, 0),
+            },
+        )
+        .await
+        .expect("complete");
+
+    // Now try to admit the same plan again — should fail
+    let err = client
+        .environment_plan_admit(plan.plan_id)
+        .await
+        .expect_err("should fail with conflict");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not admissible") || msg.contains("already in progress") || msg.contains("already reconciled"),
+        "expected conflict error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn reconcile_without_baseline_returns_unprocessable() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let desired_sha = "cccccccccccccccccccccccccccccccccccccccc";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "prod",
+        Some(desired_sha),
+    )
+    .await;
+    // No actual state seeded — no baseline run exists
+
+    let err = client
+        .environment_reconcile(&project_id, "prod", dbtx::api::EnvironmentReconcileApiRequest {})
+        .await
+        .expect_err("should fail without baseline");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("baseline") || msg.contains("reconcil"),
+        "expected baseline/reconciliation error, got: {msg}"
+    );
+}

@@ -550,4 +550,91 @@ mod tests {
         assert_eq!(event.event_type, "stdout.line");
         assert_eq!(event.text.as_deref(), Some("hello"));
     }
+
+    #[tokio::test]
+    async fn client_returns_error_on_404() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::method;
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({"error": "project not found"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = super::DaemonClient::new(mock_server.uri());
+        let err = client.project_list().await.expect_err("should fail");
+        assert!(err.to_string().contains("project not found"));
+    }
+
+    #[tokio::test]
+    async fn client_returns_error_on_500() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::method;
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(serde_json::json!({"error": "internal server error"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = super::DaemonClient::new(mock_server.uri());
+        let err = client.project_list().await.expect_err("should fail");
+        assert!(err.to_string().contains("internal server error"));
+    }
+
+    #[tokio::test]
+    async fn client_returns_error_on_409_conflict() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/prj_1/environments/prod/reconcile"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(serde_json::json!({"error": "environment is already reconciled to known desired state"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = super::DaemonClient::new(mock_server.uri());
+        let err = client
+            .environment_reconcile("prj_1", "prod", crate::api::EnvironmentReconcileApiRequest {})
+            .await
+            .expect_err("should fail");
+        assert!(err.to_string().contains("already reconciled"));
+    }
+
+    #[tokio::test]
+    async fn client_handles_timeout() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::method;
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+            .mount(&mock_server)
+            .await;
+
+        // DaemonClient has a 30s timeout by default; use a custom reqwest client
+        // to test timeout behavior with a shorter duration
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let response = http
+            .get(format!("{}/v1/projects", mock_server.uri()))
+            .send()
+            .await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert!(err.is_timeout());
+    }
 }
