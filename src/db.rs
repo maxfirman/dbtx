@@ -155,6 +155,7 @@ pub struct EnvironmentReconcilePreparationRecord {
     pub project_id: i64,
     pub environment_id: i64,
     pub kind: String,
+    pub input_fingerprint: Option<String>,
     pub target_git_commit_sha: Option<String>,
     pub status: String,
     pub invocation_id: Option<Uuid>,
@@ -173,6 +174,7 @@ pub struct EnvironmentRunPlanRecord {
     pub environment_id: i64,
     pub status: String,
     pub reason: String,
+    pub input_fingerprint: Option<String>,
     pub target_git_branch: Option<String>,
     pub target_git_commit_sha: Option<String>,
     pub baseline_run_id: Option<Uuid>,
@@ -371,6 +373,7 @@ pub(crate) struct SourceStateEventCreateInput {
 pub(crate) struct CreateEnvironmentRunPlanInput<'a> {
     pub(crate) environment: &'a EnvironmentRecord,
     pub(crate) reason: &'a str,
+    pub(crate) input_fingerprint: &'a str,
     pub(crate) baseline_run_id: Option<Uuid>,
     pub(crate) selection_spec: Option<&'a str>,
     pub(crate) selected_resources: &'a [String],
@@ -383,6 +386,7 @@ pub(crate) struct EquivalentPlanLookup<'a> {
     pub(crate) project_id: i64,
     pub(crate) environment_id: i64,
     pub(crate) reason: &'a str,
+    pub(crate) input_fingerprint: &'a str,
     pub(crate) target_git_branch: Option<&'a str>,
     pub(crate) target_git_commit_sha: Option<&'a str>,
     pub(crate) baseline_run_id: Option<Uuid>,
@@ -1580,6 +1584,7 @@ impl Db {
                 project_id,
                 environment_id,
                 kind,
+                input_fingerprint,
                 target_git_commit_sha,
                 status,
                 invocation_id,
@@ -1649,7 +1654,7 @@ impl Db {
         let rows = sqlx::query(
             r#"
             SELECT
-                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
                 admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
@@ -1717,7 +1722,7 @@ impl Db {
         let row = sqlx::query(
             r#"
             SELECT
-                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
                 admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
@@ -1747,17 +1752,17 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO environment_run_plans (
-                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, source_event_id, metadata
             )
             VALUES (
-                $1, $2, $3, 'planned', $4, $5,
-                $6, $7, $8, $9,
-                $10, $11, $12
+                $1, $2, $3, 'planned', $4, $5, $6,
+                $7, $8, $9, $10,
+                $11, $12, $13
             )
             RETURNING
-                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
                 admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
@@ -1770,6 +1775,7 @@ impl Db {
         .bind(input.environment.project_id)
         .bind(input.environment.id)
         .bind(input.reason)
+        .bind(input.input_fingerprint)
         .bind(input.environment.git_branch.as_deref())
         .bind(input.environment.git_commit_sha.as_deref())
         .bind(input.baseline_run_id)
@@ -1790,7 +1796,7 @@ impl Db {
         let row = sqlx::query(
             r#"
             SELECT
-                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
                 admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
@@ -1802,11 +1808,12 @@ impl Db {
               AND environment_id = $2
               AND status IN ('planned', 'blocked')
               AND reason = $3
-              AND target_git_branch IS NOT DISTINCT FROM $4
-              AND target_git_commit_sha IS NOT DISTINCT FROM $5
-              AND baseline_run_id IS NOT DISTINCT FROM $6
-              AND selection_spec IS NOT DISTINCT FROM $7
-              AND selected_resources = $8
+              AND input_fingerprint = $4
+              AND target_git_branch IS NOT DISTINCT FROM $5
+              AND target_git_commit_sha IS NOT DISTINCT FROM $6
+              AND baseline_run_id IS NOT DISTINCT FROM $7
+              AND selection_spec IS NOT DISTINCT FROM $8
+              AND selected_resources = $9
             ORDER BY created_at DESC, plan_id DESC
             LIMIT 1
             "#,
@@ -1814,6 +1821,7 @@ impl Db {
         .bind(lookup.project_id)
         .bind(lookup.environment_id)
         .bind(lookup.reason)
+        .bind(lookup.input_fingerprint)
         .bind(lookup.target_git_branch)
         .bind(lookup.target_git_commit_sha)
         .bind(lookup.baseline_run_id)
@@ -1920,7 +1928,7 @@ impl Db {
                 updated_at = NOW()
             WHERE plan_id = $1
             RETURNING
-                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
                 admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
@@ -1957,7 +1965,7 @@ impl Db {
                 updated_at = NOW()
             WHERE plan_id = $1
             RETURNING
-                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
                 admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
@@ -2009,7 +2017,7 @@ impl Db {
                 updated_at = NOW()
             WHERE plan_id = $1
             RETURNING
-                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
                 admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
@@ -2051,10 +2059,10 @@ impl Db {
                 updated_at = NOW()
             WHERE plan_id = $1
             RETURNING
-                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at, first_blocked_at,
                 last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
                 updated_at, metadata
             "#,
@@ -2213,6 +2221,7 @@ impl Db {
         &self,
         project_id: i64,
         environment_id: i64,
+        input_fingerprint: &str,
         target_git_commit_sha: &str,
         invocation_id: Uuid,
     ) -> AppResult<()> {
@@ -2222,6 +2231,7 @@ impl Db {
                 project_id,
                 environment_id,
                 kind,
+                input_fingerprint,
                 target_git_commit_sha,
                 status,
                 invocation_id,
@@ -2232,8 +2242,9 @@ impl Db {
                 completed_at,
                 updated_at
             )
-            VALUES ($1, $2, 'target_manifest', $3, 'running', $4, NULL, 0, NULL, NOW(), NULL, NOW())
+            VALUES ($1, $2, 'target_manifest', $3, $4, 'running', $5, NULL, 0, NULL, NOW(), NULL, NOW())
             ON CONFLICT (project_id, environment_id, kind) DO UPDATE SET
+                input_fingerprint = EXCLUDED.input_fingerprint,
                 target_git_commit_sha = EXCLUDED.target_git_commit_sha,
                 status = EXCLUDED.status,
                 invocation_id = EXCLUDED.invocation_id,
@@ -2246,6 +2257,7 @@ impl Db {
         )
         .bind(project_id)
         .bind(environment_id)
+        .bind(input_fingerprint)
         .bind(target_git_commit_sha)
         .bind(invocation_id)
         .execute(&self.pool)
@@ -5407,6 +5419,7 @@ fn environment_reconcile_preparation_from_row(
         project_id: row.get("project_id"),
         environment_id: row.get("environment_id"),
         kind: row.get("kind"),
+        input_fingerprint: row.get("input_fingerprint"),
         target_git_commit_sha: row.get("target_git_commit_sha"),
         status: row.get("status"),
         invocation_id: row.get("invocation_id"),
@@ -5426,6 +5439,7 @@ fn environment_run_plan_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRunP
         environment_id: row.get("environment_id"),
         status: row.get("status"),
         reason: row.get("reason"),
+        input_fingerprint: row.get("input_fingerprint"),
         target_git_branch: row.get("target_git_branch"),
         target_git_commit_sha: row.get("target_git_commit_sha"),
         baseline_run_id: row.get("baseline_run_id"),

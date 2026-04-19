@@ -9,7 +9,10 @@ use dbtx::api::{
 };
 use dbtx::client::DaemonClient;
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
-use dbtx::services::{infer_local_project_defaults, infer_remote_project_defaults};
+use dbtx::services::{
+    code_change_input_fingerprint, infer_local_project_defaults, infer_remote_project_defaults,
+    source_state_change_input_fingerprint, target_manifest_input_fingerprint,
+};
 use sqlx::{PgPool, Row};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
@@ -870,6 +873,7 @@ async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
             project_id,
             environment_id,
             kind,
+            input_fingerprint,
             target_git_commit_sha,
             status,
             invocation_id,
@@ -884,6 +888,7 @@ async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
             p.id,
             e.id,
             'target_manifest',
+            $3,
             $3,
             'failed',
             NULL,
@@ -901,6 +906,10 @@ async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
     )
     .bind(&project_id)
     .bind("remote")
+    .bind(target_manifest_input_fingerprint(&code_change_input_fingerprint(
+        desired_commit,
+        latest_run_id_for_commit(db.pool(), &project_id, "remote", baseline_commit).await,
+    )))
     .bind(desired_commit)
     .execute(db.pool())
     .await
@@ -981,6 +990,7 @@ async fn periodic_reconciler_respects_failed_plan_retry_backoff() {
             environment_id,
             status,
             reason,
+            input_fingerprint,
             target_git_branch,
             target_git_commit_sha,
             baseline_run_id,
@@ -1000,14 +1010,15 @@ async fn periodic_reconciler_respects_failed_plan_retry_backoff() {
             e.id,
             'failed',
             'code_change',
-            'main',
             $4,
+            'main',
+            $5,
             (
                 SELECT run_id
                 FROM runs r
                 WHERE r.project_id = p.id
                   AND r.environment_id = e.id
-                  AND r.git_commit_sha = $5
+                  AND r.git_commit_sha = $6
                 ORDER BY r.id DESC
                 LIMIT 1
             ),
@@ -1029,6 +1040,10 @@ async fn periodic_reconciler_respects_failed_plan_retry_backoff() {
     .bind(&project_id)
     .bind("remote")
     .bind(Uuid::new_v4())
+    .bind(code_change_input_fingerprint(
+        desired_commit,
+        latest_run_id_for_commit(db.pool(), &project_id, "remote", baseline_commit).await,
+    ))
     .bind(desired_commit)
     .bind(baseline_commit)
     .execute(db.pool())
@@ -1091,6 +1106,7 @@ async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desir
             project_id,
             environment_id,
             kind,
+            input_fingerprint,
             target_git_commit_sha,
             status,
             invocation_id,
@@ -1105,6 +1121,7 @@ async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desir
             p.id,
             e.id,
             'target_manifest',
+            $3,
             $3,
             'failed',
             NULL,
@@ -1122,6 +1139,10 @@ async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desir
     )
     .bind(&project_id)
     .bind("remote")
+    .bind(target_manifest_input_fingerprint(&code_change_input_fingerprint(
+        old_desired_commit,
+        latest_run_id_for_commit(db.pool(), &project_id, "remote", baseline_commit).await,
+    )))
     .bind(old_desired_commit)
     .execute(db.pool())
     .await
@@ -1189,6 +1210,7 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
             environment_id,
             status,
             reason,
+            input_fingerprint,
             target_git_branch,
             target_git_commit_sha,
             baseline_run_id,
@@ -1209,27 +1231,28 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
             e.id,
             'failed',
             'source_state_change',
-            'main',
             $4,
+            'main',
+            $5,
             (
                 SELECT run_id
                 FROM runs r
                 WHERE r.project_id = p.id
                   AND r.environment_id = e.id
-                  AND r.git_commit_sha = $4
+                  AND r.git_commit_sha = $5
                 ORDER BY r.id DESC
                 LIMIT 1
             ),
             'source_downstream',
             '["model.pkg.orders","model.pkg.customers"]'::jsonb,
             2,
-            $5,
+            $6,
             'source rebuild failed',
             1,
             NOW() + INTERVAL '5 minutes',
             NOW(),
             NOW(),
-            jsonb_build_object('source_keys', '["source.pkg.raw_orders"]'::jsonb, 'source_event_ids', jsonb_build_array($5))
+            jsonb_build_object('source_keys', '["source.pkg.raw_orders"]'::jsonb, 'source_event_ids', jsonb_build_array($6))
         FROM projects p
         JOIN environments e ON e.project_id = p.id
         WHERE p.project_id = $1
@@ -1239,6 +1262,7 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
     .bind(&project_id)
     .bind("remote")
     .bind(Uuid::new_v4())
+    .bind(source_state_change_input_fingerprint(&[first.id]))
     .bind(commit_sha)
     .bind(first.id)
     .execute(db.pool())
@@ -1263,7 +1287,8 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
 
     let new_plan = wait_for_plan_reason(&client, &project_id, "remote", "source_state_change").await;
     assert_eq!(new_plan.source_event_id, Some(second.id));
-    assert_eq!(new_plan.status, "admitted");
+    let admitted = wait_for_plan_status(&client, new_plan.plan_id, "admitted").await;
+    assert_eq!(admitted.source_event_id, Some(second.id));
 }
 
 #[tokio::test]
@@ -4236,6 +4261,33 @@ async fn wait_for_manifest_prepare_invocation(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn latest_run_id_for_commit(
+    pool: &PgPool,
+    project_id: &str,
+    slug: &str,
+    commit_sha: &str,
+) -> Uuid {
+    sqlx::query_scalar(
+        r#"
+        SELECT r.run_id
+        FROM runs r
+        JOIN projects p ON p.id = r.project_id
+        JOIN environments e ON e.id = r.environment_id
+        WHERE p.project_id = $1
+          AND e.slug = $2
+          AND r.git_commit_sha = $3
+        ORDER BY r.id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .bind(commit_sha)
+    .fetch_one(pool)
+    .await
+    .expect("load latest run id for commit")
 }
 
 fn init_dbtx_schema(service_url: &str) {

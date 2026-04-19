@@ -817,13 +817,15 @@ impl<'a> EnvironmentService<'a> {
                 )));
             }
 
-            let (reason, selection_spec, selected_resources, source_event_id, metadata) =
+            let (reason, input_fingerprint, selection_spec, selected_resources, source_event_id, metadata) =
                 if code_drift {
                     let desired_commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
                         AppError::Io(std::io::Error::other(
                             "reconciliation requires a desired git commit sha",
                         ))
                     })?;
+                    let input_fingerprint =
+                        code_change_input_fingerprint(&desired_commit_sha, baseline_run_id);
                     if let Some(target_manifest_run_id) = self
                         .db
                         .latest_manifest_run_id_for_commit(
@@ -860,6 +862,7 @@ impl<'a> EnvironmentService<'a> {
                         };
                         (
                             "code_change",
+                            input_fingerprint.clone(),
                             Some(selection_spec.to_string()),
                             selected_resources,
                             None,
@@ -875,6 +878,7 @@ impl<'a> EnvironmentService<'a> {
                     } else {
                         (
                             "code_change",
+                            input_fingerprint,
                             Some("full_graph".to_string()),
                             self.db.list_manifest_node_unique_ids(baseline_run_id).await?,
                             None,
@@ -894,8 +898,11 @@ impl<'a> EnvironmentService<'a> {
                         .collect();
                     let source_event_ids: Vec<i64> =
                         source_events.iter().map(|event| event.id).collect();
+                    let input_fingerprint =
+                        source_state_change_input_fingerprint(&source_event_ids);
                     (
                         "source_state_change",
+                        input_fingerprint,
                         Some("source_downstream".to_string()),
                         self.db
                             .list_downstream_manifest_node_unique_ids(baseline_run_id, &source_keys)
@@ -920,6 +927,7 @@ impl<'a> EnvironmentService<'a> {
                     project_id: environment.project_id,
                     environment_id: environment.id,
                     reason,
+                    input_fingerprint: &input_fingerprint,
                     target_git_branch: environment.git_branch.as_deref(),
                     target_git_commit_sha: environment.git_commit_sha.as_deref(),
                     baseline_run_id: Some(baseline_run_id),
@@ -936,6 +944,7 @@ impl<'a> EnvironmentService<'a> {
                 .create_environment_run_plan(CreateEnvironmentRunPlanInput {
                     environment: &environment,
                     reason,
+                    input_fingerprint: &input_fingerprint,
                     baseline_run_id: Some(baseline_run_id),
                     selection_spec: selection_spec.as_deref(),
                     selected_resources: &selected_resources,
@@ -1031,6 +1040,29 @@ impl<'a> EnvironmentService<'a> {
 
 pub struct InvocationService<'a> {
     db: &'a Db,
+}
+
+pub fn target_manifest_input_fingerprint(target_git_commit_sha: &str) -> String {
+    format!("target_manifest:{target_git_commit_sha}")
+}
+
+pub fn code_change_input_fingerprint(
+    desired_commit_sha: &str,
+    baseline_run_id: Uuid,
+) -> String {
+    format!("code_change:{desired_commit_sha}:{baseline_run_id}")
+}
+
+pub fn source_state_change_input_fingerprint(source_event_ids: &[i64]) -> String {
+    let mut event_ids = source_event_ids.to_vec();
+    event_ids.sort_unstable();
+    event_ids.dedup();
+    let joined = event_ids
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("source_state_change:{joined}")
 }
 
 struct InvocationScope<'a> {

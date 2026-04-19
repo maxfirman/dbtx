@@ -1,11 +1,13 @@
 use crate::api::InvocationCommandApi;
-use crate::db::{EnvironmentRecord, EnvironmentRunPlanRecord, SourceStateEventRecord};
+use crate::db::{EnvironmentRecord, SourceStateEventRecord};
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::start_prepared_invocation;
 use crate::server::AppState;
-use crate::services::{EnvironmentService, InvocationService};
+use crate::services::{
+    EnvironmentService, InvocationService, code_change_input_fingerprint,
+    source_state_change_input_fingerprint, target_manifest_input_fingerprint,
+};
 use chrono::Utc;
-use serde_json::Value;
 use std::time::Duration;
 use tracing::{error, info};
 use uuid::Uuid;
@@ -71,6 +73,7 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
         if let Some(next_attempt_at) = automatic_reconcile_backoff_until(
             state,
             &environment,
+            actual_state.last_successful_run_id,
             actual_state.last_successful_commit_sha.as_deref(),
             &source_events,
         )
@@ -145,22 +148,33 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
 async fn automatic_reconcile_backoff_until(
     state: &AppState,
     environment: &EnvironmentRecord,
+    baseline_run_id: Option<Uuid>,
     last_successful_commit_sha: Option<&str>,
     source_events: &[SourceStateEventRecord],
 ) -> AppResult<Option<chrono::DateTime<Utc>>> {
+    let current_code_change_fingerprint = if environment.git_commit_sha.as_deref() != last_successful_commit_sha {
+        environment
+            .git_commit_sha
+            .as_deref()
+            .zip(baseline_run_id)
+            .map(|(desired_commit_sha, baseline_run_id)| {
+                code_change_input_fingerprint(desired_commit_sha, baseline_run_id)
+            })
+    } else {
+        None
+    };
     if let Some(preparation) = state
         .db()
         .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
         .await?
+        && preparation.kind == "target_manifest"
+        && preparation.status == "failed"
+        && preparation.input_fingerprint
+            == current_code_change_fingerprint
+                .as_ref()
+                .map(|fingerprint| target_manifest_input_fingerprint(fingerprint))
     {
-        let code_drift = environment.git_commit_sha.as_deref() != last_successful_commit_sha;
-        if preparation.kind == "target_manifest"
-            && preparation.status == "failed"
-            && code_drift
-            && preparation.target_git_commit_sha == environment.git_commit_sha
-        {
-            return Ok(preparation.next_attempt_at);
-        }
+        return Ok(preparation.next_attempt_at);
     }
 
     let latest_failed_plan = state
@@ -173,13 +187,12 @@ async fn automatic_reconcile_backoff_until(
         return Ok(None);
     };
     let should_apply = match plan.reason.as_str() {
-        "code_change" => {
-            environment.git_commit_sha.as_deref() != last_successful_commit_sha
-                && plan.target_git_commit_sha == environment.git_commit_sha
-        }
+        "code_change" => plan.input_fingerprint == current_code_change_fingerprint,
         "source_state_change" => {
             let current_event_ids = source_events.iter().map(|event| event.id).collect::<Vec<_>>();
-            !current_event_ids.is_empty() && current_event_ids == plan_source_event_ids(&plan)
+            !current_event_ids.is_empty()
+                && plan.input_fingerprint
+                    == Some(source_state_change_input_fingerprint(&current_event_ids))
         }
         _ => false,
     };
@@ -193,6 +206,21 @@ async fn ensure_target_manifest_for_reconcile_async(
     let Some(desired_commit_sha) = environment.git_commit_sha.clone() else {
         return Ok(false);
     };
+    let baseline_run_id = state
+        .db()
+        .get_environment_actual_state(&environment.project_ref, &environment.slug)
+        .await?
+        .last_successful_run_id
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::other(
+                "automatic manifest preparation requires a successful baseline run",
+            ))
+        })?;
+    let input_fingerprint =
+        target_manifest_input_fingerprint(&code_change_input_fingerprint(
+            &desired_commit_sha,
+            baseline_run_id,
+        ));
     if state
         .db()
         .latest_manifest_run_id_for_commit(environment.project_id, environment.id, &desired_commit_sha)
@@ -218,7 +246,7 @@ async fn ensure_target_manifest_for_reconcile_async(
         .await?
         .filter(|preparation| {
             preparation.kind == "target_manifest"
-                && preparation.target_git_commit_sha.as_deref() == Some(desired_commit_sha.as_str())
+                && preparation.input_fingerprint.as_deref() == Some(input_fingerprint.as_str())
                 && preparation.status == "failed"
                 && preparation
                     .next_attempt_at
@@ -251,6 +279,7 @@ async fn ensure_target_manifest_for_reconcile_async(
         .mark_manifest_prepare_running(
             environment.project_id,
             environment.id,
+            &input_fingerprint,
             &desired_commit_sha,
             invocation_id,
         )
@@ -315,21 +344,4 @@ fn should_ignore_reconcile_error(err: &AppError) -> bool {
         }
         _ => false,
     }
-}
-
-fn plan_source_event_ids(plan: &EnvironmentRunPlanRecord) -> Vec<i64> {
-    let mut event_ids = plan
-        .metadata
-        .get("source_event_ids")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flat_map(|values| values.iter())
-        .filter_map(Value::as_i64)
-        .collect::<Vec<_>>();
-    if event_ids.is_empty() && let Some(source_event_id) = plan.source_event_id {
-        event_ids.push(source_event_id);
-    }
-    event_ids.sort_unstable();
-    event_ids.dedup();
-    event_ids
 }
