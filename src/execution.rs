@@ -1,3 +1,4 @@
+//! Execution mode definitions, timeouts, and completion types.
 use crate::api::{InvocationExecutionModeApi, InvocationLifecycleStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

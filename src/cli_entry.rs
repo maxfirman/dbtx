@@ -1,3 +1,4 @@
+//! CLI entry point handlers for state migration and dbt command dispatch.
 use crate::cli_output::print_migration_summary;
 use crate::cli_runtime::invoke_via_daemon;
 use crate::client;

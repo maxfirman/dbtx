@@ -69,52 +69,62 @@ async fn run() -> AppResult<()> {
         "starting dbtx worker"
     );
 
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
+
     loop {
-        match client
-            .invocation_claim_next(InvocationClaimNextApiRequest {
+        // Check for shutdown between iterations (don't interrupt active work)
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => {
+                info!(worker_id = %worker_id, "received shutdown signal, stopping worker");
+                return Ok(());
+            }
+            result = client.invocation_claim_next(InvocationClaimNextApiRequest {
                 execution_mode: Some(execution_mode),
                 worker_id: worker_id.clone(),
                 worker_queues: cli.queue.clone(),
-            })
-            .await?
-        {
-            Some(claim) => {
-                info!(
-                    invocation_id = %claim.invocation_id,
-                    worker_id = %worker_id,
-                    execution_mode = ?execution_mode,
-                    queues = %cli.queue.join(","),
-                    "claimed invocation"
-                );
-                if let Err(err) = worker::execute_claimed_invocation(&client, claim, None).await {
-                    warn!(worker_id = %worker_id, error = %err, "worker invocation failed");
-                    if cli.once {
-                        return Err(err);
+            }) => {
+                match result? {
+                    Some(claim) => {
+                        info!(
+                            invocation_id = %claim.invocation_id,
+                            worker_id = %worker_id,
+                            execution_mode = ?execution_mode,
+                            queues = %cli.queue.join(","),
+                            "claimed invocation"
+                        );
+                        if let Err(err) = worker::execute_claimed_invocation(&client, claim, None).await {
+                            warn!(worker_id = %worker_id, error = %err, "worker invocation failed");
+                            if cli.once {
+                                return Err(err);
+                            }
+                        } else if cli.once {
+                            info!(worker_id = %worker_id, "one-shot worker completed successfully");
+                            return Ok(());
+                        }
                     }
-                } else if cli.once {
-                    info!(worker_id = %worker_id, "one-shot worker completed successfully");
-                    return Ok(());
+                    None => {
+                        if cli.once {
+                            warn!(
+                                worker_id = %worker_id,
+                                execution_mode = ?execution_mode,
+                                queues = %cli.queue.join(","),
+                                "no invocation available for one-shot worker"
+                            );
+                            return Err(AppError::Io(std::io::Error::other(
+                                "no invocation available for worker",
+                            )));
+                        }
+                        debug!(
+                            worker_id = %worker_id,
+                            execution_mode = ?execution_mode,
+                            queues = %cli.queue.join(","),
+                            "no invocation available, polling again"
+                        );
+                        tokio::time::sleep(poll_interval).await;
+                    }
                 }
-            }
-            None => {
-                if cli.once {
-                    warn!(
-                        worker_id = %worker_id,
-                        execution_mode = ?execution_mode,
-                        queues = %cli.queue.join(","),
-                        "no invocation available for one-shot worker"
-                    );
-                    return Err(AppError::Io(std::io::Error::other(
-                        "no invocation available for worker",
-                    )));
-                }
-                debug!(
-                    worker_id = %worker_id,
-                    execution_mode = ?execution_mode,
-                    queues = %cli.queue.join(","),
-                    "no invocation available, polling again"
-                );
-                tokio::time::sleep(poll_interval).await;
             }
         }
     }

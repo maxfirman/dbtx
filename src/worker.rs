@@ -1,3 +1,4 @@
+//! Worker execution runtime: dbt process management, git worktree materialization, and event streaming.
 use crate::api::{
     InvocationClaimResponse, InvocationCommandApi, InvocationCompleteApiRequest,
     InvocationEventBatchApiRequest, InvocationExecutionModeApi, InvocationExecutionSpecApi,
@@ -321,7 +322,7 @@ pub async fn execute_claimed_invocation(
     );
 
     if cancel_requested {
-        Err(AppError::Io(std::io::Error::other("invocation canceled")))
+        Err(AppError::InvocationCanceled)
     } else if status.success() {
         Ok(())
     } else {

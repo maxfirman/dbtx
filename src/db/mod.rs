@@ -1,3 +1,4 @@
+//! Database access layer: queries, row mapping, and schema migrations.
 use crate::api::{
     EnvironmentActiveResourcePhaseApi, InvocationCancelStateApi, InvocationClaimResponse,
     InvocationEvent, InvocationExecutionModeApi, InvocationExecutionSpecApi,
@@ -38,8 +39,12 @@ pub struct Db {
 
 impl Db {
     pub async fn connect(database_url: &str) -> AppResult<Self> {
+        let max_connections = std::env::var("DBTX_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(20);
         let pool = PgPoolOptions::new()
-            .max_connections(20)
+            .max_connections(max_connections)
             .connect(database_url)
             .await?;
         Ok(Self { pool })
@@ -460,7 +465,7 @@ impl Db {
         draft_id: Uuid,
     ) -> AppResult<EnvironmentRecord> {
         let draft = self.get_environment_draft(draft_id).await?;
-        if draft.status != "validated" {
+        if draft.status != DraftStatus::Validated {
             return Err(AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "environment draft must be validated before confirmation",
@@ -545,7 +550,7 @@ impl Db {
 
     pub async fn confirm_project_draft(&self, draft_id: Uuid) -> AppResult<ProjectRecord> {
         let draft = self.get_project_draft(draft_id).await?;
-        if draft.status != "validated" {
+        if draft.status != DraftStatus::Validated {
             return Err(AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "project draft must be validated before confirmation",
@@ -756,7 +761,7 @@ impl Db {
                 .unwrap_or(&existing.profile_secrets),
             true,
         )?;
-        let status = input.status.unwrap_or(existing.status.clone());
+        let status = input.status.unwrap_or_else(|| existing.status.to_string());
         validate_environment_status(&status)?;
 
         sqlx::query(
@@ -2526,9 +2531,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
-            return Err(AppError::Io(std::io::Error::other(
-                "invocation is owned by a different worker or is not running",
-            )));
+            return Err(AppError::InvocationOwnershipMismatch);
         };
         let execution_mode = execution_mode_from_db(&row.get::<String, _>("execution_mode"));
         let worker_queue: String = row.get("worker_queue");
@@ -4793,11 +4796,9 @@ fn is_valid_git_commit_sha(value: &str) -> bool {
 }
 
 fn validate_environment_status(status: &str) -> AppResult<()> {
-    if matches!(status, "active" | "archived" | "failed" | "deleting") {
-        Ok(())
-    } else {
-        Err(AppError::InvalidEnvironmentStatus(status.to_string()))
-    }
+    EnvironmentStatus::parse(status)
+        .map(|_| ())
+        .ok_or_else(|| AppError::InvalidEnvironmentStatus(status.to_string()))
 }
 
 fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
@@ -4819,7 +4820,7 @@ fn project_draft_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectDraftRec
         id: row.get("id"),
         git_repo_url: row.get("git_repo_url"),
         project_root: row.get("project_root"),
-        status: row.get("status"),
+        status: DraftStatus::parse(&row.get::<String, _>("status")),
         validation_error: row.get("validation_error"),
         project_name: row.get("project_name"),
         default_branch: row.get("default_branch"),
@@ -4847,7 +4848,7 @@ fn environment_draft_record_from_row(row: &sqlx::postgres::PgRow) -> Environment
         profile_secrets: row.get::<sqlx::types::Json<Value>, _>("profile_secrets").0,
         branch_options: row.get::<sqlx::types::Json<Value>, _>("branch_options").0,
         commit_options: row.get::<sqlx::types::Json<Value>, _>("commit_options").0,
-        status: row.get("status"),
+        status: DraftStatus::parse(&row.get::<String, _>("status")),
         validation_error: row.get("validation_error"),
         validation_invocation_id: row.get("validation_invocation_id"),
         created_at: row.get("created_at"),
@@ -4876,7 +4877,7 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         auto_deploy: row.get("auto_deploy"),
         immutable: row.get("immutable"),
         pr_number: row.get("pr_number"),
-        status: row.get("status"),
+        status: EnvironmentStatus::parse(&row.get::<String, _>("status")).unwrap_or(EnvironmentStatus::Active),
         adapter_type: row.get("adapter_type"),
         worker_queue: row.get("worker_queue"),
         schema_name: row.get("schema_name"),
@@ -4929,7 +4930,7 @@ fn environment_reconcile_preparation_from_row(
         kind: row.get("kind"),
         input_fingerprint: row.get("input_fingerprint"),
         target_git_commit_sha: row.get("target_git_commit_sha"),
-        status: row.get("status"),
+        status: PreparationStatus::parse(&row.get::<String, _>("status")),
         invocation_id: row.get("invocation_id"),
         error: row.get("error"),
         failure_count: row.get("failure_count"),
@@ -5262,5 +5263,105 @@ mod tests {
             compute_worker_registry_health(&worker, 0, worker.last_seen_at),
             InvocationWorkerHealthApi::Stale
         );
+    }
+
+    #[test]
+    fn automatic_retry_backoff_scales_exponentially() {
+        use super::automatic_retry_backoff;
+        assert_eq!(automatic_retry_backoff(0), Duration::seconds(5));
+        assert_eq!(automatic_retry_backoff(1), Duration::seconds(5));
+        assert_eq!(automatic_retry_backoff(2), Duration::seconds(10));
+        assert_eq!(automatic_retry_backoff(3), Duration::seconds(20));
+        assert_eq!(automatic_retry_backoff(4), Duration::seconds(40));
+        // Caps at 300s
+        assert_eq!(automatic_retry_backoff(10), Duration::seconds(300));
+    }
+
+    #[test]
+    fn plan_source_event_ids_extracts_from_metadata() {
+        use super::plan_source_event_ids;
+        let metadata = json!({"source_event_ids": [3, 1, 2, 1]});
+        let ids = plan_source_event_ids(None, &metadata);
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn plan_source_event_ids_falls_back_to_source_event_id() {
+        use super::plan_source_event_ids;
+        let ids = plan_source_event_ids(Some(42), &json!({}));
+        assert_eq!(ids, vec![42]);
+    }
+
+    #[test]
+    fn plan_source_event_ids_returns_empty_when_no_source() {
+        use super::plan_source_event_ids;
+        let ids = plan_source_event_ids(None, &json!({}));
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn remote_project_id_is_deterministic() {
+        use super::remote_project_id;
+        let id1 = remote_project_id("git@github.com:org/repo.git", ".", "my_project");
+        let id2 = remote_project_id("git@github.com:org/repo.git", ".", "my_project");
+        assert_eq!(id1, id2);
+        assert!(id1.starts_with("prj_remote_"));
+        assert_eq!(id1.len(), "prj_remote_".len() + 16);
+    }
+
+    #[test]
+    fn remote_project_id_differs_for_different_inputs() {
+        use super::remote_project_id;
+        let id1 = remote_project_id("git@github.com:org/repo.git", ".", "proj_a");
+        let id2 = remote_project_id("git@github.com:org/repo.git", ".", "proj_b");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn compute_cancel_state_returns_completed_for_canceled() {
+        use super::compute_cancel_state;
+        use crate::api::{InvocationCancelStateApi, InvocationLifecycleStatus, InvocationStatusResponse};
+        let status = InvocationStatusResponse {
+            invocation_id: uuid::Uuid::nil(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: "q".to_string(),
+            status: InvocationLifecycleStatus::Canceled,
+            exit_code: Some(130),
+            error: None,
+            started_at: Utc::now(),
+            claimed_at: None,
+            last_heartbeat_at: None,
+            cancel_requested_at: None,
+            completed_at: None,
+            cancel_requested: true,
+            claimed_by: None,
+            cancel_state: InvocationCancelStateApi::None,
+            worker_health: InvocationWorkerHealthApi::Idle,
+        };
+        assert_eq!(compute_cancel_state(&status), InvocationCancelStateApi::Completed);
+    }
+
+    #[test]
+    fn compute_cancel_state_returns_requested_when_pending() {
+        use super::compute_cancel_state;
+        use crate::api::{InvocationCancelStateApi, InvocationLifecycleStatus, InvocationStatusResponse};
+        let status = InvocationStatusResponse {
+            invocation_id: uuid::Uuid::nil(),
+            execution_mode: InvocationExecutionModeApi::Server,
+            worker_queue: "q".to_string(),
+            status: InvocationLifecycleStatus::Running,
+            exit_code: None,
+            error: None,
+            started_at: Utc::now(),
+            claimed_at: Some(Utc::now()),
+            last_heartbeat_at: None,
+            cancel_requested_at: Some(Utc::now()),
+            completed_at: None,
+            cancel_requested: true,
+            claimed_by: Some("w".to_string()),
+            cancel_state: InvocationCancelStateApi::None,
+            worker_health: InvocationWorkerHealthApi::Claimed,
+        };
+        assert_eq!(compute_cancel_state(&status), InvocationCancelStateApi::Requested);
     }
 }

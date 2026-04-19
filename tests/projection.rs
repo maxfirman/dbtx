@@ -8,7 +8,7 @@ use dbtx::api::{
     ProjectDraftCreateApiRequest,
 };
 use dbtx::client::DaemonClient;
-use dbtx::db::PlanStatus;
+use dbtx::db::{DraftStatus, PlanStatus};
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use dbtx::services::{
     code_change_input_fingerprint, infer_local_project_defaults, infer_remote_project_defaults,
@@ -3657,7 +3657,7 @@ async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
         .environment_draft_create(&project_id)
         .await
         .expect("create environment draft");
-    assert_eq!(created.draft.status, "loading_git");
+    assert_eq!(created.draft.status, DraftStatus::LoadingGit);
 
     let head_sha = git_rev_parse(repo.project_dir(), "HEAD");
     let request = environment_draft_update_request("api-env", "main", Some(&head_sha), false);
@@ -3666,7 +3666,7 @@ async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
         .environment_draft_refresh_branch(created.draft.id, request.clone())
         .await
         .expect("refresh branch");
-    assert_eq!(refreshed.draft.status, "loading_git");
+    assert_eq!(refreshed.draft.status, DraftStatus::LoadingGit);
     assert_eq!(refreshed.draft.slug, "api-env");
     assert_eq!(refreshed.draft.git_branch.as_deref(), Some("main"));
 
@@ -3674,7 +3674,7 @@ async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
         .environment_draft_validate(created.draft.id, request)
         .await
         .expect("validate draft");
-    assert_eq!(validating.draft.status, "validating");
+    assert_eq!(validating.draft.status, DraftStatus::Validating);
     assert_eq!(validating.draft.git_commit_sha.as_deref(), Some(head_sha.as_str()));
 
     mark_environment_draft_validated(
@@ -3824,14 +3824,14 @@ async fn project_draft_api_round_trip_and_confirms_validated_draft() {
         })
         .await
         .expect("create project draft");
-    assert_eq!(created.draft.status, "draft");
+    assert_eq!(created.draft.status, DraftStatus::Draft);
     assert_eq!(created.draft.project_root, project_root);
 
     let validating = client
         .project_draft_validate(created.draft.id)
         .await
         .expect("start project draft validation");
-    assert_eq!(validating.draft.status, "validating");
+    assert_eq!(validating.draft.status, DraftStatus::Validating);
 
     let project_name = read_dbt_project_name(repo.project_dir());
     mark_project_draft_validated(
@@ -3846,7 +3846,7 @@ async fn project_draft_api_round_trip_and_confirms_validated_draft() {
         .project_draft_get(created.draft.id)
         .await
         .expect("reload validated draft");
-    assert_eq!(reloaded.draft.status, "validated");
+    assert_eq!(reloaded.draft.status, DraftStatus::Validated);
     assert_eq!(reloaded.draft.project_name.as_deref(), Some(project_name.as_str()));
     assert_eq!(reloaded.draft.default_branch.as_deref(), Some("main"));
 

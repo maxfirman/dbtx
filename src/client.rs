@@ -1,3 +1,4 @@
+//! HTTP client for communicating with the dbtx-server API.
 use crate::api::{
     EnvironmentActiveResourcesApiRequest, EnvironmentActiveResourcesResponse,
     EnvironmentActualStateResponse, EnvironmentReconcileApiRequest, EnvironmentRunPlanResponse,

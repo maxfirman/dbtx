@@ -1,3 +1,4 @@
+//! HTTP API server: routes, handlers, and OpenAPI documentation.
 use crate::api::{
     ApiErrorResponse, EnvironmentActiveResourcesApiRequest, EnvironmentActiveResourcesResponse,
     EnvironmentActualStateResponse, EnvironmentDraftResponse, EnvironmentDraftStartResponse,
@@ -400,10 +401,18 @@ pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(listen = %addr, "dbtx server listening");
-    axum::serve(listener, router(state)).await.map_err(|err| {
-        error!(error = %err, "dbtx server stopped with error");
-        AppError::Io(err)
-    })
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|err| {
+            error!(error = %err, "dbtx server stopped with error");
+            AppError::Io(err)
+        })
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("received shutdown signal, draining connections");
 }
 
 async fn reconcile_timed_out_invocations(state: &AppState) -> AppResult<usize> {
@@ -1893,6 +1902,12 @@ impl IntoResponse for ApiError {
             AppError::ProjectDeleteBlocked(_) => StatusCode::CONFLICT,
             AppError::InvocationAlreadyClaimed(_) => StatusCode::CONFLICT,
             AppError::InvocationNotClaimable(_) => StatusCode::BAD_REQUEST,
+            AppError::EnvironmentAlreadyReconciled
+            | AppError::ReconciliationInProgress
+            | AppError::PlanNotAdmissible(_, _) => StatusCode::CONFLICT,
+            AppError::ReconciliationRequiresBaseline
+            | AppError::ReconciliationRequiresCommitSha
+            | AppError::ReconciliationEmptyPlan => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,
             AppError::Io(ref err) if err.kind() == std::io::ErrorKind::NotFound => {
                 StatusCode::NOT_FOUND

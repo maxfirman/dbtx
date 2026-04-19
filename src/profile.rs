@@ -1,3 +1,4 @@
+//! dbt profile management: validation, encryption, resolution, and generation.
 use crate::error::{AppError, AppResult};
 use aes_gcm_siv::aead::{Aead, KeyInit};
 use aes_gcm_siv::{Aes256GcmSiv, Nonce};

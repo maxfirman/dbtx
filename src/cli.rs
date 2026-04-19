@@ -1,3 +1,4 @@
+//! CLI argument definitions using clap derive.
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 #[derive(Debug, Parser)]

@@ -1,3 +1,4 @@
+//! Public API request/response types and shared enums for the JSON API.
 use crate::db::{AppliedMigration, EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
 use crate::execution::{ExecutionCompletion, ExecutionEvent};
 use chrono::{DateTime, Utc};

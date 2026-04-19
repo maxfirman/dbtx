@@ -1,3 +1,4 @@
+//! Application error types and result aliases.
 use std::io;
 
 #[derive(Debug, thiserror::Error)]
@@ -139,6 +140,14 @@ pub enum AppError {
     ReconciliationRequiresCommitSha,
     #[error("reconciliation plan resolved to no selected resources")]
     ReconciliationEmptyPlan,
+    #[error("invocation was canceled")]
+    InvocationCanceled,
+    #[error("invocation is owned by a different worker or is not running")]
+    InvocationOwnershipMismatch,
+    #[error("worker setup failed: {0}")]
+    WorkerSetupFailed(String),
+    #[error("git target not found: {0}")]
+    GitTargetNotFound(String),
 }
 
 pub type AppResult<T> = Result<T, AppError>;

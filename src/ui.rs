@@ -1,12 +1,13 @@
+//! Server-rendered operator UI: HTMX handlers, Askama templates, and view models.
 use crate::api::{
     EnvironmentActiveResourcePhaseApi, InvocationCommandApi, InvocationExecutionModeApi,
     InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
     QueueStatusResponse, WorkerStatusResponse,
 };
 use crate::db::{
-    EnvironmentActualStateRecord, EnvironmentActiveResourceRecord, EnvironmentRecord,
-    EnvironmentReconcilePreparationRecord, EnvironmentRunPlanRecord, EnvironmentVersionRecord,
-    InvocationListFilters, PlanStatus, ProjectRecord,
+    DraftStatus, EnvironmentActualStateRecord, EnvironmentActiveResourceRecord, EnvironmentRecord,
+    EnvironmentReconcilePreparationRecord, EnvironmentRunPlanRecord,
+    EnvironmentVersionRecord, InvocationListFilters, PlanStatus, PreparationStatus, ProjectRecord,
 };
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
@@ -504,7 +505,7 @@ async fn project_draft_status(
     render_project_draft_fragment(
         &draft,
         None,
-        !is_terminal_project_draft_status(&draft.status),
+        !is_terminal_project_draft_status(draft.status),
     )
 }
 
@@ -655,8 +656,8 @@ async fn render_environment_draft_modal(
     })
 }
 
-fn is_terminal_project_draft_status(status: &str) -> bool {
-    matches!(status, "validated" | "failed")
+fn is_terminal_project_draft_status(status: DraftStatus) -> bool {
+    status.is_terminal()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1996,8 +1997,8 @@ fn environment_link_view(environment: &EnvironmentRecord) -> EnvironmentLinkView
         slug: environment.slug.clone(),
         target_name: environment.target_name.clone(),
         adapter_type: environment.adapter_type.clone(),
-        status: environment.status.clone(),
-        status_class: status_badge_class(&environment.status),
+        status: environment.status.to_string(),
+        status_class: status_badge_class(environment.status.as_str()),
         detail_url: format!(
             "/ui/projects/{}/environments/{}",
             environment.project_ref, environment.slug
@@ -2014,8 +2015,8 @@ fn project_draft_view(draft: &crate::db::ProjectDraftRecord) -> ProjectDraftView
         id: draft.id.to_string(),
         git_repo_url: draft.git_repo_url.clone(),
         project_root: draft.project_root.clone(),
-        status_class: status_badge_class(&draft.status),
-        status: draft.status.clone(),
+        status_class: status_badge_class(draft.status.as_str()),
+        status: draft.status.to_string(),
         project_name: draft.project_name.clone().unwrap_or_default(),
         default_branch: draft.default_branch.clone().unwrap_or_default(),
         has_validation_stream: !validation_sse_url.is_empty(),
@@ -2091,7 +2092,7 @@ fn environment_draft_view(
         commit_options
     };
     Ok(EnvironmentDraftView {
-        status: draft.status.clone(),
+        status: draft.status.to_string(),
         slug: draft.slug.clone(),
         git_branch: draft.git_branch.clone().unwrap_or_default(),
         git_commit_sha: draft.git_commit_sha.clone().unwrap_or_default(),
@@ -2119,10 +2120,10 @@ fn environment_draft_view(
         profile_secret_pairs_json: serde_json::to_string(&secret_pairs)
             .map_err(AppError::from)
             .map_err(UiError::from)?,
-        is_loading: draft.status == "loading_git",
-        is_validating: draft.status == "validating",
-        is_validated: draft.status == "validated",
-        is_failed: draft.status == "failed",
+        is_loading: draft.status == DraftStatus::LoadingGit,
+        is_validating: draft.status == DraftStatus::Validating,
+        is_validated: draft.status == DraftStatus::Validated,
+        is_failed: draft.status == DraftStatus::Failed,
     })
 }
 
@@ -2211,8 +2212,8 @@ fn environment_detail_view(environment: &EnvironmentRecord) -> EnvironmentDetail
         adapter_type: environment.adapter_type.clone(),
         worker_queue: environment.worker_queue.clone(),
         schema_name: environment.schema_name.clone(),
-        status_class: status_badge_class(&environment.status),
-        status: environment.status.clone(),
+        status_class: status_badge_class(environment.status.as_str()),
+        status: environment.status.to_string(),
         git_branch: environment.git_branch.clone().unwrap_or_default(),
         git_commit_sha: environment.git_commit_sha.clone().unwrap_or_default(),
     }
@@ -2255,11 +2256,10 @@ fn environment_actual_state_view(
 fn environment_reconcile_preparation_view(
     preparation: &EnvironmentReconcilePreparationRecord,
 ) -> EnvironmentReconcilePreparationView {
-    let status_class = match preparation.status.as_str() {
-        "running" => "bg-sky-100 text-sky-800",
-        "succeeded" => "bg-emerald-100 text-emerald-800",
-        "failed" => "bg-rose-100 text-rose-800",
-        _ => "bg-slate-100 text-slate-700",
+    let status_class = match preparation.status {
+        PreparationStatus::Running => "bg-sky-100 text-sky-800",
+        PreparationStatus::Succeeded => "bg-emerald-100 text-emerald-800",
+        PreparationStatus::Failed => "bg-rose-100 text-rose-800",
     };
     let invocation_id = preparation
         .invocation_id
@@ -2271,7 +2271,7 @@ fn environment_reconcile_preparation_view(
         .unwrap_or_default();
     EnvironmentReconcilePreparationView {
         kind: preparation.kind.replace('_', " "),
-        status: preparation.status.clone(),
+        status: preparation.status.to_string(),
         status_class,
         input_summary: reconcile_preparation_input_summary(preparation),
         input_fingerprint: preparation
@@ -2343,12 +2343,11 @@ fn environment_reconciliation_summary_view(
     let (preparation_status, preparation_status_class) = preparation
         .map(|preparation| {
             (
-                preparation.status.clone(),
-                match preparation.status.as_str() {
-                    "running" => "bg-sky-100 text-sky-800",
-                    "succeeded" => "bg-emerald-100 text-emerald-800",
-                    "failed" => "bg-rose-100 text-rose-800",
-                    _ => "bg-slate-100 text-slate-700",
+                preparation.status.to_string(),
+                match preparation.status {
+                    PreparationStatus::Running => "bg-sky-100 text-sky-800",
+                    PreparationStatus::Succeeded => "bg-emerald-100 text-emerald-800",
+                    PreparationStatus::Failed => "bg-rose-100 text-rose-800",
                 },
             )
         })
@@ -2729,14 +2728,14 @@ mod tests {
     use chrono::Utc;
 
     fn draft(
-        status: &str,
+        status: DraftStatus,
         validation_invocation_id: Option<Uuid>,
     ) -> crate::db::ProjectDraftRecord {
         crate::db::ProjectDraftRecord {
             id: Uuid::new_v4(),
             git_repo_url: "git@github.com:org/repo.git".to_string(),
             project_root: "analytics/jaffle_shop".to_string(),
-            status: status.to_string(),
+            status,
             validation_error: None,
             project_name: Some("jaffle_shop".to_string()),
             default_branch: Some("main".to_string()),
@@ -2749,7 +2748,7 @@ mod tests {
 
     #[test]
     fn pending_draft_fragment_prefers_sse_over_polling() {
-        let draft = draft("validating", Some(Uuid::nil()));
+        let draft = draft(DraftStatus::Validating, Some(Uuid::nil()));
         let rendered = render_project_draft_fragment(&draft, None, true)
             .expect("render pending draft")
             .0;
@@ -2762,7 +2761,7 @@ mod tests {
 
     #[test]
     fn pending_draft_fragment_polls_when_no_sse_stream_is_available() {
-        let draft = draft("validating", None);
+        let draft = draft(DraftStatus::Validating, None);
         let rendered = render_project_draft_fragment(&draft, None, true)
             .expect("render pending draft")
             .0;
@@ -2773,10 +2772,10 @@ mod tests {
 
     #[test]
     fn terminal_project_draft_statuses_are_detected() {
-        assert!(is_terminal_project_draft_status("validated"));
-        assert!(is_terminal_project_draft_status("failed"));
-        assert!(!is_terminal_project_draft_status("draft"));
-        assert!(!is_terminal_project_draft_status("validating"));
+        assert!(is_terminal_project_draft_status(DraftStatus::Validated));
+        assert!(is_terminal_project_draft_status(DraftStatus::Failed));
+        assert!(!is_terminal_project_draft_status(DraftStatus::Draft));
+        assert!(!is_terminal_project_draft_status(DraftStatus::Validating));
     }
 
     #[test]

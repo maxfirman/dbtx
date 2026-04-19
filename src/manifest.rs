@@ -1,3 +1,4 @@
+//! dbt manifest parsing, node/edge extraction, and reconstructed state management.
 use crate::error::{AppError, AppResult};
 use serde_json::Value;
 use std::collections::BTreeMap;

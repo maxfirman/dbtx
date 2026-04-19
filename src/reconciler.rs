@@ -1,5 +1,6 @@
+//! Automatic reconciliation daemon: drift detection, blocked-plan sweep, and manifest preparation.
 use crate::api::InvocationCommandApi;
-use crate::db::{EnvironmentRecord, PlanStatus, SourceStateEventRecord};
+use crate::db::{EnvironmentRecord, PlanStatus, PreparationStatus, SourceStateEventRecord};
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::start_prepared_invocation;
 use crate::server::AppState;
@@ -53,6 +54,10 @@ pub async fn run(state: AppState) -> AppResult<()> {
                 if let Err(err) = sweep_blocked_plans_once(&state).await {
                     error!(error = %err, "blocked plan sweep failed");
                 }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("received shutdown signal, stopping reconciler");
+                return Ok(());
             }
         }
     }
@@ -168,7 +173,7 @@ async fn automatic_reconcile_backoff_until(
         .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
         .await?
         && preparation.kind == "target_manifest"
-        && preparation.status == "failed"
+        && preparation.status == PreparationStatus::Failed
         && preparation.input_fingerprint
             == current_code_change_fingerprint
                 .as_ref()
@@ -243,7 +248,7 @@ async fn ensure_target_manifest_for_reconcile_async(
         .filter(|preparation| {
             preparation.kind == "target_manifest"
                 && preparation.input_fingerprint.as_deref() == Some(input_fingerprint.as_str())
-                && preparation.status == "failed"
+                && preparation.status == PreparationStatus::Failed
                 && preparation
                     .next_attempt_at
                     .map(|next_attempt_at| next_attempt_at > Utc::now())

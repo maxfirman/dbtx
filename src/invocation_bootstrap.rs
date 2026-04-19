@@ -1,3 +1,4 @@
+//! Invocation lifecycle bootstrapping: creation, claim deadlines, and prepared invocation startup.
 use crate::api::{
     InvocationCommandApi, InvocationExecutionModeApi, InvocationExecutionSpecApi,
 };
@@ -331,5 +332,26 @@ async fn wait_for_terminal_invocation(
             )));
         }
         sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invocation_claim_deadline_at;
+    use crate::api::InvocationExecutionModeApi;
+    use chrono::Utc;
+
+    #[test]
+    fn claim_deadline_is_in_the_future() {
+        let now = Utc::now();
+        let deadline = invocation_claim_deadline_at(InvocationExecutionModeApi::Server);
+        assert!(deadline > now);
+    }
+
+    #[test]
+    fn server_deadline_is_longer_than_local() {
+        let server = invocation_claim_deadline_at(InvocationExecutionModeApi::Server);
+        let local = invocation_claim_deadline_at(InvocationExecutionModeApi::Local);
+        assert!(server > local);
     }
 }

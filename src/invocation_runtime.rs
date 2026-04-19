@@ -1,3 +1,4 @@
+//! In-process invocation event streaming and persistence coordination.
 use crate::api::{InvocationEvent, InvocationLifecycleStatus, InvocationStatusResponse};
 use crate::db::{Db, InvocationPersistenceRecord};
 use crate::error::AppResult;

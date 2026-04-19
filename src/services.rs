@@ -1,3 +1,4 @@
+//! Domain services: invocation orchestration, reconciliation planning, and environment management.
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
     CreateEnvironmentDraftInput, CreateEnvironmentRunPlanInput, CreateProjectDraftInput,

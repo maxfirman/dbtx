@@ -1,3 +1,4 @@
+//! CLI runtime handlers for project, environment, invocation, worker, and queue subcommands.
 use crate::api;
 use crate::api::{
     InvocationCancelStateApi, InvocationExecutionModeApi, InvocationLifecycleStatus,

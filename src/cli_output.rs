@@ -1,3 +1,4 @@
+//! CLI output formatting for invocations, projects, environments, workers, and queues.
 use crate::api;
 use crate::db::{self, EnvironmentRecord, EnvironmentVersionRecord, ProjectRecord};
 use std::io::IsTerminal;

@@ -64,6 +64,122 @@ impl std::fmt::Display for PlanStatus {
     }
 }
 
+/// Status of a remote environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentStatus {
+    Active,
+    Archived,
+    Failed,
+    Deleting,
+}
+
+impl EnvironmentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Archived => "archived",
+            Self::Failed => "failed",
+            Self::Deleting => "deleting",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "active" => Some(Self::Active),
+            "archived" => Some(Self::Archived),
+            "failed" => Some(Self::Failed),
+            "deleting" => Some(Self::Deleting),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for EnvironmentStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Status of a project or environment onboarding draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftStatus {
+    Draft,
+    LoadingGit,
+    Ready,
+    Validating,
+    Validated,
+    Failed,
+}
+
+impl DraftStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::LoadingGit => "loading_git",
+            Self::Ready => "ready",
+            Self::Validating => "validating",
+            Self::Validated => "validated",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "draft" => Self::Draft,
+            "loading_git" => Self::LoadingGit,
+            "ready" => Self::Ready,
+            "validating" => Self::Validating,
+            "validated" => Self::Validated,
+            _ => Self::Failed,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Validated | Self::Failed)
+    }
+}
+
+impl std::fmt::Display for DraftStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Status of an environment reconcile preparation step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparationStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl PreparationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "running" => Self::Running,
+            "succeeded" => Self::Succeeded,
+            _ => Self::Failed,
+        }
+    }
+}
+
+impl std::fmt::Display for PreparationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AppliedMigration {
     pub version: i64,
@@ -87,7 +203,7 @@ pub struct ProjectDraftRecord {
     pub id: Uuid,
     pub git_repo_url: String,
     pub project_root: String,
-    pub status: String,
+    pub status: DraftStatus,
     pub validation_error: Option<String>,
     pub project_name: Option<String>,
     pub default_branch: Option<String>,
@@ -114,7 +230,7 @@ pub struct EnvironmentDraftRecord {
     pub profile_secrets: Value,
     pub branch_options: Value,
     pub commit_options: Value,
-    pub status: String,
+    pub status: DraftStatus,
     pub validation_error: Option<String>,
     pub validation_invocation_id: Option<Uuid>,
     pub created_at: chrono::DateTime<Utc>,
@@ -139,7 +255,7 @@ pub struct EnvironmentRecord {
     pub auto_deploy: bool,
     pub immutable: bool,
     pub pr_number: Option<i32>,
-    pub status: String,
+    pub status: EnvironmentStatus,
     pub adapter_type: String,
     pub worker_queue: String,
     pub schema_name: String,
@@ -187,7 +303,7 @@ pub struct EnvironmentReconcilePreparationRecord {
     pub kind: String,
     pub input_fingerprint: Option<String>,
     pub target_git_commit_sha: Option<String>,
-    pub status: String,
+    pub status: PreparationStatus,
     pub invocation_id: Option<Uuid>,
     pub error: Option<String>,
     pub failure_count: i32,

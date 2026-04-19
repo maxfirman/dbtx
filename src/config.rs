@@ -1,3 +1,4 @@
+//! Runtime configuration: database URLs, service URLs, dbt paths, and invocation context.
 use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::env;
