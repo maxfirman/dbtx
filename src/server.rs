@@ -429,7 +429,7 @@ async fn reconcile_timed_out_invocations(state: &AppState) -> AppResult<usize> {
             .force_complete_invocation(
                 timed_out_invocation.invocation_id,
                 &crate::execution::ExecutionCompletion {
-                    status: timed_out_invocation.status.clone(),
+                    status: timed_out_invocation.status,
                     exit_code: timed_out_invocation.exit_code,
                     error: Some(timed_out_invocation.error.clone()),
                     dbt_version: None,
@@ -1582,7 +1582,7 @@ async fn invocation_cancel(
             .force_complete_invocation(
                 invocation_id,
                 &crate::execution::ExecutionCompletion {
-                    status: status.clone(),
+                    status,
                     exit_code,
                     error: Some(error.clone()),
                     dbt_version: None,
@@ -1738,9 +1738,7 @@ async fn invocation_append_events(
     let runtime = state.invocations.get_or_create(id, None).await;
     let recorder = InvocationRecorder::new(state.db.clone(), id, runtime);
     if !recorder.is_running().await {
-        return Err(ApiError(AppError::Io(std::io::Error::other(
-            "invocation is already completed",
-        ))));
+        return Err(ApiError(AppError::Internal("invocation is already completed".to_string())));
     }
     state
         .db
@@ -2031,5 +2029,75 @@ mod tests {
     fn normalize_worker_queues_rejects_empty_input() {
         assert!(super::normalize_worker_queues(&[]).is_err());
         assert!(super::normalize_worker_queues(&["   ".to_string()]).is_err());
+    }
+
+    #[test]
+    fn error_response_maps_not_found_errors() {
+        use super::ApiError;
+        use crate::error::AppError;
+        use axum::response::IntoResponse;
+        use axum::http::StatusCode;
+
+        let resp = ApiError(AppError::ProjectIdNotFound("prj_1".to_string())).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = ApiError(AppError::EnvironmentNotFound("prj_1".to_string(), "dev".to_string())).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn error_response_maps_conflict_errors() {
+        use super::ApiError;
+        use crate::error::AppError;
+        use axum::response::IntoResponse;
+        use axum::http::StatusCode;
+
+        let resp = ApiError(AppError::EnvironmentAlreadyReconciled).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        let resp = ApiError(AppError::ReconciliationInProgress).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        let resp = ApiError(AppError::PlanNotAdmissible("id".to_string(), "completed".to_string())).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn error_response_maps_unprocessable_entity() {
+        use super::ApiError;
+        use crate::error::AppError;
+        use axum::response::IntoResponse;
+        use axum::http::StatusCode;
+
+        let resp = ApiError(AppError::ReconciliationRequiresBaseline).into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let resp = ApiError(AppError::ReconciliationEmptyPlan).into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn error_response_maps_bad_request_errors() {
+        use super::ApiError;
+        use crate::error::AppError;
+        use axum::response::IntoResponse;
+        use axum::http::StatusCode;
+
+        let resp = ApiError(AppError::UserStateNotAllowed).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = ApiError(AppError::InvalidProjectMode("bad".to_string())).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn error_response_maps_internal_to_500() {
+        use super::ApiError;
+        use crate::error::AppError;
+        use axum::response::IntoResponse;
+        use axum::http::StatusCode;
+
+        let resp = ApiError(AppError::Internal("something broke".to_string())).into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

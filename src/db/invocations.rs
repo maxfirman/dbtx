@@ -817,7 +817,7 @@ impl Db {
         )
         .bind(invocation_id)
         .bind(worker_id)
-        .bind(invocation_status_to_db(completion.status.clone()))
+        .bind(invocation_status_to_db(completion.status))
         .bind(completion.exit_code)
         .bind(completion.error.as_deref())
         .bind(lease_token)
@@ -856,7 +856,7 @@ impl Db {
             "#,
         )
         .bind(invocation_id)
-        .bind(invocation_status_to_db(completion.status.clone()))
+        .bind(invocation_status_to_db(completion.status))
         .bind(completion.exit_code)
         .bind(completion.error.as_deref())
         .execute(&mut *tx)

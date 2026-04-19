@@ -256,9 +256,7 @@ pub async fn ensure_target_manifest_for_reconcile(
 ) -> AppResult<()> {
     let environment = state.db().get_environment(project_id, environment_slug).await?;
     let desired_commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
-        AppError::Io(std::io::Error::other(
-            "reconciliation requires a desired git commit sha",
-        ))
+        AppError::Internal("reconciliation requires a desired git commit sha".to_string())
     })?;
     if state
         .db()
@@ -287,16 +285,14 @@ pub async fn ensure_target_manifest_for_reconcile(
         crate::api::InvocationLifecycleStatus::Succeeded => {}
         crate::api::InvocationLifecycleStatus::Failed
         | crate::api::InvocationLifecycleStatus::Canceled => {
-            return Err(AppError::Io(std::io::Error::other(
+            return Err(AppError::Internal(
                 status
                     .error
                     .unwrap_or_else(|| "manifest prepare invocation failed".to_string()),
-            )));
+            ));
         }
         crate::api::InvocationLifecycleStatus::Running => {
-            return Err(AppError::Io(std::io::Error::other(
-                "manifest prepare invocation did not reach a terminal state",
-            )));
+            return Err(AppError::Internal("manifest prepare invocation did not reach a terminal state".to_string()));
         }
     }
 
@@ -306,9 +302,7 @@ pub async fn ensure_target_manifest_for_reconcile(
         .await?
         .is_none()
     {
-        return Err(AppError::Io(std::io::Error::other(
-            "manifest prepare finished without persisting a manifest snapshot",
-        )));
+        return Err(AppError::Internal("manifest prepare finished without persisting a manifest snapshot".to_string()));
     }
 
     Ok(())

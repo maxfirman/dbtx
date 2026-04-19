@@ -30,7 +30,11 @@ impl DaemonClient {
     pub fn new(base_url: String) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -524,12 +528,12 @@ async fn ensure_success(response: reqwest::Response) -> AppResult<reqwest::Respo
         .unwrap_or(body);
     Err(match status {
         StatusCode::PRECONDITION_FAILED => AppError::SchemaOutOfDate,
-        _ => AppError::Io(std::io::Error::other(message)),
+        _ => AppError::Internal(message),
     })
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> AppError {
-    AppError::Io(std::io::Error::other(error.to_string()))
+    AppError::Internal(error.to_string())
 }
 
 #[cfg(test)]

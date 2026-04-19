@@ -14,21 +14,25 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 fn reconcile_interval() -> Duration {
-    std::env::var("DBTX_RECONCILE_INTERVAL_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(Duration::from_millis)
-        .unwrap_or_else(|| Duration::from_secs(5))
+    parse_interval_ms(
+        std::env::var("DBTX_RECONCILE_INTERVAL_MS").ok().as_deref(),
+        Duration::from_secs(5),
+    )
 }
 
 fn blocked_plan_sweep_interval() -> Duration {
-    std::env::var("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
+    parse_interval_ms(
+        std::env::var("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS").ok().as_deref(),
+        Duration::from_secs(2),
+    )
+}
+
+fn parse_interval_ms(value: Option<&str>, default: Duration) -> Duration {
+    value
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
         .map(Duration::from_millis)
-        .unwrap_or_else(|| Duration::from_secs(2))
+        .unwrap_or(default)
 }
 
 pub async fn run(state: AppState) -> AppResult<()> {
@@ -371,7 +375,7 @@ mod tests {
 
     #[test]
     fn does_not_ignore_unrelated_io_error() {
-        let err = AppError::Io(std::io::Error::other("connection refused"));
+        let err = AppError::Internal("connection refused".to_string());
         assert!(!should_ignore_reconcile_error(&err));
     }
 
@@ -382,29 +386,32 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_interval_defaults_to_5s() {
-        // Clear env to test default
-        unsafe { std::env::remove_var("DBTX_RECONCILE_INTERVAL_MS") };
-        assert_eq!(reconcile_interval(), Duration::from_secs(5));
+    fn parse_interval_ms_defaults_when_none() {
+        let default = Duration::from_secs(5);
+        assert_eq!(parse_interval_ms(None, default), default);
     }
 
     #[test]
-    fn reconcile_interval_reads_env() {
-        unsafe { std::env::set_var("DBTX_RECONCILE_INTERVAL_MS", "2000") };
-        assert_eq!(reconcile_interval(), Duration::from_millis(2000));
-        unsafe { std::env::remove_var("DBTX_RECONCILE_INTERVAL_MS") };
+    fn parse_interval_ms_reads_value() {
+        assert_eq!(
+            parse_interval_ms(Some("2000"), Duration::from_secs(5)),
+            Duration::from_millis(2000)
+        );
     }
 
     #[test]
-    fn reconcile_interval_ignores_zero() {
-        unsafe { std::env::set_var("DBTX_RECONCILE_INTERVAL_MS", "0") };
-        assert_eq!(reconcile_interval(), Duration::from_secs(5));
-        unsafe { std::env::remove_var("DBTX_RECONCILE_INTERVAL_MS") };
+    fn parse_interval_ms_ignores_zero() {
+        assert_eq!(
+            parse_interval_ms(Some("0"), Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
     }
 
     #[test]
-    fn blocked_plan_sweep_interval_defaults_to_2s() {
-        unsafe { std::env::remove_var("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS") };
-        assert_eq!(blocked_plan_sweep_interval(), Duration::from_secs(2));
+    fn parse_interval_ms_ignores_invalid() {
+        assert_eq!(
+            parse_interval_ms(Some("not_a_number"), Duration::from_secs(2)),
+            Duration::from_secs(2)
+        );
     }
 }

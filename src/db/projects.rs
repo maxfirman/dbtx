@@ -483,14 +483,10 @@ impl Db {
             )));
         }
         let project_name = draft.project_name.clone().ok_or_else(|| {
-            AppError::Io(std::io::Error::other(
-                "validated project draft missing project_name",
-            ))
+            AppError::Internal("validated project draft missing project_name".to_string())
         })?;
         let default_branch = draft.default_branch.clone().ok_or_else(|| {
-            AppError::Io(std::io::Error::other(
-                "validated project draft missing default_branch",
-            ))
+            AppError::Internal("validated project draft missing default_branch".to_string())
         })?;
         let project_id = remote_project_id(&draft.git_repo_url, &draft.project_root, &project_name);
         self.upsert_project(CreateProjectInput {

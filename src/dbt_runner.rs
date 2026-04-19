@@ -42,11 +42,11 @@ impl DbtChild {
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stdout")))?;
+            .ok_or_else(|| AppError::Internal("missing child stdout".to_string()))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stderr")))?;
+            .ok_or_else(|| AppError::Internal("missing child stderr".to_string()))?;
 
         let stdout_lines = BufReader::new(stdout).lines();
         let stderr_handle = tokio::spawn(async move {
@@ -71,7 +71,7 @@ impl DbtChild {
         let stderr_lines = self
             .stderr_handle
             .await
-            .map_err(|err| AppError::Io(std::io::Error::other(format!("stderr task failed: {err}"))))??;
+            .map_err(|err| AppError::Internal(format!("stderr task failed: {err}")))??;
         Ok(DbtChildResult {
             exit_code: status.code().unwrap_or(1),
             stderr_lines,

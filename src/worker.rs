@@ -36,10 +36,10 @@ pub async fn execute_claimed_invocation(
     if let Some(expected) = expected_invocation_id
         && claim.invocation_id != expected
     {
-        return Err(AppError::Io(std::io::Error::other(format!(
+        return Err(AppError::Internal(format!(
             "claimed unexpected invocation {}, expected {}",
             claim.invocation_id, expected
-        ))));
+        )));
     }
 
     let spec = claim.execution_spec.clone();
@@ -121,11 +121,11 @@ pub async fn execute_claimed_invocation(
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stdout")))?;
+        .ok_or_else(|| AppError::Internal("missing child stdout".to_string()))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stderr")))?;
+        .ok_or_else(|| AppError::Internal("missing child stderr".to_string()))?;
 
     let mut stdout_reader = BufReader::new(stdout).lines();
     let stderr_handle = tokio::spawn(async move {
@@ -239,7 +239,7 @@ pub async fn execute_claimed_invocation(
 
     let status = child.wait().await?;
     for line in stderr_handle.await.map_err(|err| {
-        AppError::Io(std::io::Error::other(format!("stderr task failed: {err}")))
+        AppError::Internal(format!("stderr task failed: {err}"))
     })?? {
         emit_stream_output(
             pretty_terminal_output,
@@ -464,7 +464,7 @@ async fn execute_release_validation(
         git_branch,
     } = spec
     else {
-        unreachable!("release validation requires release spec");
+        return Err(AppError::Internal("release validation requires release spec".to_string()));
     };
 
     send_worker_event(
@@ -541,7 +541,7 @@ async fn execute_project_validation(
         project_root,
     } = spec
     else {
-        unreachable!("project validation requires project validation spec");
+        return Err(AppError::Internal("project validation requires project validation spec".to_string()));
     };
 
     send_worker_event(
@@ -640,7 +640,7 @@ async fn execute_environment_prepare(
         selected_branch,
     } = spec
     else {
-        unreachable!("environment prepare requires environment prepare spec");
+        return Err(AppError::Internal("environment prepare requires environment prepare spec".to_string()));
     };
 
     send_worker_event(
@@ -732,7 +732,7 @@ async fn execute_environment_validation(
         profiles_yml,
     } = spec
     else {
-        unreachable!("environment validation requires environment validate spec");
+        return Err(AppError::Internal("environment validation requires environment validate spec".to_string()));
     };
 
     send_worker_event(
@@ -907,9 +907,7 @@ fn patch_runtime_project_yaml(project_dir: &Path) -> AppResult<()> {
 
 fn ensure_on_run_start_hook(project_yaml: &mut YamlValue) -> AppResult<()> {
     let mapping = project_yaml.as_mapping_mut().ok_or_else(|| {
-        AppError::Io(std::io::Error::other(
-            "dbt_project.yml must be a YAML mapping",
-        ))
+        AppError::Internal("dbt_project.yml must be a YAML mapping".to_string())
     })?;
     let key = YamlValue::String("on-run-start".to_string());
     let hook = YamlValue::String(DBTX_SELECTED_RESOURCES_HOOK.to_string());
@@ -932,9 +930,9 @@ fn ensure_on_run_start_hook(project_yaml: &mut YamlValue) -> AppResult<()> {
         }
         Some(YamlValue::Null) | None => YamlValue::Sequence(vec![hook]),
         Some(_) => {
-            return Err(AppError::Io(std::io::Error::other(
-                "unsupported on-run-start hook shape in dbt_project.yml",
-            )));
+            return Err(AppError::Internal(
+                "unsupported on-run-start hook shape in dbt_project.yml".to_string(),
+            ));
         }
     };
     mapping.insert(key, updated);
@@ -1056,10 +1054,9 @@ async fn resolve_remote_default_branch(repo_url: &str) -> AppResult<String> {
         .output()
         .await?;
     if !output.status.success() {
-        return Err(AppError::Io(std::io::Error::other(format!(
+        return Err(AppError::Internal(format!(
             "git failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))));
+            String::from_utf8_lossy(&output.stderr).trim())));
     }
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if let Some(rest) = line.strip_prefix("ref: refs/heads/")
@@ -1068,9 +1065,9 @@ async fn resolve_remote_default_branch(repo_url: &str) -> AppResult<String> {
             return Ok(branch.to_string());
         }
     }
-    Err(AppError::Io(std::io::Error::other(format!(
+    Err(AppError::Internal(format!(
         "git failed: could not determine default branch for {repo_url}"
-    ))))
+    )))
 }
 
 async fn run_validation_command(
@@ -1113,10 +1110,9 @@ async fn run_validation_command(
         .await?;
     }
     if !output.status.success() {
-        let err = AppError::Io(std::io::Error::other(format!(
+        let err = AppError::Internal(format!(
             "dbt {command} failed with exit code {}",
-            output.status.code().unwrap_or(1)
-        )));
+            output.status.code().unwrap_or(1)));
         report_setup_failure(client, claim, &err.to_string()).await?;
         return Err(err);
     }
@@ -1133,9 +1129,9 @@ async fn resolve_git_ref(git_dir: &Path, git_ref: &str, repo_url: &str) -> AppRe
             return Ok(resolved);
         }
     }
-    Err(AppError::Io(std::io::Error::other(format!(
+    Err(AppError::Internal(format!(
         "git failed: ref {git_ref} is not available from remote repository {repo_url}"
-    ))))
+    )))
 }
 
 async fn rev_parse_commit(git_dir: &Path, reference: &str) -> AppResult<String> {
@@ -1144,9 +1140,9 @@ async fn rev_parse_commit(git_dir: &Path, reference: &str) -> AppResult<String> 
     command.args(["rev-parse", "--verify", &format!("{reference}^{{commit}}")]);
     let output = command.output().await?;
     if !output.status.success() {
-        return Err(AppError::Io(std::io::Error::other(
+        return Err(AppError::Internal(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        )));
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -1253,10 +1249,9 @@ async fn run_git_with_git_dir<const N: usize>(
     if output.status.success() {
         Ok(())
     } else {
-        Err(AppError::Io(std::io::Error::other(format!(
+        Err(AppError::Internal(format!(
             "git failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))))
+            String::from_utf8_lossy(&output.stderr).trim())))
     }
 }
 
@@ -1284,13 +1279,13 @@ async fn ensure_commit_exists_in_mirror(
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stderr.contains("Not a valid object name") {
-        return Err(AppError::Io(std::io::Error::other(format!(
+        return Err(AppError::Internal(format!(
             "git failed: commit {commit_sha} is not available from remote repository {repo_url}; has it been pushed?"
-        ))));
+        )));
     }
-    Err(AppError::Io(std::io::Error::other(format!(
+    Err(AppError::Internal(format!(
         "git failed: {stderr}"
-    ))))
+    )))
 }
 
 async fn run_git<const N: usize>(cwd: Option<&std::path::Path>, args: [&str; N]) -> AppResult<()> {
@@ -1303,10 +1298,9 @@ async fn run_git<const N: usize>(cwd: Option<&std::path::Path>, args: [&str; N])
     if output.status.success() {
         Ok(())
     } else {
-        Err(AppError::Io(std::io::Error::other(format!(
+        Err(AppError::Internal(format!(
             "git failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))))
+            String::from_utf8_lossy(&output.stderr).trim())))
     }
 }
 
@@ -1360,9 +1354,9 @@ async fn acquire_repo_lock(cache_root: &Path, repo_hash: &str) -> AppResult<Repo
                     continue;
                 }
                 if started.elapsed() > std::time::Duration::from_secs(30) {
-                    return Err(AppError::Io(std::io::Error::other(format!(
+                    return Err(AppError::Internal(format!(
                         "timed out acquiring git cache lock for {repo_hash}"
-                    ))));
+                    )));
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }

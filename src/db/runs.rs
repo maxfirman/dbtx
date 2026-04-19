@@ -18,14 +18,10 @@ impl Db {
                 RunFinalization {
                     run_id,
                     project_id: persistence.project_id.ok_or_else(|| {
-                        AppError::Io(std::io::Error::other(
-                            "run invocation missing project scope",
-                        ))
+                        AppError::Internal("run invocation missing project scope".to_string())
                     })?,
                     environment_id: persistence.environment_id.ok_or_else(|| {
-                        AppError::Io(std::io::Error::other(
-                            "run invocation missing environment scope",
-                        ))
+                        AppError::Internal("run invocation missing environment scope".to_string())
                     })?,
                     subcommand: &persistence.command,
                     dbt_version: completion.dbt_version.as_deref(),
@@ -48,14 +44,10 @@ impl Db {
                     tx,
                     run_id,
                     persistence.project_id.ok_or_else(|| {
-                        AppError::Io(std::io::Error::other(
-                            "run invocation missing project scope",
-                        ))
+                        AppError::Internal("run invocation missing project scope".to_string())
                     })?,
                     persistence.environment_id.ok_or_else(|| {
-                        AppError::Io(std::io::Error::other(
-                            "run invocation missing environment scope",
-                        ))
+                        AppError::Internal("run invocation missing environment scope".to_string())
                     })?,
                     matches!(completion.status, InvocationLifecycleStatus::Succeeded),
                 )
@@ -69,14 +61,10 @@ impl Db {
             self.apply_release_completion_in_tx(
                 tx,
                 persistence.project_id.ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "release invocation missing project scope",
-                    ))
+                    AppError::Internal("release invocation missing project scope".to_string())
                 })?,
                 persistence.environment_id.ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "release invocation missing environment scope",
-                    ))
+                    AppError::Internal("release invocation missing environment scope".to_string())
                 })?,
                 completion.result.as_ref(),
             )
@@ -87,9 +75,7 @@ impl Db {
             self.apply_project_validation_completion_in_tx(
                 tx,
                 persistence.project_draft_id.ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "project validation invocation missing draft scope",
-                    ))
+                    AppError::Internal("project validation invocation missing draft scope".to_string())
                 })?,
                 completion,
             )
@@ -100,9 +86,7 @@ impl Db {
             self.apply_environment_prepare_completion_in_tx(
                 tx,
                 persistence.environment_draft_id.ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "environment prepare invocation missing draft scope",
-                    ))
+                    AppError::Internal("environment prepare invocation missing draft scope".to_string())
                 })?,
                 completion,
             )
@@ -113,9 +97,7 @@ impl Db {
             self.apply_environment_validation_completion_in_tx(
                 tx,
                 persistence.environment_draft_id.ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "environment validation invocation missing draft scope",
-                    ))
+                    AppError::Internal("environment validation invocation missing draft scope".to_string())
                 })?,
                 completion,
             )
@@ -126,14 +108,10 @@ impl Db {
             self.apply_manifest_prepare_completion_in_tx(
                 tx,
                 persistence.project_id.ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "manifest prepare invocation missing project scope",
-                    ))
+                    AppError::Internal("manifest prepare invocation missing project scope".to_string())
                 })?,
                 persistence.environment_id.ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "manifest prepare invocation missing environment scope",
-                    ))
+                    AppError::Internal("manifest prepare invocation missing environment scope".to_string())
                 })?,
                 invocation_id,
                 completion,
@@ -157,7 +135,7 @@ impl Db {
             self.complete_environment_run_plan_in_tx(
                 tx,
                 plan_id,
-                completion.status.clone(),
+                completion.status,
                 completion.error.as_deref(),
             )
             .await?;
@@ -240,25 +218,19 @@ impl Db {
         match completion.status {
             InvocationLifecycleStatus::Succeeded => {
                 let result = completion.result.as_ref().ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "project validation completed without metadata",
-                    ))
+                    AppError::Internal("project validation completed without metadata".to_string())
                 })?;
                 let project_name = result
                     .get("project_name")
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        AppError::Io(std::io::Error::other(
-                            "project validation missing project_name",
-                        ))
+                        AppError::Internal("project validation missing project_name".to_string())
                     })?;
                 let default_branch = result
                     .get("default_branch")
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        AppError::Io(std::io::Error::other(
-                            "project validation missing default_branch",
-                        ))
+                        AppError::Internal("project validation missing default_branch".to_string())
                     })?;
                 sqlx::query(
                     r#"
@@ -311,17 +283,13 @@ impl Db {
         result: Option<&Value>,
     ) -> AppResult<()> {
         let result = result.ok_or_else(|| {
-            AppError::Io(std::io::Error::other(
-                "release validation completed without resolved commit metadata",
-            ))
+            AppError::Internal("release validation completed without resolved commit metadata".to_string())
         })?;
         let resolved_commit_sha = result
             .get("resolved_commit_sha")
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                AppError::Io(std::io::Error::other(
-                    "release validation missing resolved_commit_sha",
-                ))
+                AppError::Internal("release validation missing resolved_commit_sha".to_string())
             })?;
         let git_branch = result.get("git_branch").and_then(Value::as_str);
 
@@ -360,9 +328,7 @@ impl Db {
         match completion.status {
             InvocationLifecycleStatus::Succeeded => {
                 let result = completion.result.as_ref().ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "environment prepare completed without metadata",
-                    ))
+                    AppError::Internal("environment prepare completed without metadata".to_string())
                 })?;
                 let selected_branch = result
                     .get("selected_branch")
@@ -429,17 +395,13 @@ impl Db {
         match completion.status {
             InvocationLifecycleStatus::Succeeded => {
                 let result = completion.result.as_ref().ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(
-                        "environment validation completed without metadata",
-                    ))
+                    AppError::Internal("environment validation completed without metadata".to_string())
                 })?;
                 let resolved_commit_sha = result
                     .get("resolved_commit_sha")
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        AppError::Io(std::io::Error::other(
-                            "environment validation missing resolved_commit_sha",
-                        ))
+                        AppError::Internal("environment validation missing resolved_commit_sha".to_string())
                     })?;
                 let selected_branch = result
                     .get("selected_branch")

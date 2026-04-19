@@ -1853,9 +1853,7 @@ fn local_machine_scope() -> AppResult<String> {
         }
     }
 
-    Err(AppError::Io(std::io::Error::other(
-        "failed to determine local machine scope",
-    )))
+    Err(AppError::Internal("failed to determine local machine scope".to_string()))
 }
 
 fn validation_worker_queue() -> String {

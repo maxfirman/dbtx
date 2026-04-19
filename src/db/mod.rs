@@ -479,7 +479,7 @@ fn compute_worker_health(status: &InvocationStatusResponse) -> InvocationWorkerH
     compute_worker_health_from_model(&InvocationReadModel {
         execution_mode: status.execution_mode,
         worker_queue: status.worker_queue.clone(),
-        status: status.status.clone(),
+        status: status.status,
         started_at: status.started_at,
         claimed_at: status.claimed_at,
         last_heartbeat_at: status.last_heartbeat_at,

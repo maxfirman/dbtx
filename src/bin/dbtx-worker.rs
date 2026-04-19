@@ -112,9 +112,7 @@ async fn run() -> AppResult<()> {
                                 queues = %cli.queue.join(","),
                                 "no invocation available for one-shot worker"
                             );
-                            return Err(AppError::Io(std::io::Error::other(
-                                "no invocation available for worker",
-                            )));
+                            return Err(AppError::Internal("no invocation available for worker".to_string()));
                         }
                         debug!(
                             worker_id = %worker_id,

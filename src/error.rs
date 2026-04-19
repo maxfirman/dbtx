@@ -148,6 +148,8 @@ pub enum AppError {
     WorkerSetupFailed(String),
     #[error("git target not found: {0}")]
     GitTargetNotFound(String),
+    #[error("{0}")]
+    Internal(String),
 }
 
 pub type AppResult<T> = Result<T, AppError>;

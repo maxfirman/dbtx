@@ -145,7 +145,7 @@ fn render_template<T: Template>(template: &T) -> Result<Html<String>, UiError> {
     template
         .render()
         .map(Html)
-        .map_err(|err| UiError(AppError::Io(std::io::Error::other(err.to_string()))))
+        .map_err(|err| UiError(AppError::Internal(err.to_string())))
 }
 
 fn is_htmx(headers: &HeaderMap) -> bool {
@@ -1288,7 +1288,7 @@ async fn environment_detail(
         environment_slug: slug,
         panel_html: panel
             .render()
-            .map_err(|err| UiError(AppError::Io(std::io::Error::other(err.to_string()))))?,
+            .map_err(|err| UiError(AppError::Internal(err.to_string())))?,
     })
 }
 

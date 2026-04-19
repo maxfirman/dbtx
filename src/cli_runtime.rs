@@ -332,7 +332,7 @@ pub async fn invoke_via_daemon(
         0 => Ok(()),
         code => {
             if let Some(error) = status.error {
-                Err(AppError::Io(std::io::Error::other(error)))
+                Err(AppError::Internal(error))
             } else {
                 Err(AppError::DbtFailed(code))
             }
@@ -390,7 +390,7 @@ async fn invoke_via_local_worker(
             let client = client::DaemonClient::new(service_url);
             let invocation = client.invocation_status(response.invocation_id).await?;
             if let Some(error) = invocation.error {
-                Err(AppError::Io(std::io::Error::other(error)))
+                Err(AppError::Internal(error))
             } else {
                 Err(AppError::DbtFailed(code))
             }
@@ -404,9 +404,7 @@ fn resolve_worker_binary_path() -> AppResult<PathBuf> {
     }
     let current_exe = std::env::current_exe()?;
     let current_dir = current_exe.parent().ok_or_else(|| {
-        AppError::Io(std::io::Error::other(
-            "failed to resolve current binary directory",
-        ))
+        AppError::Internal("failed to resolve current binary directory".to_string())
     })?;
     let worker_name = if cfg!(windows) {
         "dbtx-worker.exe"
