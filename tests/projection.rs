@@ -445,6 +445,1127 @@ async fn source_state_reconcile_creates_and_admits_plan() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "first" }),
+            },
+        )
+        .await
+        .expect("create first source state event");
+    let first_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first reconciliation plan")
+        .plan;
+    let first_admitted = client
+        .environment_plan_admit(first_plan.plan_id)
+        .await
+        .expect("admit first reconciliation plan")
+        .plan;
+    let first_invocation_id = first_admitted
+        .admitted_invocation_id
+        .expect("first admitted invocation id");
+
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim first invocation")
+        .expect("first invocation claimed");
+
+    insert_active_selected_resource(
+        db.pool(),
+        first_invocation_id,
+        &project_id,
+        "remote",
+        "model.pkg.orders",
+        Some("model"),
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "second" }),
+            },
+        )
+        .await
+        .expect("create second source state event");
+    let second_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create second reconciliation plan")
+        .plan;
+    let blocked = client
+        .environment_plan_admit(second_plan.plan_id)
+        .await
+        .expect("attempt second plan admit")
+        .plan;
+    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.blocked_by_invocation_id, Some(first_invocation_id));
+    assert!(blocked.admitted_invocation_id.is_none());
+
+    client
+        .invocation_complete(
+            first_invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id,
+                lease_token: claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Succeeded, 0),
+            },
+        )
+        .await
+        .expect("complete blocking invocation");
+
+    let reloaded = client
+        .environment_plan_get(second_plan.plan_id)
+        .await
+        .expect("reload second plan after blocker completion")
+        .plan;
+    assert_eq!(reloaded.status, "admitted");
+    let auto_admitted_invocation_id = reloaded
+        .admitted_invocation_id
+        .expect("auto-admitted invocation id");
+    assert_ne!(auto_admitted_invocation_id, first_invocation_id);
+
+    let linked_plan_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT plan_id FROM invocations WHERE invocation_id = $1",
+    )
+    .bind(auto_admitted_invocation_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load auto-admitted invocation plan id");
+    assert_eq!(linked_plan_id, Some(second_plan.plan_id));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "first" }),
+            },
+        )
+        .await
+        .expect("create first source state event");
+    let first_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first reconciliation plan")
+        .plan;
+    let first_admitted = client
+        .environment_plan_admit(first_plan.plan_id)
+        .await
+        .expect("admit first reconciliation plan")
+        .plan;
+    let first_invocation_id = first_admitted
+        .admitted_invocation_id
+        .expect("first admitted invocation id");
+
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim first invocation")
+        .expect("first invocation claimed");
+
+    insert_active_selected_resource(
+        db.pool(),
+        first_invocation_id,
+        &project_id,
+        "remote",
+        "model.pkg.orders",
+        Some("model"),
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "second" }),
+            },
+        )
+        .await
+        .expect("create second source state event");
+    let second_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create second reconciliation plan")
+        .plan;
+    let blocked = client
+        .environment_plan_admit(second_plan.plan_id)
+        .await
+        .expect("attempt second plan admit")
+        .plan;
+    assert_eq!(blocked.status, "blocked");
+
+    client
+        .invocation_cancel(first_invocation_id, Default::default())
+        .await
+        .expect("request cancel");
+    client
+        .invocation_complete(
+            first_invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id,
+                lease_token: claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Canceled, 130),
+            },
+        )
+        .await
+        .expect("complete canceled blocking invocation");
+
+    let reloaded = client
+        .environment_plan_get(second_plan.plan_id)
+        .await
+        .expect("reload second plan after cancel completion")
+        .plan;
+    assert_eq!(reloaded.status, "admitted");
+    assert!(reloaded.admitted_invocation_id.is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "first" }),
+            },
+        )
+        .await
+        .expect("create first source state event");
+    let first_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first reconciliation plan")
+        .plan;
+    let first_admitted = client
+        .environment_plan_admit(first_plan.plan_id)
+        .await
+        .expect("admit first reconciliation plan")
+        .plan;
+    let first_invocation_id = first_admitted
+        .admitted_invocation_id
+        .expect("first admitted invocation id");
+
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim first invocation")
+        .expect("first invocation claimed");
+
+    insert_active_selected_resource(
+        db.pool(),
+        first_invocation_id,
+        &project_id,
+        "remote",
+        "model.pkg.orders",
+        Some("model"),
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "second" }),
+            },
+        )
+        .await
+        .expect("create second source state event");
+    let second_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create second reconciliation plan")
+        .plan;
+    let blocked = client
+        .environment_plan_admit(second_plan.plan_id)
+        .await
+        .expect("attempt second plan admit")
+        .plan;
+    assert_eq!(blocked.status, "blocked");
+
+    sqlx::query(
+        "UPDATE invocations SET claimed_at = NOW() - INTERVAL '2 minutes', last_heartbeat_at = NOW() - INTERVAL '2 minutes' WHERE invocation_id = $1",
+    )
+    .bind(first_invocation_id)
+    .execute(db.pool())
+    .await
+    .expect("age heartbeat");
+
+    let status = client
+        .invocation_status(first_invocation_id)
+        .await
+        .expect("load timed out invocation status");
+    assert!(matches!(status.status, InvocationLifecycleStatus::Failed));
+    assert_eq!(status.claimed_by.as_deref(), Some(claim.worker_id.as_str()));
+
+    let reloaded = client
+        .environment_plan_get(second_plan.plan_id)
+        .await
+        .expect("reload second plan after timeout")
+        .plan;
+    assert_eq!(reloaded.status, "admitted");
+    assert!(reloaded.admitted_invocation_id.is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "first" }),
+            },
+        )
+        .await
+        .expect("create first source state event");
+    let first_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first reconciliation plan")
+        .plan;
+    let first_admitted = client
+        .environment_plan_admit(first_plan.plan_id)
+        .await
+        .expect("admit first reconciliation plan")
+        .plan;
+    let first_invocation_id = first_admitted
+        .admitted_invocation_id
+        .expect("first admitted invocation id");
+
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim first invocation")
+        .expect("first invocation claimed");
+
+    insert_active_selected_resource(
+        db.pool(),
+        first_invocation_id,
+        &project_id,
+        "remote",
+        "model.pkg.orders",
+        Some("model"),
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "second" }),
+            },
+        )
+        .await
+        .expect("create second source state event");
+    let second_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create second reconciliation plan")
+        .plan;
+    let blocked = client
+        .environment_plan_admit(second_plan.plan_id)
+        .await
+        .expect("attempt second plan admit")
+        .plan;
+    assert_eq!(blocked.status, "blocked");
+
+    client
+        .invocation_complete(
+            first_invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id,
+                lease_token: claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Failed, 1),
+            },
+        )
+        .await
+        .expect("complete failed blocking invocation");
+
+    let reloaded = client
+        .environment_plan_get(second_plan.plan_id)
+        .await
+        .expect("reload second plan after failure")
+        .plan;
+    assert_eq!(reloaded.status, "admitted");
+    assert!(reloaded.admitted_invocation_id.is_some());
+
+    let close_reason: Option<String> = sqlx::query_scalar(
+        "SELECT close_reason FROM invocation_selected_resources WHERE invocation_id = $1 AND unique_id = 'model.pkg.orders'",
+    )
+    .bind(first_invocation_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load selected resource close reason");
+    assert_eq!(close_reason.as_deref(), Some("invocation_failed"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    for version in ["v1", "v2", "v3"] {
+        client
+            .environment_source_state_event_create(
+                &project_id,
+                "remote",
+                SourceStateEventCreateApiRequest {
+                    source_key: "source.pkg.raw_orders".to_string(),
+                    provider: "manual".to_string(),
+                    state_version: Some(version.to_string()),
+                    observed_at: Some(chrono::Utc::now()),
+                    payload: serde_json::json!({ "reason": version }),
+                },
+            )
+            .await
+            .expect("create source state event");
+    }
+
+    let first_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first plan")
+        .plan;
+    let first_admitted = client
+        .environment_plan_admit(first_plan.plan_id)
+        .await
+        .expect("admit first plan")
+        .plan;
+    let first_invocation_id = first_admitted
+        .admitted_invocation_id
+        .expect("first admitted invocation id");
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim first invocation")
+        .expect("first invocation claimed");
+    insert_active_selected_resource(
+        db.pool(),
+        first_invocation_id,
+        &project_id,
+        "remote",
+        "model.pkg.orders",
+        Some("model"),
+    )
+    .await;
+
+    let second_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create second plan")
+        .plan;
+    let third_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create third plan")
+        .plan;
+    assert_eq!(
+        client
+            .environment_plan_admit(second_plan.plan_id)
+            .await
+            .expect("block second plan")
+            .plan
+            .status,
+        "blocked"
+    );
+    assert_eq!(
+        client
+            .environment_plan_admit(third_plan.plan_id)
+            .await
+            .expect("block third plan")
+            .plan
+            .status,
+        "blocked"
+    );
+
+    client
+        .invocation_complete(
+            first_invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id,
+                lease_token: claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Succeeded, 0),
+            },
+        )
+        .await
+        .expect("complete first blocking invocation");
+
+    let second_reloaded = client
+        .environment_plan_get(second_plan.plan_id)
+        .await
+        .expect("reload second plan")
+        .plan;
+    let third_reloaded = client
+        .environment_plan_get(third_plan.plan_id)
+        .await
+        .expect("reload third plan")
+        .plan;
+    assert_eq!(second_reloaded.status, "admitted");
+    assert_eq!(third_reloaded.status, "blocked");
+    assert!(second_reloaded.admitted_invocation_id.is_some());
+    assert_eq!(
+        third_reloaded.blocked_by_invocation_id,
+        second_reloaded.admitted_invocation_id
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "first" }),
+            },
+        )
+        .await
+        .expect("create first source state event");
+    let first_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first plan")
+        .plan;
+    let first_admitted = client
+        .environment_plan_admit(first_plan.plan_id)
+        .await
+        .expect("admit first plan")
+        .plan;
+    let first_invocation_id = first_admitted
+        .admitted_invocation_id
+        .expect("first admitted invocation id");
+    let first_claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim first invocation")
+        .expect("first invocation claimed");
+    insert_active_selected_resource(
+        db.pool(),
+        first_invocation_id,
+        &project_id,
+        "remote",
+        "model.pkg.orders",
+        Some("model"),
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "second" }),
+            },
+        )
+        .await
+        .expect("create second source state event");
+    let second_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create second plan")
+        .plan;
+    assert_eq!(
+        client
+            .environment_plan_admit(second_plan.plan_id)
+            .await
+            .expect("block second plan")
+            .plan
+            .status,
+        "blocked"
+    );
+
+    client
+        .invocation_complete(
+            first_invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: first_claim.worker_id,
+                lease_token: first_claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Succeeded, 0),
+            },
+        )
+        .await
+        .expect("complete first invocation");
+
+    let admitted_invocation_id = client
+        .environment_plan_get(second_plan.plan_id)
+        .await
+        .expect("reload second plan")
+        .plan
+        .admitted_invocation_id
+        .expect("second plan admitted");
+
+    let before_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invocations WHERE plan_id = $1",
+    )
+    .bind(second_plan.plan_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count plan invocations before unrelated completion");
+    assert_eq!(before_count, 1);
+
+    let unrelated = client
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "remote",
+            InvocationCommandApi::Ls,
+        ))
+        .await
+        .expect("create unrelated invocation");
+    client
+        .invocation_cancel(unrelated.invocation_id, Default::default())
+        .await
+        .expect("cancel unrelated invocation");
+
+    let after_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invocations WHERE plan_id = $1",
+    )
+    .bind(second_plan.plan_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count plan invocations after unrelated completion");
+    assert_eq!(after_count, 1);
+    let reloaded = client
+        .environment_plan_get(second_plan.plan_id)
+        .await
+        .expect("reload second plan after unrelated completion")
+        .plan;
+    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.admitted_invocation_id, Some(admitted_invocation_id));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_canceled() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "first" }),
+            },
+        )
+        .await
+        .expect("create first source state event");
+    let first_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first plan")
+        .plan;
+    let first_admitted = client
+        .environment_plan_admit(first_plan.plan_id)
+        .await
+        .expect("admit first plan")
+        .plan;
+    let first_invocation_id = first_admitted
+        .admitted_invocation_id
+        .expect("first admitted invocation id");
+    insert_active_selected_resource(
+        db.pool(),
+        first_invocation_id,
+        &project_id,
+        "remote",
+        "model.pkg.orders",
+        Some("model"),
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "second" }),
+            },
+        )
+        .await
+        .expect("create second source state event");
+    let second_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create second plan")
+        .plan;
+    assert_eq!(
+        client
+            .environment_plan_admit(second_plan.plan_id)
+            .await
+            .expect("block second plan")
+            .plan
+            .status,
+        "blocked"
+    );
+
+    client
+        .invocation_cancel(first_invocation_id, Default::default())
+        .await
+        .expect("cancel unclaimed first invocation");
+
+    let reloaded = client
+        .environment_plan_get(second_plan.plan_id)
+        .await
+        .expect("reload second plan after unclaimed cancel")
+        .plan;
+    assert_eq!(reloaded.status, "admitted");
+    assert!(reloaded.admitted_invocation_id.is_some());
+
+    let close_reason: Option<String> = sqlx::query_scalar(
+        "SELECT close_reason FROM invocation_selected_resources WHERE invocation_id = $1 AND unique_id = 'model.pkg.orders'",
+    )
+    .bind(first_invocation_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load selected resource close reason");
+    assert_eq!(close_reason.as_deref(), Some("invocation_canceled"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn manual_admit_after_auto_admit_fails_cleanly() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "first" }),
+            },
+        )
+        .await
+        .expect("create first source state event");
+    let first_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first plan")
+        .plan;
+    let first_admitted = client
+        .environment_plan_admit(first_plan.plan_id)
+        .await
+        .expect("admit first plan")
+        .plan;
+    let first_invocation_id = first_admitted
+        .admitted_invocation_id
+        .expect("first admitted invocation id");
+    let first_claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim first invocation")
+        .expect("first invocation claimed");
+    insert_active_selected_resource(
+        db.pool(),
+        first_invocation_id,
+        &project_id,
+        "remote",
+        "model.pkg.orders",
+        Some("model"),
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "second" }),
+            },
+        )
+        .await
+        .expect("create second source state event");
+    let second_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create second plan")
+        .plan;
+    assert_eq!(
+        client
+            .environment_plan_admit(second_plan.plan_id)
+            .await
+            .expect("block second plan")
+            .plan
+            .status,
+        "blocked"
+    );
+
+    client
+        .invocation_complete(
+            first_invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: first_claim.worker_id,
+                lease_token: first_claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Succeeded, 0),
+            },
+        )
+        .await
+        .expect("complete first invocation");
+
+    let reloaded = client
+        .environment_plan_get(second_plan.plan_id)
+        .await
+        .expect("reload second plan after auto admit")
+        .plan;
+    assert_eq!(reloaded.status, "admitted");
+    assert!(
+        client.environment_plan_admit(second_plan.plan_id).await.is_err(),
+        "manual admit after auto-admit should fail"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;
@@ -527,6 +1648,242 @@ async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
             .get("planning_mode")
             .and_then(serde_json::Value::as_str),
         Some("live_state_diff")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn reconcile_reuses_equivalent_pending_plan() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "same" }),
+            },
+        )
+        .await
+        .expect("create source state event");
+
+    let first = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first reconcile plan")
+        .plan;
+    let second = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("reuse equivalent reconcile plan")
+        .plan;
+
+    assert_eq!(second.plan_id, first.plan_id);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM environment_run_plans WHERE project_id = (SELECT id FROM projects WHERE project_id = $1)",
+    )
+    .bind(&project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count plans");
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let desired_commit_a = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let desired_commit_b = "cccccccccccccccccccccccccccccccccccccccc";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(desired_commit_a),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        baseline_commit,
+        &[
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "remote",
+        desired_commit_a,
+        &[
+            ("model.pkg.orders", "model", Some("new-orders-a")),
+            ("model.pkg.customers", "model", Some("same-customers")),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+
+    let first = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create first plan")
+        .plan;
+
+    sqlx::query(
+        "UPDATE environments SET git_commit_sha = $2 WHERE slug = $1 AND project_id = (SELECT id FROM projects WHERE project_id = $3)",
+    )
+    .bind("remote")
+    .bind(desired_commit_b)
+    .bind(&project_id)
+    .execute(db.pool())
+    .await
+    .expect("update desired commit");
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "remote",
+        desired_commit_b,
+        &[
+            ("model.pkg.orders", "model", Some("new-orders-b")),
+            ("model.pkg.customers", "model", Some("same-customers")),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+
+    let second = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create superseding plan")
+        .plan;
+
+    assert_ne!(second.plan_id, first.plan_id);
+    let first_reloaded = client
+        .environment_plan_get(first.plan_id)
+        .await
+        .expect("reload first plan")
+        .plan;
+    assert_eq!(first_reloaded.status, "superseded");
+    assert_eq!(first_reloaded.superseded_by_plan_id, Some(second.plan_id));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn reconcile_respects_active_environment_lease() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({ "reason": "lease" }),
+            },
+        )
+        .await
+        .expect("create source state event");
+
+    sqlx::query(
+        r#"
+        INSERT INTO environment_reconcile_leases (environment_id, owner, leased_until, updated_at)
+        SELECT e.id, 'test-owner', NOW() + INTERVAL '30 seconds', NOW()
+        FROM environments e
+        JOIN projects p ON p.id = e.project_id
+        WHERE p.project_id = $1
+          AND e.slug = $2
+        "#,
+    )
+    .bind(&project_id)
+    .bind("remote")
+    .execute(db.pool())
+    .await
+    .expect("insert active lease");
+
+    assert!(
+        client
+            .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+            .await
+            .is_err(),
+        "active reconcile lease should block a concurrent reconcile request"
     );
 }
 
@@ -2047,6 +3404,53 @@ async fn age_current_node_success(
     .execute(pool)
     .await
     .expect("age current node success");
+}
+
+async fn insert_active_selected_resource(
+    pool: &PgPool,
+    invocation_id: Uuid,
+    project_id: &str,
+    slug: &str,
+    unique_id: &str,
+    resource_type: Option<&str>,
+) {
+    let scope = sqlx::query(
+        r#"
+        SELECT p.id AS project_pk, e.id AS environment_pk
+        FROM projects p
+        JOIN environments e ON e.project_id = p.id
+        WHERE p.project_id = $1 AND e.slug = $2
+        "#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .fetch_one(pool)
+    .await
+    .expect("load selected resource scope");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+
+    sqlx::query(
+        r#"
+        INSERT INTO invocation_selected_resources (
+            invocation_id, run_id, project_id, environment_id, unique_id, resource_type,
+            selected_at, created_at, updated_at
+        )
+        SELECT invocation_id, run_id, project_id, environment_id, $2, $3, NOW(), NOW(), NOW()
+        FROM invocations
+        WHERE invocation_id = $1
+          AND project_id = $4
+          AND environment_id = $5
+        "#,
+    )
+    .bind(invocation_id)
+    .bind(unique_id)
+    .bind(resource_type)
+    .bind(project_pk)
+    .bind(environment_pk)
+    .execute(pool)
+    .await
+    .expect("insert active selected resource");
 }
 
 async fn mark_project_draft_validated(

@@ -1,7 +1,7 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
     CreateEnvironmentDraftInput, CreateEnvironmentRunPlanInput, CreateProjectDraftInput,
-    CreateProjectInput, CurrentNodeStatePlanningRecord, Db,
+    CreateProjectInput, CurrentNodeStatePlanningRecord, Db, EquivalentPlanLookup,
     EnvironmentActualStateRecord, EnvironmentDraftRecord, EnvironmentRecord,
     EnvironmentReleaseInput, EnvironmentRunPlanRecord, EnvironmentVersionRecord, GitState,
     LocalEnvironmentUpsertInput, PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord,
@@ -23,6 +23,8 @@ use std::path::Component;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uuid::Uuid;
+
+const RECONCILE_LEASE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub trait InvocationObserver {
     fn stdout_line(&mut self, line: &str);
@@ -379,6 +381,24 @@ impl<'a> EnvironmentService<'a> {
         Self { db }
     }
 
+    async fn acquire_reconcile_lease(
+        &self,
+        environment_id: i64,
+        owner: &str,
+    ) -> AppResult<()> {
+        if self
+            .db
+            .acquire_environment_reconcile_lease(environment_id, owner, RECONCILE_LEASE_DURATION)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(AppError::Io(std::io::Error::other(
+                "environment reconciliation is already in progress",
+            )))
+        }
+    }
+
     pub async fn create_draft(&self, project: String) -> AppResult<EnvironmentDraftRecord> {
         self.db.require_current_schema().await?;
         let project = self.db.get_project_by_project_id(&project).await?;
@@ -655,130 +675,170 @@ impl<'a> EnvironmentService<'a> {
     ) -> AppResult<EnvironmentRunPlanRecord> {
         self.db.require_current_schema().await?;
         let environment = self.db.get_environment(&project, &slug).await?;
-        let actual_state = self.db.get_environment_actual_state(&project, &slug).await?;
-        let baseline_run_id = actual_state.last_successful_run_id.ok_or_else(|| {
-            AppError::Io(std::io::Error::other(
-                "reconciliation requires a successful baseline run",
-            ))
-        })?;
-
-        let source_events = self
-            .db
-            .list_source_state_events_since(
-                environment.project_id,
-                environment.id,
-                actual_state.last_successful_at,
-            )
-            .await?;
-        let code_drift = environment.git_commit_sha != actual_state.last_successful_commit_sha;
-
-        if !code_drift && source_events.is_empty() {
-            return Err(AppError::Io(std::io::Error::other(
-                "environment is already reconciled to known desired state",
-            )));
-        }
-
-        let (reason, selection_spec, selected_resources, source_event_id, metadata) = if code_drift {
-            let desired_commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
+        let lease_owner = format!("reconcile:{}", Uuid::new_v4());
+        self.acquire_reconcile_lease(environment.id, &lease_owner).await?;
+        let result = async {
+            let actual_state = self.db.get_environment_actual_state(&project, &slug).await?;
+            let baseline_run_id = actual_state.last_successful_run_id.ok_or_else(|| {
                 AppError::Io(std::io::Error::other(
-                    "reconciliation requires a desired git commit sha",
+                    "reconciliation requires a successful baseline run",
                 ))
             })?;
-            if let Some(target_manifest_run_id) = self
+
+            let source_events = self
                 .db
-                .latest_manifest_run_id_for_commit(
+                .list_source_state_events_since(
                     environment.project_id,
                     environment.id,
-                    &desired_commit_sha,
+                    actual_state.last_successful_at,
                 )
+                .await?;
+            let code_drift = environment.git_commit_sha != actual_state.last_successful_commit_sha;
+
+            if !code_drift && source_events.is_empty() {
+                return Err(AppError::Io(std::io::Error::other(
+                    "environment is already reconciled to known desired state",
+                )));
+            }
+
+            let (reason, selection_spec, selected_resources, source_event_id, metadata) =
+                if code_drift {
+                    let desired_commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
+                        AppError::Io(std::io::Error::other(
+                            "reconciliation requires a desired git commit sha",
+                        ))
+                    })?;
+                    if let Some(target_manifest_run_id) = self
+                        .db
+                        .latest_manifest_run_id_for_commit(
+                            environment.project_id,
+                            environment.id,
+                            &desired_commit_sha,
+                        )
+                        .await?
+                    {
+                        let target_nodes = self
+                            .db
+                            .load_planning_manifest_nodes(target_manifest_run_id)
+                            .await?;
+                        let baseline_nodes =
+                            self.db.load_planning_manifest_nodes(baseline_run_id).await?;
+                        let target_edges = self.db.load_manifest_edges(target_manifest_run_id).await?;
+                        let current_nodes = self
+                            .db
+                            .load_current_node_state_for_planning(
+                                environment.project_id,
+                                environment.id,
+                            )
+                            .await?;
+                        let selected_resources = plan_code_change_selected_resources(
+                            &baseline_nodes,
+                            &target_nodes,
+                            &target_edges,
+                            &current_nodes,
+                        );
+                        let selection_spec = if selected_resources.is_empty() {
+                            "state_modified_live"
+                        } else {
+                            "state_modified_live_plus"
+                        };
+                        (
+                            "code_change",
+                            Some(selection_spec.to_string()),
+                            selected_resources,
+                            None,
+                            serde_json::json!({
+                                "code_drift": true,
+                                "actual_commit_sha": actual_state.last_successful_commit_sha,
+                                "desired_commit_sha": desired_commit_sha,
+                                "source_event_count": source_events.len(),
+                                "target_manifest_run_id": target_manifest_run_id,
+                                "planning_mode": "live_state_diff",
+                            }),
+                        )
+                    } else {
+                        (
+                            "code_change",
+                            Some("full_graph".to_string()),
+                            self.db.list_manifest_node_unique_ids(baseline_run_id).await?,
+                            None,
+                            serde_json::json!({
+                                "code_drift": true,
+                                "actual_commit_sha": actual_state.last_successful_commit_sha,
+                                "desired_commit_sha": desired_commit_sha,
+                                "source_event_count": source_events.len(),
+                                "planning_mode": "full_graph_fallback_no_target_manifest",
+                            }),
+                        )
+                    }
+                } else {
+                    let source_keys: Vec<String> = source_events
+                        .iter()
+                        .map(|event| event.source_key.clone())
+                        .collect();
+                    (
+                        "source_state_change",
+                        Some("source_downstream".to_string()),
+                        self.db
+                            .list_downstream_manifest_node_unique_ids(baseline_run_id, &source_keys)
+                            .await?,
+                        source_events.first().map(|event| event.id),
+                        serde_json::json!({
+                            "source_keys": source_keys,
+                            "source_event_count": source_events.len(),
+                        }),
+                    )
+                };
+
+            if selected_resources.is_empty() {
+                return Err(AppError::Io(std::io::Error::other(
+                    "reconciliation plan resolved to no selected resources",
+                )));
+            }
+            if let Some(plan) = self
+                .db
+                .find_equivalent_live_environment_run_plan(EquivalentPlanLookup {
+                    project_id: environment.project_id,
+                    environment_id: environment.id,
+                    reason,
+                    target_git_branch: environment.git_branch.as_deref(),
+                    target_git_commit_sha: environment.git_commit_sha.as_deref(),
+                    baseline_run_id: Some(baseline_run_id),
+                    selection_spec: selection_spec.as_deref(),
+                    selected_resources: &selected_resources,
+                })
                 .await?
             {
-                let target_nodes = self
-                    .db
-                    .load_planning_manifest_nodes(target_manifest_run_id)
-                    .await?;
-                let baseline_nodes = self.db.load_planning_manifest_nodes(baseline_run_id).await?;
-                let target_edges = self.db.load_manifest_edges(target_manifest_run_id).await?;
-                let current_nodes = self
-                    .db
-                    .load_current_node_state_for_planning(environment.project_id, environment.id)
-                    .await?;
-                let selected_resources = plan_code_change_selected_resources(
-                    &baseline_nodes,
-                    &target_nodes,
-                    &target_edges,
-                    &current_nodes,
-                );
-                let selection_spec = if selected_resources.is_empty() {
-                    "state_modified_live"
-                } else {
-                    "state_modified_live_plus"
-                };
-                (
-                    "code_change",
-                    Some(selection_spec.to_string()),
-                    selected_resources,
-                    None,
-                    serde_json::json!({
-                        "code_drift": true,
-                        "actual_commit_sha": actual_state.last_successful_commit_sha,
-                        "desired_commit_sha": desired_commit_sha,
-                        "source_event_count": source_events.len(),
-                        "target_manifest_run_id": target_manifest_run_id,
-                        "planning_mode": "live_state_diff",
-                    }),
-                )
-            } else {
-                (
-                    "code_change",
-                    Some("full_graph".to_string()),
-                    self.db.list_manifest_node_unique_ids(baseline_run_id).await?,
-                    None,
-                    serde_json::json!({
-                        "code_drift": true,
-                        "actual_commit_sha": actual_state.last_successful_commit_sha,
-                        "desired_commit_sha": desired_commit_sha,
-                        "source_event_count": source_events.len(),
-                        "planning_mode": "full_graph_fallback_no_target_manifest",
-                    }),
-                )
+                return Ok(plan);
             }
-        } else {
-            let source_keys: Vec<String> = source_events
-                .iter()
-                .map(|event| event.source_key.clone())
-                .collect();
-            (
-                "source_state_change",
-                Some("source_downstream".to_string()),
-                self.db
-                    .list_downstream_manifest_node_unique_ids(baseline_run_id, &source_keys)
-                    .await?,
-                source_events.first().map(|event| event.id),
-                serde_json::json!({
-                    "source_keys": source_keys,
-                    "source_event_count": source_events.len(),
-                }),
-            )
-        };
 
-        if selected_resources.is_empty() {
-            return Err(AppError::Io(std::io::Error::other(
-                "reconciliation plan resolved to no selected resources",
-            )));
+            let created = self
+                .db
+                .create_environment_run_plan(CreateEnvironmentRunPlanInput {
+                    environment: &environment,
+                    reason,
+                    baseline_run_id: Some(baseline_run_id),
+                    selection_spec: selection_spec.as_deref(),
+                    selected_resources: &selected_resources,
+                    source_event_id,
+                    metadata,
+                })
+                .await?;
+            self.db
+                .supersede_pending_environment_run_plans(
+                    environment.project_id,
+                    environment.id,
+                    created.plan_id,
+                )
+                .await?;
+            Ok(created)
         }
-
-        self.db
-            .create_environment_run_plan(CreateEnvironmentRunPlanInput {
-                environment: &environment,
-                reason,
-                baseline_run_id: Some(baseline_run_id),
-                selection_spec: selection_spec.as_deref(),
-                selected_resources: &selected_resources,
-                source_event_id,
-                metadata,
-            })
-            .await
+        .await;
+        let _ = self
+            .db
+            .release_environment_reconcile_lease(environment.id, &lease_owner)
+            .await;
+        result
     }
 
     pub async fn admit_plan(
@@ -788,45 +848,56 @@ impl<'a> EnvironmentService<'a> {
     ) -> AppResult<EnvironmentPlanAdmitPrepared> {
         self.db.require_current_schema().await?;
         let plan = self.db.get_environment_run_plan(plan_id).await?;
-        if !matches!(plan.status.as_str(), "planned" | "blocked") {
-            return Err(AppError::Io(std::io::Error::other(format!(
-                "plan {plan_id} is not admissible from status {}",
-                plan.status
-            ))));
-        }
-        let blockers = self.db.list_active_conflicting_invocations(plan_id).await?;
-        if let Some(blocking_invocation_id) = blockers.first().copied() {
-            let blocked = self
-                .db
-                .mark_environment_run_plan_blocked(
-                    plan_id,
-                    Some(blocking_invocation_id),
-                    "plan is blocked by active resource overlap",
+        let environment_id = plan.environment_id;
+        let lease_owner = format!("admit:{}", invocation_id);
+        self.acquire_reconcile_lease(environment_id, &lease_owner).await?;
+        let result = async {
+            if !matches!(plan.status.as_str(), "planned" | "blocked") {
+                return Err(AppError::Io(std::io::Error::other(format!(
+                    "plan {plan_id} is not admissible from status {}",
+                    plan.status
+                ))));
+            }
+            let blockers = self.db.list_active_conflicting_invocations(plan_id).await?;
+            if let Some(blocking_invocation_id) = blockers.first().copied() {
+                let blocked = self
+                    .db
+                    .mark_environment_run_plan_blocked(
+                        plan_id,
+                        Some(blocking_invocation_id),
+                        "plan is blocked by active resource overlap",
+                    )
+                    .await?;
+                return Ok(EnvironmentPlanAdmitPrepared {
+                    plan: blocked,
+                    invocation_id: None,
+                    prepared: None,
+                });
+            }
+
+            let project = self.db.get_project_by_id(plan.project_id).await?;
+            let environment = self.db.get_environment_by_id(plan.environment_id).await?;
+            let prepared = InvocationService::new(self.db)
+                .prepare_remote_execution(
+                    invocation_id,
+                    InvocationCommand::Build,
+                    Vec::new(),
+                    &project.project_id,
+                    &environment.slug,
                 )
                 .await?;
-            return Ok(EnvironmentPlanAdmitPrepared {
-                plan: blocked,
-                invocation_id: None,
-                prepared: None,
-            });
+            Ok(EnvironmentPlanAdmitPrepared {
+                plan,
+                invocation_id: Some(invocation_id),
+                prepared: Some(prepared),
+            })
         }
-
-        let project = self.db.get_project_by_id(plan.project_id).await?;
-        let environment = self.db.get_environment_by_id(plan.environment_id).await?;
-        let prepared = InvocationService::new(self.db)
-            .prepare_remote_execution(
-                invocation_id,
-                InvocationCommand::Build,
-                Vec::new(),
-                &project.project_id,
-                &environment.slug,
-            )
-            .await?;
-        Ok(EnvironmentPlanAdmitPrepared {
-            plan,
-            invocation_id: Some(invocation_id),
-            prepared: Some(prepared),
-        })
+        .await;
+        let _ = self
+            .db
+            .release_environment_reconcile_lease(environment_id, &lease_owner)
+            .await;
+        result
     }
 
 }

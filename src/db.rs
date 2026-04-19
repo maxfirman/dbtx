@@ -163,10 +163,15 @@ pub struct EnvironmentRunPlanRecord {
     pub selection_spec: Option<String>,
     pub selected_resources: Vec<String>,
     pub resource_count: i32,
+    pub superseded_by_plan_id: Option<Uuid>,
+    pub retry_count: i32,
     pub blocked_by_invocation_id: Option<Uuid>,
     pub admitted_invocation_id: Option<Uuid>,
     pub source_event_id: Option<i64>,
     pub error: Option<String>,
+    pub first_blocked_at: Option<chrono::DateTime<Utc>>,
+    pub last_blocked_at: Option<chrono::DateTime<Utc>>,
+    pub last_checked_at: Option<chrono::DateTime<Utc>>,
     pub admitted_at: Option<chrono::DateTime<Utc>>,
     pub completed_at: Option<chrono::DateTime<Utc>>,
     pub created_at: chrono::DateTime<Utc>,
@@ -353,6 +358,18 @@ pub(crate) struct CreateEnvironmentRunPlanInput<'a> {
     pub(crate) selected_resources: &'a [String],
     pub(crate) source_event_id: Option<i64>,
     pub(crate) metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EquivalentPlanLookup<'a> {
+    pub(crate) project_id: i64,
+    pub(crate) environment_id: i64,
+    pub(crate) reason: &'a str,
+    pub(crate) target_git_branch: Option<&'a str>,
+    pub(crate) target_git_commit_sha: Option<&'a str>,
+    pub(crate) baseline_run_id: Option<Uuid>,
+    pub(crate) selection_spec: Option<&'a str>,
+    pub(crate) selected_resources: &'a [String],
 }
 
 #[derive(Debug, Clone)]
@@ -1520,8 +1537,10 @@ impl Db {
             SELECT
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
-                error, admitted_at, completed_at, created_at, updated_at, metadata
+                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
+                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
+                updated_at, metadata
             FROM environment_run_plans
             WHERE project_id = $1
               AND environment_id = $2
@@ -1535,6 +1554,28 @@ impl Db {
         Ok(rows.iter().map(environment_run_plan_from_row).collect())
     }
 
+    pub(crate) async fn list_blocked_environment_run_plan_ids(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+    ) -> AppResult<Vec<Uuid>> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT plan_id
+            FROM environment_run_plans
+            WHERE project_id = $1
+              AND environment_id = $2
+              AND status = 'blocked'
+            ORDER BY created_at ASC, plan_id ASC
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub(crate) async fn get_environment_run_plan(
         &self,
         plan_id: Uuid,
@@ -1544,8 +1585,10 @@ impl Db {
             SELECT
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
-                error, admitted_at, completed_at, created_at, updated_at, metadata
+                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
+                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
+                updated_at, metadata
             FROM environment_run_plans
             WHERE plan_id = $1
             "#,
@@ -1581,8 +1624,10 @@ impl Db {
             RETURNING
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
-                error, admitted_at, completed_at, created_at, updated_at, metadata
+                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
+                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
+                updated_at, metadata
             "#,
         )
         .bind(Uuid::new_v4())
@@ -1602,6 +1647,122 @@ impl Db {
         Ok(environment_run_plan_from_row(&row))
     }
 
+    pub(crate) async fn find_equivalent_live_environment_run_plan(
+        &self,
+        lookup: EquivalentPlanLookup<'_>,
+    ) -> AppResult<Option<EnvironmentRunPlanRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                plan_id, project_id, environment_id, status, reason, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
+                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
+                updated_at, metadata
+            FROM environment_run_plans
+            WHERE project_id = $1
+              AND environment_id = $2
+              AND status IN ('planned', 'blocked')
+              AND reason = $3
+              AND target_git_branch IS NOT DISTINCT FROM $4
+              AND target_git_commit_sha IS NOT DISTINCT FROM $5
+              AND baseline_run_id IS NOT DISTINCT FROM $6
+              AND selection_spec IS NOT DISTINCT FROM $7
+              AND selected_resources = $8
+            ORDER BY created_at DESC, plan_id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(lookup.project_id)
+        .bind(lookup.environment_id)
+        .bind(lookup.reason)
+        .bind(lookup.target_git_branch)
+        .bind(lookup.target_git_commit_sha)
+        .bind(lookup.baseline_run_id)
+        .bind(lookup.selection_spec)
+        .bind(sqlx::types::Json(lookup.selected_resources))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(environment_run_plan_from_row))
+    }
+
+    pub(crate) async fn supersede_pending_environment_run_plans(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        superseded_by_plan_id: Uuid,
+    ) -> AppResult<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE environment_run_plans
+            SET status = 'superseded',
+                superseded_by_plan_id = $3,
+                error = 'superseded by newer reconciliation plan',
+                updated_at = NOW()
+            WHERE project_id = $1
+              AND environment_id = $2
+              AND status IN ('planned', 'blocked')
+              AND plan_id <> $3
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(superseded_by_plan_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub(crate) async fn acquire_environment_reconcile_lease(
+        &self,
+        environment_id: i64,
+        owner: &str,
+        lease_duration: std::time::Duration,
+    ) -> AppResult<bool> {
+        let lease_interval = chrono::Duration::from_std(lease_duration)
+            .unwrap_or_else(|_| chrono::Duration::seconds(30));
+        let leased_until = Utc::now() + lease_interval;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO environment_reconcile_leases (environment_id, owner, leased_until, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (environment_id) DO UPDATE
+            SET owner = EXCLUDED.owner,
+                leased_until = EXCLUDED.leased_until,
+                updated_at = NOW()
+            WHERE environment_reconcile_leases.leased_until < NOW()
+               OR environment_reconcile_leases.owner = EXCLUDED.owner
+            RETURNING owner
+            "#,
+        )
+        .bind(environment_id)
+        .bind(owner)
+        .bind(leased_until)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    pub(crate) async fn release_environment_reconcile_lease(
+        &self,
+        environment_id: i64,
+        owner: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            DELETE FROM environment_reconcile_leases
+            WHERE environment_id = $1
+              AND owner = $2
+            "#,
+        )
+        .bind(environment_id)
+        .bind(owner)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn mark_environment_run_plan_blocked(
         &self,
         plan_id: Uuid,
@@ -1614,13 +1775,19 @@ impl Db {
             SET status = 'blocked',
                 blocked_by_invocation_id = $2,
                 error = $3,
+                retry_count = retry_count + 1,
+                first_blocked_at = COALESCE(first_blocked_at, NOW()),
+                last_blocked_at = NOW(),
+                last_checked_at = NOW(),
                 updated_at = NOW()
             WHERE plan_id = $1
             RETURNING
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
-                error, admitted_at, completed_at, created_at, updated_at, metadata
+                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
+                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
+                updated_at, metadata
             "#,
         )
         .bind(plan_id)
@@ -1642,16 +1809,20 @@ impl Db {
             UPDATE environment_run_plans
             SET status = 'admitted',
                 admitted_invocation_id = $2,
+                superseded_by_plan_id = NULL,
                 blocked_by_invocation_id = NULL,
                 error = NULL,
+                last_checked_at = NOW(),
                 admitted_at = NOW(),
                 updated_at = NOW()
             WHERE plan_id = $1
             RETURNING
                 plan_id, project_id, environment_id, status, reason, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, blocked_by_invocation_id, admitted_invocation_id, source_event_id,
-                error, admitted_at, completed_at, created_at, updated_at, metadata
+                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
+                admitted_invocation_id, source_event_id, error, first_blocked_at,
+                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
+                updated_at, metadata
             "#,
         )
         .bind(plan_id)
@@ -1684,16 +1855,44 @@ impl Db {
     ) -> AppResult<Vec<Uuid>> {
         let rows = sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT DISTINCT isr.invocation_id
-            FROM environment_run_plans plan
-            JOIN LATERAL jsonb_array_elements_text(plan.selected_resources) sel(unique_id) ON TRUE
-            JOIN invocation_selected_resources isr
-              ON isr.project_id = plan.project_id
-             AND isr.environment_id = plan.environment_id
-             AND isr.unique_id = sel.unique_id
-             AND isr.finished_at IS NULL
-            WHERE plan.plan_id = $1
-            ORDER BY isr.invocation_id
+            WITH plan_resources AS (
+                SELECT plan.plan_id, plan.project_id, plan.environment_id, sel.unique_id
+                FROM environment_run_plans plan
+                JOIN LATERAL jsonb_array_elements_text(plan.selected_resources) sel(unique_id) ON TRUE
+                WHERE plan.plan_id = $1
+            ),
+            active_resource_conflicts AS (
+                SELECT DISTINCT isr.invocation_id
+                FROM plan_resources pr
+                JOIN invocation_selected_resources isr
+                  ON isr.project_id = pr.project_id
+                 AND isr.environment_id = pr.environment_id
+                 AND isr.unique_id = pr.unique_id
+                 AND isr.finished_at IS NULL
+            ),
+            admitted_plan_conflicts AS (
+                SELECT DISTINCT other.admitted_invocation_id AS invocation_id
+                FROM plan_resources pr
+                JOIN environment_run_plans other
+                  ON other.project_id = pr.project_id
+                 AND other.environment_id = pr.environment_id
+                 AND other.plan_id <> pr.plan_id
+                 AND other.status = 'admitted'
+                 AND other.admitted_invocation_id IS NOT NULL
+                JOIN invocations inv
+                  ON inv.invocation_id = other.admitted_invocation_id
+                 AND inv.status = 'running'
+                 AND inv.completed_at IS NULL
+                JOIN LATERAL jsonb_array_elements_text(other.selected_resources) other_sel(unique_id)
+                  ON other_sel.unique_id = pr.unique_id
+            )
+            SELECT DISTINCT invocation_id
+            FROM (
+                SELECT invocation_id FROM active_resource_conflicts
+                UNION
+                SELECT invocation_id FROM admitted_plan_conflicts
+            ) conflicts
+            ORDER BY invocation_id
             "#,
         )
         .bind(plan_id)
@@ -2670,10 +2869,90 @@ impl Db {
             .await?;
         let mut tx = self.pool.begin().await?;
 
+        self.apply_invocation_completion_side_effects_in_tx(
+            &mut tx,
+            invocation_id,
+            &persistence,
+            completion,
+        )
+        .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE invocations
+            SET status = $3,
+                exit_code = $4,
+                error = $5,
+                completed_at = NOW(),
+                lease_token = NULL
+            WHERE invocation_id = $1
+              AND claimed_by = $2
+              AND lease_token = $6
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(worker_id)
+        .bind(invocation_status_to_db(completion.status.clone()))
+        .bind(completion.exit_code)
+        .bind(completion.error.as_deref())
+        .bind(lease_token)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn force_complete_invocation(
+        &self,
+        invocation_id: Uuid,
+        completion: &crate::execution::ExecutionCompletion,
+    ) -> AppResult<Option<(i64, i64)>> {
+        let persistence = self.get_invocation_persistence(invocation_id, None, None).await?;
+        let mut tx = self.pool.begin().await?;
+
+        self.apply_invocation_completion_side_effects_in_tx(
+            &mut tx,
+            invocation_id,
+            &persistence,
+            completion,
+        )
+        .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE invocations
+            SET status = $2,
+                exit_code = $3,
+                error = $4,
+                completed_at = COALESCE(completed_at, NOW()),
+                lease_token = NULL
+            WHERE invocation_id = $1
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(invocation_status_to_db(completion.status.clone()))
+        .bind(completion.exit_code)
+        .bind(completion.error.as_deref())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(persistence.project_id.zip(persistence.environment_id))
+    }
+
+    async fn apply_invocation_completion_side_effects_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        invocation_id: Uuid,
+        persistence: &InvocationPersistenceRecord,
+        completion: &crate::execution::ExecutionCompletion,
+    ) -> AppResult<()> {
+
         if let Some(run_id) = persistence.run_id {
             let manifest = completion.manifest.clone().map(ManifestSnapshot::from_raw);
             self.finalize_run_in_tx(
-                &mut tx,
+                tx,
                 RunFinalization {
                     run_id,
                     project_id: persistence.project_id.ok_or_else(|| {
@@ -2704,7 +2983,7 @@ impl Db {
 
             if persistence.updates_actual_state {
                 self.upsert_environment_actual_state_for_run_in_tx(
-                    &mut tx,
+                    tx,
                     run_id,
                     persistence.project_id.ok_or_else(|| {
                         AppError::Io(std::io::Error::other(
@@ -2726,7 +3005,7 @@ impl Db {
             && matches!(completion.status, InvocationLifecycleStatus::Succeeded)
         {
             self.apply_release_completion_in_tx(
-                &mut tx,
+                tx,
                 persistence.project_id.ok_or_else(|| {
                     AppError::Io(std::io::Error::other(
                         "release invocation missing project scope",
@@ -2744,7 +3023,7 @@ impl Db {
 
         if persistence.command == "project_validate" {
             self.apply_project_validation_completion_in_tx(
-                &mut tx,
+                tx,
                 persistence.project_draft_id.ok_or_else(|| {
                     AppError::Io(std::io::Error::other(
                         "project validation invocation missing draft scope",
@@ -2757,7 +3036,7 @@ impl Db {
 
         if persistence.command == "environment_prepare" {
             self.apply_environment_prepare_completion_in_tx(
-                &mut tx,
+                tx,
                 persistence.environment_draft_id.ok_or_else(|| {
                     AppError::Io(std::io::Error::other(
                         "environment prepare invocation missing draft scope",
@@ -2770,7 +3049,7 @@ impl Db {
 
         if persistence.command == "environment_validate" {
             self.apply_environment_validation_completion_in_tx(
-                &mut tx,
+                tx,
                 persistence.environment_draft_id.ok_or_else(|| {
                     AppError::Io(std::io::Error::other(
                         "environment validation invocation missing draft scope",
@@ -2782,7 +3061,7 @@ impl Db {
         }
 
         self.close_invocation_selected_resources_in_tx(
-            &mut tx,
+            tx,
             invocation_id,
             match completion.status {
                 InvocationLifecycleStatus::Succeeded => "invocation_succeeded",
@@ -2795,36 +3074,12 @@ impl Db {
 
         if let Some(plan_id) = persistence.plan_id {
             self.complete_environment_run_plan_in_tx(
-                &mut tx,
+                tx,
                 plan_id,
                 completion.status.clone(),
             )
             .await?;
         }
-
-        sqlx::query(
-            r#"
-            UPDATE invocations
-            SET status = $3,
-                exit_code = $4,
-                error = $5,
-                completed_at = NOW(),
-                lease_token = NULL
-            WHERE invocation_id = $1
-              AND claimed_by = $2
-              AND lease_token = $6
-            "#,
-        )
-        .bind(invocation_id)
-        .bind(worker_id)
-        .bind(invocation_status_to_db(completion.status.clone()))
-        .bind(completion.exit_code)
-        .bind(completion.error.as_deref())
-        .bind(lease_token)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
         Ok(())
     }
 
@@ -4600,10 +4855,15 @@ fn environment_run_plan_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRunP
             .get::<sqlx::types::Json<Vec<String>>, _>("selected_resources")
             .0,
         resource_count: row.get("resource_count"),
+        superseded_by_plan_id: row.get("superseded_by_plan_id"),
+        retry_count: row.get("retry_count"),
         blocked_by_invocation_id: row.get("blocked_by_invocation_id"),
         admitted_invocation_id: row.get("admitted_invocation_id"),
         source_event_id: row.get("source_event_id"),
         error: row.get("error"),
+        first_blocked_at: row.get("first_blocked_at"),
+        last_blocked_at: row.get("last_blocked_at"),
+        last_checked_at: row.get("last_checked_at"),
         admitted_at: row.get("admitted_at"),
         completed_at: row.get("completed_at"),
         created_at: row.get("created_at"),
