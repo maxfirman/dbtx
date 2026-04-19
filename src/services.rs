@@ -9,7 +9,7 @@ use crate::db::{
     ProjectRecord, SourceStateEventCreateInput, SourceStateEventRecord, RunFinalization, RunStart,
     UpdateEnvironmentDraftInput,
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
-    read_dbt_project_name, read_git_state, spawn_dbt_child,
+    read_dbt_project_name, read_git_state,
 };
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
@@ -22,7 +22,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Component;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use uuid::Uuid;
 
 const RECONCILE_LEASE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1514,8 +1513,8 @@ impl<'a> InvocationService<'a> {
             })
             .await?;
 
-        let mut child =
-            match spawn_dbt_child(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir) {
+        let mut dbt_child =
+            match crate::dbt_runner::DbtChild::spawn(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir) {
                 Ok(child) => child,
                 Err(err) => {
                     self.db
@@ -1525,28 +1524,9 @@ impl<'a> InvocationService<'a> {
                 }
             };
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stdout")))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stderr")))?;
-
-        let stderr_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            let mut lines = Vec::new();
-            while let Some(line) = reader.next_line().await? {
-                lines.push(line);
-            }
-            Result::<Vec<String>, std::io::Error>::Ok(lines)
-        });
-
-        let mut reader = BufReader::new(stdout).lines();
         let mut sequence_no: i64 = 0;
         let mut dbt_version: Option<String> = None;
-        while let Some(line) = reader.next_line().await? {
+        while let Some(line) = dbt_child.stdout_lines.next_line().await? {
             sequence_no += 1;
             if let Some(event) = LogEvent::parse(&line) {
                 let rendered = event.render_text_line();
@@ -1574,21 +1554,19 @@ impl<'a> InvocationService<'a> {
             }
         }
 
-        let status = child.wait().await?;
-        for line in stderr_handle.await.map_err(|err| {
-            AppError::Io(std::io::Error::other(format!("stderr task failed: {err}")))
-        })?? {
-            observer.stderr_line(&line);
+        let dbt_result = dbt_child.wait().await?;
+        for line in &dbt_result.stderr_lines {
+            observer.stderr_line(line);
         }
 
         let manifest_path = ctx.target_path.join("manifest.json");
         let manifest_result = ManifestSnapshot::from_path(&manifest_path).await;
-        let terminal_status = if status.success() {
+        let terminal_status = if dbt_result.exit_code == 0 {
             "success"
         } else {
             "failed"
         };
-        let exit_code = status.code().unwrap_or(1);
+        let exit_code = dbt_result.exit_code;
 
         self.db
             .finalize_run(RunFinalization {
@@ -1600,12 +1578,12 @@ impl<'a> InvocationService<'a> {
                 exit_code,
                 terminal_status,
                 manifest: manifest_result.ok().as_ref(),
-                promote_base_manifest: ctx.is_full_graph_run && status.success(),
+                promote_base_manifest: ctx.is_full_graph_run && exit_code == 0,
             })
             .await?;
 
         let result = InvocationResult { exit_code };
-        if status.success() {
+        if exit_code == 0 {
             Ok(result)
         } else {
             Err(AppError::DbtFailed(exit_code))
@@ -1645,58 +1623,32 @@ impl<'a> InvocationService<'a> {
             &generated_profiles,
         );
 
-        let mut child = spawn_dbt_child(
+        let mut dbt_child = crate::dbt_runner::DbtChild::spawn(
             &request.config.dbt_path,
             InvocationCommand::Ls.as_str(),
             &dbt_args,
             &ctx.project_dir,
         )?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stdout")))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| AppError::Io(std::io::Error::other("missing child stderr")))?;
-
-        let stdout_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            let mut lines = Vec::new();
-            while let Some(line) = reader.next_line().await? {
-                lines.push(line);
-            }
-            Result::<Vec<String>, std::io::Error>::Ok(lines)
-        });
-        let stderr_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            let mut lines = Vec::new();
-            while let Some(line) = reader.next_line().await? {
-                lines.push(line);
-            }
-            Result::<Vec<String>, std::io::Error>::Ok(lines)
-        });
-
-        let status = child.wait().await?;
-        for line in stdout_handle.await.map_err(|err| {
-            AppError::Io(std::io::Error::other(format!("stdout task failed: {err}")))
-        })?? {
-            observer.stdout_line(&line);
+        let mut stdout_lines = Vec::new();
+        while let Some(line) = dbt_child.stdout_lines.next_line().await? {
+            stdout_lines.push(line);
         }
-        for line in stderr_handle.await.map_err(|err| {
-            AppError::Io(std::io::Error::other(format!("stderr task failed: {err}")))
-        })?? {
-            observer.stderr_line(&line);
+        let dbt_result = dbt_child.wait().await?;
+
+        for line in &stdout_lines {
+            observer.stdout_line(line);
+        }
+        for line in &dbt_result.stderr_lines {
+            observer.stderr_line(line);
         }
 
-        let result = InvocationResult {
-            exit_code: status.code().unwrap_or(1),
-        };
-        if status.success() {
+        let exit_code = dbt_result.exit_code;
+        let result = InvocationResult { exit_code };
+        if exit_code == 0 {
             Ok(result)
         } else {
-            Err(AppError::DbtFailed(result.exit_code))
+            Err(AppError::DbtFailed(exit_code))
         }
     }
 }
@@ -2327,5 +2279,161 @@ mod tests {
         let sfp1 = source_state_change_input_fingerprint(&[3, 1, 2]);
         let sfp2 = source_state_change_input_fingerprint(&[1, 2, 3]);
         assert_eq!(sfp1, sfp2); // sorted + deduped
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::{plan_code_change_selected_resources, is_build_plannable_resource_type};
+    use crate::db::{CurrentNodeStatePlanningRecord, PlanningManifestNodeRecord};
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
+    fn node_id(i: usize) -> String {
+        format!("model.pkg.node_{i}")
+    }
+
+    /// Generate a random DAG with n nodes and random edges (parent -> child, no cycles).
+    /// Nodes are numbered 0..n, edges only go from lower to higher index (acyclic).
+    fn arb_dag(max_nodes: usize) -> impl Strategy<Value = (Vec<PlanningManifestNodeRecord>, Vec<(String, String)>)> {
+        (1..=max_nodes).prop_flat_map(|n| {
+            let checksums = proptest::collection::vec(proptest::option::of("[a-f0-9]{8}"), n);
+            // For edges: each node i can have edges to nodes j > i
+            let edge_bits = proptest::collection::vec(proptest::bool::ANY, n * n);
+            (Just(n), checksums, edge_bits)
+        }).prop_map(|(n, checksums, edge_bits)| {
+            let nodes: Vec<PlanningManifestNodeRecord> = (0..n)
+                .map(|i| PlanningManifestNodeRecord {
+                    unique_id: node_id(i),
+                    resource_type: Some("model".to_string()),
+                    checksum: checksums[i].clone(),
+                })
+                .collect();
+            let mut edges = Vec::new();
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    if edge_bits[i * n + j] {
+                        edges.push((node_id(i), node_id(j)));
+                    }
+                }
+            }
+            (nodes, edges)
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn empty_when_no_checksums_changed(
+            (nodes, edges) in arb_dag(8)
+        ) {
+            // baseline == target means no changes
+            let result = plan_code_change_selected_resources(&nodes, &nodes, &edges, &[]);
+            prop_assert!(result.is_empty(), "expected empty but got {:?}", result);
+        }
+
+        #[test]
+        fn output_is_sorted_and_deduplicated(
+            (baseline, edges) in arb_dag(8),
+            modifications in proptest::collection::vec(0..8usize, 0..4)
+        ) {
+            let mut target = baseline.clone();
+            for &idx in &modifications {
+                if idx < target.len() {
+                    target[idx].checksum = Some("modified".to_string());
+                }
+            }
+            let result = plan_code_change_selected_resources(&baseline, &target, &edges, &[]);
+            let mut sorted = result.clone();
+            sorted.sort();
+            sorted.dedup();
+            prop_assert_eq!(&result, &sorted);
+        }
+
+        #[test]
+        fn directly_modified_nodes_are_included_when_not_reconciled(
+            (baseline, edges) in arb_dag(8),
+            modifications in proptest::collection::vec(0..8usize, 1..4)
+        ) {
+            let mut target = baseline.clone();
+            let mut modified_ids = BTreeSet::new();
+            for &idx in &modifications {
+                if idx < target.len() {
+                    target[idx].checksum = Some("modified".to_string());
+                    modified_ids.insert(target[idx].unique_id.clone());
+                }
+            }
+            // No current state = nothing reconciled
+            let result = plan_code_change_selected_resources(&baseline, &target, &edges, &[]);
+            let result_set: BTreeSet<_> = result.into_iter().collect();
+            for id in &modified_ids {
+                if is_build_plannable_resource_type(Some("model")) {
+                    prop_assert!(
+                        result_set.contains(id),
+                        "modified node {id} missing from result"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn output_nodes_are_reachable_from_modified(
+            (baseline, edges) in arb_dag(8),
+            modifications in proptest::collection::vec(0..8usize, 1..3)
+        ) {
+            let mut target = baseline.clone();
+            let mut modified_ids = BTreeSet::new();
+            for &idx in &modifications {
+                if idx < target.len() {
+                    target[idx].checksum = Some("modified".to_string());
+                    modified_ids.insert(target[idx].unique_id.clone());
+                }
+            }
+            let result = plan_code_change_selected_resources(&baseline, &target, &edges, &[]);
+
+            // Build reachability from modified nodes
+            let mut reachable = modified_ids.clone();
+            let mut stack: Vec<_> = modified_ids.iter().cloned().collect();
+            let target_ids: BTreeSet<_> = target.iter().map(|n| n.unique_id.clone()).collect();
+            while let Some(parent) = stack.pop() {
+                for (p, c) in &edges {
+                    if *p == parent && target_ids.contains(c) && reachable.insert(c.clone()) {
+                        stack.push(c.clone());
+                    }
+                }
+            }
+
+            for id in &result {
+                prop_assert!(
+                    reachable.contains(id),
+                    "output node {id} is not reachable from any modified node"
+                );
+            }
+        }
+
+        #[test]
+        fn fully_reconciled_nodes_are_excluded(
+            (baseline, edges) in arb_dag(6),
+            mod_idx in 0..6usize
+        ) {
+            if mod_idx >= baseline.len() {
+                return Ok(());
+            }
+            let mut target = baseline.clone();
+            target[mod_idx].checksum = Some("modified".to_string());
+
+            // Mark the modified node as already reconciled to the new checksum
+            let current = vec![CurrentNodeStatePlanningRecord {
+                unique_id: target[mod_idx].unique_id.clone(),
+                checksum: Some("modified".to_string()),
+                last_success_at: Some(chrono::Utc::now()),
+            }];
+
+            let result = plan_code_change_selected_resources(&baseline, &target, &edges, &current);
+            // The modified node itself should NOT be in the result (it's reconciled)
+            prop_assert!(
+                !result.contains(&target[mod_idx].unique_id),
+                "reconciled node should be excluded"
+            );
+        }
     }
 }

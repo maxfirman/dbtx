@@ -8,8 +8,6 @@ use crate::manifest::ReconstructedManifest;
 use crate::profile::{EnvironmentProfileRecord, GeneratedProfiles, resolve_runtime_profile};
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::Stdio;
-use tokio::process::{Child, Command};
 use uuid::Uuid;
 
 pub(crate) fn append_invocation_id(mut args: Vec<OsString>, run_id: Uuid) -> Vec<OsString> {
@@ -48,22 +46,6 @@ pub(crate) fn append_profiles_dir(
             .to_os_string(),
     );
     args
-}
-
-pub(crate) fn spawn_dbt_child(
-    dbt_path: &str,
-    subcommand: &str,
-    args: &[OsString],
-    project_dir: &Path,
-) -> AppResult<Child> {
-    let child = Command::new(dbt_path)
-        .arg(subcommand)
-        .args(args)
-        .current_dir(project_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    Ok(child)
 }
 
 pub(crate) fn read_dbt_project_name(project_dir: &Path) -> String {

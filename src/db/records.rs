@@ -601,12 +601,14 @@ pub(crate) struct WorkerRegistryReadModel {
     pub(crate) last_seen_at: chrono::DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct PlanningManifestNodeRecord {
     pub(crate) unique_id: String,
     pub(crate) resource_type: Option<String>,
     pub(crate) checksum: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct CurrentNodeStatePlanningRecord {
     pub(crate) unique_id: String,
     pub(crate) checksum: Option<String>,

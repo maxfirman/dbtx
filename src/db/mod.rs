@@ -27,7 +27,7 @@ pub use records::*;
 // New code should import from crate::dbt_utils directly.
 pub(crate) use crate::dbt_utils::{
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
-    git_repo_root, read_dbt_project_name, read_git_state, spawn_dbt_child,
+    git_repo_root, read_dbt_project_name, read_git_state,
 };
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");

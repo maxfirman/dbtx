@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn encrypt_round_trip_nested_secrets() {
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key-2") };
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
         let value = json!({"password": "s3cr3t", "token": "abc123", "nested": {"key": "val"}});
         let encrypted = encrypt_json(&value).expect("encrypt");
         assert!(encrypted.get("nonce").is_some());
@@ -622,12 +622,17 @@ mod tests {
 
     #[test]
     fn decrypt_with_wrong_key_fails() {
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "key-a") };
+        // Encrypt with one key, try to decrypt with another.
+        // We use a unique nonce so even if the key matches another test's key,
+        // the ciphertext won't accidentally decrypt.
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "wrong-key-test-encrypt") };
         let value = json!({"password": "secret"});
         let encrypted = encrypt_json(&value).expect("encrypt");
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "key-b") };
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "wrong-key-test-decrypt") };
         let result = decrypt_json(&encrypted);
         assert!(result.is_err());
+        // Restore a stable key for other tests
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
     }
 
     #[test]
