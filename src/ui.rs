@@ -1442,6 +1442,13 @@ async fn load_environment_panel(
     Ok(EnvironmentPanelTemplate {
         project: project_summary_view(&project),
         environment: environment_detail_view(&environment),
+        summary: environment_reconciliation_summary_view(
+            &environment,
+            &actual_state,
+            preparation.as_ref(),
+            &plans,
+            active_resources.len(),
+        ),
         actual_state: environment_actual_state_view(&actual_state),
         preparation: preparation
             .as_ref()
@@ -1862,6 +1869,21 @@ struct EnvironmentReconcilePreparationView {
 }
 
 #[derive(Clone)]
+struct EnvironmentReconciliationSummaryView {
+    state: String,
+    state_class: &'static str,
+    desired_commit_sha: String,
+    actual_commit_sha: String,
+    latest_plan_status: String,
+    latest_plan_status_class: &'static str,
+    latest_plan_reason: String,
+    preparation_status: String,
+    preparation_status_class: &'static str,
+    active_resource_count: usize,
+    blocked_plan_count: usize,
+}
+
+#[derive(Clone)]
 struct EnvironmentRunPlanView {
     plan_id: String,
     status: String,
@@ -2241,6 +2263,82 @@ fn environment_reconcile_preparation_view(
     }
 }
 
+fn environment_reconciliation_summary_view(
+    environment: &EnvironmentRecord,
+    actual_state: &EnvironmentActualStateRecord,
+    preparation: Option<&EnvironmentReconcilePreparationRecord>,
+    plans: &[EnvironmentRunPlanRecord],
+    active_resource_count: usize,
+) -> EnvironmentReconciliationSummaryView {
+    let desired_commit_sha = environment
+        .git_commit_sha
+        .clone()
+        .unwrap_or_else(|| "—".to_string());
+    let actual_commit_sha = actual_state
+        .last_successful_commit_sha
+        .clone()
+        .unwrap_or_else(|| "—".to_string());
+    let (state, state_class) = if desired_commit_sha == "—" {
+        ("missing desired commit".to_string(), "bg-slate-100 text-slate-700")
+    } else if desired_commit_sha == actual_commit_sha && active_resource_count == 0 {
+        ("reconciled".to_string(), "bg-emerald-100 text-emerald-800")
+    } else if active_resource_count > 0 {
+        ("reconciling".to_string(), "bg-sky-100 text-sky-800")
+    } else {
+        ("drift detected".to_string(), "bg-amber-100 text-amber-800")
+    };
+    let latest_plan = plans.first();
+    let (latest_plan_status, latest_plan_status_class, latest_plan_reason) = latest_plan
+        .map(|plan| {
+            (
+                plan.status.clone(),
+                match plan.status.as_str() {
+                    "planned" => "bg-amber-100 text-amber-800",
+                    "blocked" => "bg-orange-100 text-orange-800",
+                    "admitted" => "bg-sky-100 text-sky-800",
+                    "completed" => "bg-emerald-100 text-emerald-800",
+                    "failed" | "canceled" => "bg-rose-100 text-rose-800",
+                    _ => "bg-slate-100 text-slate-700",
+                },
+                plan.reason.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                "none".to_string(),
+                "bg-slate-100 text-slate-700",
+                "—".to_string(),
+            )
+        });
+    let (preparation_status, preparation_status_class) = preparation
+        .map(|preparation| {
+            (
+                preparation.status.clone(),
+                match preparation.status.as_str() {
+                    "running" => "bg-sky-100 text-sky-800",
+                    "succeeded" => "bg-emerald-100 text-emerald-800",
+                    "failed" => "bg-rose-100 text-rose-800",
+                    _ => "bg-slate-100 text-slate-700",
+                },
+            )
+        })
+        .unwrap_or_else(|| ("idle".to_string(), "bg-slate-100 text-slate-700"));
+    let blocked_plan_count = plans.iter().filter(|plan| plan.status == "blocked").count();
+    EnvironmentReconciliationSummaryView {
+        state,
+        state_class,
+        desired_commit_sha,
+        actual_commit_sha,
+        latest_plan_status,
+        latest_plan_status_class,
+        latest_plan_reason,
+        preparation_status,
+        preparation_status_class,
+        active_resource_count,
+        blocked_plan_count,
+    }
+}
+
 fn environment_run_plan_view(
     project_id: &str,
     slug: &str,
@@ -2504,6 +2602,7 @@ struct EnvironmentPageTemplate {
 struct EnvironmentPanelTemplate {
     project: ProjectSummaryView,
     environment: EnvironmentDetailView,
+    summary: EnvironmentReconciliationSummaryView,
     actual_state: EnvironmentActualStateView,
     preparation: Option<EnvironmentReconcilePreparationView>,
     active_resources: Vec<EnvironmentActiveResourceView>,
@@ -3050,6 +3149,19 @@ mod tests {
                 status_class: "bg-emerald-100 text-emerald-800",
                 git_branch: "main".to_string(),
                 git_commit_sha: "aaaaaaaa".to_string(),
+            },
+            summary: EnvironmentReconciliationSummaryView {
+                state: "drift detected".to_string(),
+                state_class: "bg-amber-100 text-amber-800",
+                desired_commit_sha: "bbbbbbbb".to_string(),
+                actual_commit_sha: "aaaaaaaa".to_string(),
+                latest_plan_status: "blocked".to_string(),
+                latest_plan_status_class: "bg-orange-100 text-orange-800",
+                latest_plan_reason: "source_state_change".to_string(),
+                preparation_status: "running".to_string(),
+                preparation_status_class: "bg-sky-100 text-sky-800",
+                active_resource_count: 1,
+                blocked_plan_count: 1,
             },
             actual_state: EnvironmentActualStateView {
                 last_attempted_run_id: "run-a".to_string(),

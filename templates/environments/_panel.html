@@ -22,6 +22,46 @@
     </div>
   </div>
 
+  <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+    <div class="flex items-start justify-between gap-4">
+      <div>
+        <h2 class="font-semibold">Reconciliation Summary</h2>
+        <p class="mt-1 text-sm text-slate-500">Current converge state, live plan status, prerequisite work, and active conflicts.</p>
+      </div>
+      <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ summary.state_class }}">{{ summary.state }}</span>
+    </div>
+    <div class="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div class="rounded-lg bg-slate-50 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Desired vs Actual</div>
+        <div class="mt-2 space-y-2 text-sm">
+          <div class="flex justify-between gap-3"><span class="text-slate-500">Desired</span><span class="font-mono text-xs">{{ summary.desired_commit_sha }}</span></div>
+          <div class="flex justify-between gap-3"><span class="text-slate-500">Actual</span><span class="font-mono text-xs">{{ summary.actual_commit_sha }}</span></div>
+        </div>
+      </div>
+      <div class="rounded-lg bg-slate-50 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Latest Plan</div>
+        <div class="mt-2 space-y-2 text-sm">
+          <div><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ summary.latest_plan_status_class }}">{{ summary.latest_plan_status }}</span></div>
+          <div class="text-slate-600">{{ summary.latest_plan_reason }}</div>
+        </div>
+      </div>
+      <div class="rounded-lg bg-slate-50 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Preparation</div>
+        <div class="mt-2 space-y-2 text-sm">
+          <div><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ summary.preparation_status_class }}">{{ summary.preparation_status }}</span></div>
+          <div class="text-slate-600">Manifest prerequisites and other pre-plan work.</div>
+        </div>
+      </div>
+      <div class="rounded-lg bg-slate-50 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Conflicts</div>
+        <div class="mt-2 space-y-2 text-sm">
+          <div class="flex justify-between gap-3"><span class="text-slate-500">Active Resources</span><span>{{ summary.active_resource_count }}</span></div>
+          <div class="flex justify-between gap-3"><span class="text-slate-500">Blocked Plans</span><span>{{ summary.blocked_plan_count }}</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <div class="grid gap-8 lg:grid-cols-[0.95fr,1.05fr]">
     <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <div class="flex items-start justify-between gap-4">
