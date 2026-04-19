@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dbtx-postgres
+    environment:
+      POSTGRES_USER: dbtx
+      POSTGRES_PASSWORD: dbtx
+      POSTGRES_DB: dbtx
+    ports:
+      - "55432:5432"
+    volumes:
+      - dbtx-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbtx -d dbtx"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    image: rust:1.89-bookworm
+    profiles: ["app"]
+    working_dir: /workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DBTX_DATABASE_URL: postgres://dbtx:dbtx@postgres:5432/dbtx
+      DBTX_SECRET_KEY: local-dev-secret-key
+      RUST_LOG: dbtx=info
+    command:
+      - bash
+      - -lc
+      - cargo run --bin dbtx-server -- --listen 0.0.0.0:8585
+    ports:
+      - "8585:8585"
+    volumes:
+      - .:/workspace
+      - dbtx-cargo-registry:/usr/local/cargo/registry
+      - dbtx-cargo-git:/usr/local/cargo/git
+      - dbtx-target:/workspace/target
+
+  reconciler:
+    image: rust:1.89-bookworm
+    profiles: ["app"]
+    working_dir: /workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DBTX_DATABASE_URL: postgres://dbtx:dbtx@postgres:5432/dbtx
+      DBTX_SECRET_KEY: local-dev-secret-key
+      RUST_LOG: dbtx=info
+    command:
+      - bash
+      - -lc
+      - cargo run --bin dbtx-reconciler
+    volumes:
+      - .:/workspace
+      - dbtx-cargo-registry:/usr/local/cargo/registry
+      - dbtx-cargo-git:/usr/local/cargo/git
+      - dbtx-target:/workspace/target
+
+volumes:
+  dbtx-postgres-data:
+  dbtx-cargo-registry:
+  dbtx-cargo-git:
+  dbtx-target:

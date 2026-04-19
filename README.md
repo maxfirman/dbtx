@@ -150,6 +150,26 @@ Example:
 export DBTX_DATABASE_URL=postgres://dbtx:dbtx@127.0.0.1:55432/dbtx
 ```
 
+For local development, the repo now includes `docker-compose.yml`.
+
+Start only PostgreSQL:
+
+```bash
+docker compose up -d postgres
+```
+
+Optionally start the API server and reconciler inside containers as well:
+
+```bash
+docker compose --profile app up -d postgres server reconciler
+```
+
+Notes:
+
+- the compose file is intended for local development, not production deployment
+- `server` and `reconciler` run directly from the checked-out source tree with `cargo run`
+- `dbtx-worker` is intentionally not included there yet because real execution still requires a dbt executable in the runtime environment
+
 ### 2. Start the API server
 
 ```bash
