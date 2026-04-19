@@ -8,6 +8,7 @@ use dbtx::api::{
     ProjectDraftCreateApiRequest,
 };
 use dbtx::client::DaemonClient;
+use dbtx::db::PlanStatus;
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use dbtx::services::{
     code_change_input_fingerprint, infer_local_project_defaults, infer_remote_project_defaults,
@@ -406,7 +407,7 @@ async fn source_state_reconcile_creates_and_admits_plan() {
         .await
         .expect("create reconciliation plan")
         .plan;
-    assert_eq!(plan.status, "planned");
+    assert_eq!(plan.status, PlanStatus::Planned);
     assert_eq!(plan.reason, "source_state_change");
     assert_eq!(plan.selection_spec.as_deref(), Some("source_downstream"));
     assert_eq!(
@@ -425,7 +426,7 @@ async fn source_state_reconcile_creates_and_admits_plan() {
         .await
         .expect("admit reconciliation plan")
         .plan;
-    assert_eq!(admitted.status, "admitted");
+    assert_eq!(admitted.status, PlanStatus::Admitted);
     assert!(admitted.admitted_invocation_id.is_some());
 
     let reloaded = client
@@ -433,7 +434,7 @@ async fn source_state_reconcile_creates_and_admits_plan() {
         .await
         .expect("reload admitted plan")
         .plan;
-    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.status, PlanStatus::Admitted);
     assert_eq!(reloaded.admitted_invocation_id, admitted.admitted_invocation_id);
 
     let linked_plan_id: Option<Uuid> = sqlx::query_scalar(
@@ -707,7 +708,7 @@ async fn periodic_reconciler_creates_and_admits_source_state_plan() {
     let created_plan =
         wait_for_plan_reason(&client, &project_id, "remote", "source_state_change").await;
     assert_eq!(created_plan.source_event_id, Some(source_event.id));
-    let admitted = wait_for_plan_status(&client, created_plan.plan_id, "admitted").await;
+    let admitted = wait_for_plan_status(&client, created_plan.plan_id, PlanStatus::Admitted).await;
     assert!(admitted.admitted_invocation_id.is_some());
 }
 
@@ -756,7 +757,7 @@ async fn periodic_reconciler_creates_and_admits_code_change_plan() {
     .await;
 
     let created_plan = wait_for_plan_reason(&client, &project_id, "remote", "code_change").await;
-    let plan = wait_for_plan_status(&client, created_plan.plan_id, "admitted").await;
+    let plan = wait_for_plan_status(&client, created_plan.plan_id, PlanStatus::Admitted).await;
     assert!(plan.admitted_invocation_id.is_some());
     assert_eq!(
         plan.selected_resources,
@@ -1287,7 +1288,7 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
 
     let new_plan = wait_for_plan_reason(&client, &project_id, "remote", "source_state_change").await;
     assert_eq!(new_plan.source_event_id, Some(second.id));
-    let admitted = wait_for_plan_status(&client, new_plan.plan_id, "admitted").await;
+    let admitted = wait_for_plan_status(&client, new_plan.plan_id, PlanStatus::Admitted).await;
     assert_eq!(admitted.source_event_id, Some(second.id));
 }
 
@@ -1398,7 +1399,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
         .await
         .expect("attempt second plan admit")
         .plan;
-    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.status, PlanStatus::Blocked);
     assert_eq!(blocked.blocked_by_invocation_id, Some(first_invocation_id));
     assert!(blocked.admitted_invocation_id.is_none());
 
@@ -1419,7 +1420,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
         .await
         .expect("reload second plan after blocker completion")
         .plan;
-    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.status, PlanStatus::Admitted);
     let auto_admitted_invocation_id = reloaded
         .admitted_invocation_id
         .expect("auto-admitted invocation id");
@@ -1542,7 +1543,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
         .await
         .expect("attempt second plan admit")
         .plan;
-    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.status, PlanStatus::Blocked);
 
     client
         .invocation_cancel(first_invocation_id, Default::default())
@@ -1565,7 +1566,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
         .await
         .expect("reload second plan after cancel completion")
         .plan;
-    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.status, PlanStatus::Admitted);
     assert!(reloaded.admitted_invocation_id.is_some());
 }
 
@@ -1676,7 +1677,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
         .await
         .expect("attempt second plan admit")
         .plan;
-    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.status, PlanStatus::Blocked);
 
     sqlx::query(
         "UPDATE invocations SET claimed_at = NOW() - INTERVAL '2 minutes', last_heartbeat_at = NOW() - INTERVAL '2 minutes' WHERE invocation_id = $1",
@@ -1698,7 +1699,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
         .await
         .expect("reload second plan after timeout")
         .plan;
-    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.status, PlanStatus::Admitted);
     assert!(reloaded.admitted_invocation_id.is_some());
 }
 
@@ -1809,7 +1810,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
         .await
         .expect("attempt second plan admit")
         .plan;
-    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.status, PlanStatus::Blocked);
 
     client
         .invocation_complete(
@@ -1828,7 +1829,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
         .await
         .expect("reload second plan after failure")
         .plan;
-    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.status, PlanStatus::Admitted);
     assert!(reloaded.admitted_invocation_id.is_some());
 
     let close_reason: Option<String> = sqlx::query_scalar(
@@ -1942,7 +1943,7 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
             .expect("block second plan")
             .plan
             .status,
-        "blocked"
+        PlanStatus::Blocked
     );
     assert_eq!(
         client
@@ -1951,7 +1952,7 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
             .expect("block third plan")
             .plan
             .status,
-        "blocked"
+        PlanStatus::Blocked
     );
 
     client
@@ -1976,8 +1977,8 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
         .await
         .expect("reload third plan")
         .plan;
-    assert_eq!(second_reloaded.status, "admitted");
-    assert_eq!(third_reloaded.status, "blocked");
+    assert_eq!(second_reloaded.status, PlanStatus::Admitted);
+    assert_eq!(third_reloaded.status, PlanStatus::Blocked);
     assert!(second_reloaded.admitted_invocation_id.is_some());
     assert_eq!(
         third_reloaded.blocked_by_invocation_id,
@@ -2092,7 +2093,7 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
             .expect("block second plan")
             .plan
             .status,
-        "blocked"
+        PlanStatus::Blocked
     );
 
     client
@@ -2150,7 +2151,7 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
         .await
         .expect("reload second plan after unrelated completion")
         .plan;
-    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.status, PlanStatus::Admitted);
     assert_eq!(reloaded.admitted_invocation_id, Some(admitted_invocation_id));
 }
 
@@ -2252,7 +2253,7 @@ async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_cance
             .expect("block second plan")
             .plan
             .status,
-        "blocked"
+        PlanStatus::Blocked
     );
 
     client
@@ -2265,7 +2266,7 @@ async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_cance
         .await
         .expect("reload second plan after unclaimed cancel")
         .plan;
-    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.status, PlanStatus::Admitted);
     assert!(reloaded.admitted_invocation_id.is_some());
 
     let close_reason: Option<String> = sqlx::query_scalar(
@@ -2385,7 +2386,7 @@ async fn manual_admit_after_auto_admit_fails_cleanly() {
             .expect("block second plan")
             .plan
             .status,
-        "blocked"
+        PlanStatus::Blocked
     );
 
     client
@@ -2405,7 +2406,7 @@ async fn manual_admit_after_auto_admit_fails_cleanly() {
         .await
         .expect("reload second plan after auto admit")
         .plan;
-    assert_eq!(reloaded.status, "admitted");
+    assert_eq!(reloaded.status, PlanStatus::Admitted);
     assert!(
         client.environment_plan_admit(second_plan.plan_id).await.is_err(),
         "manual admit after auto-admit should fail"
@@ -2486,7 +2487,7 @@ async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
         .expect("create code-change reconciliation plan")
         .plan;
 
-    assert_eq!(plan.status, "planned");
+    assert_eq!(plan.status, PlanStatus::Planned);
     assert_eq!(plan.reason, "code_change");
     assert_eq!(plan.selection_spec.as_deref(), Some("state_modified_live_plus"));
     assert_eq!(plan.selected_resources, vec!["model.pkg.customers".to_string()]);
@@ -2656,7 +2657,7 @@ async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
         .await
         .expect("reload first plan")
         .plan;
-    assert_eq!(first_reloaded.status, "superseded");
+    assert_eq!(first_reloaded.status, PlanStatus::Superseded);
     assert_eq!(first_reloaded.superseded_by_plan_id, Some(second.plan_id));
 }
 
@@ -2825,7 +2826,7 @@ async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
         .await
         .expect("initial admit attempt")
         .plan;
-    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.status, PlanStatus::Blocked);
     assert_eq!(
         blocked.selected_resources,
         vec![
@@ -2848,7 +2849,7 @@ async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
         .await
         .expect("re-admit blocked plan")
         .plan;
-    assert_eq!(replanned.status, "blocked");
+    assert_eq!(replanned.status, PlanStatus::Blocked);
     assert_eq!(replanned.selected_resources, vec!["model.pkg.customers".to_string()]);
 }
 
@@ -2939,7 +2940,7 @@ async fn blocked_source_state_plan_completes_noop_when_source_event_is_already_s
         .await
         .expect("initial admit attempt")
         .plan;
-    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.status, PlanStatus::Blocked);
 
     insert_source_state_satisfaction(
         db.pool(),
@@ -2957,7 +2958,7 @@ async fn blocked_source_state_plan_completes_noop_when_source_event_is_already_s
         .await
         .expect("re-admit source-state plan after satisfaction")
         .plan;
-    assert_eq!(no_op.status, "completed");
+    assert_eq!(no_op.status, PlanStatus::Completed);
     assert!(no_op.admitted_invocation_id.is_none());
     assert_eq!(no_op.selected_resources, Vec::<String>::new());
     assert_eq!(
@@ -3047,7 +3048,7 @@ async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() 
         .await
         .expect("initial admit attempt")
         .plan;
-    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.status, PlanStatus::Blocked);
     assert_eq!(
         blocked.selected_resources,
         vec![
@@ -3065,7 +3066,7 @@ async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() 
     )
     .await;
 
-    let admitted = wait_for_plan_status(&client, plan.plan_id, "admitted").await;
+    let admitted = wait_for_plan_status(&client, plan.plan_id, PlanStatus::Admitted).await;
     assert_eq!(admitted.selected_resources, vec!["model.pkg.customers".to_string()]);
     assert!(admitted.admitted_invocation_id.is_some());
 }
@@ -3157,7 +3158,7 @@ async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
         .await
         .expect("initial admit attempt")
         .plan;
-    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.status, PlanStatus::Blocked);
 
     insert_source_state_satisfaction(
         db.pool(),
@@ -3170,7 +3171,7 @@ async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
     )
     .await;
 
-    let completed = wait_for_plan_status(&client, plan.plan_id, "completed").await;
+    let completed = wait_for_plan_status(&client, plan.plan_id, PlanStatus::Completed).await;
     assert!(completed.admitted_invocation_id.is_none());
     assert_eq!(completed.selected_resources, Vec::<String>::new());
     assert_eq!(
@@ -4177,7 +4178,7 @@ fn wait_for_server(service_url: &str, child: &mut Child) {
 async fn wait_for_plan_status(
     client: &DaemonClient,
     plan_id: Uuid,
-    expected_status: &str,
+    expected_status: PlanStatus,
 ) -> dbtx::db::EnvironmentRunPlanRecord {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -4211,7 +4212,7 @@ async fn wait_for_plan_reason(
             .expect("list plans while waiting")
             .plans;
         if let Some(plan) = plans.into_iter().find(|plan| plan.reason == expected_reason)
-            && matches!(plan.status.as_str(), "planned" | "blocked" | "admitted" | "completed")
+            && matches!(plan.status, PlanStatus::Planned | PlanStatus::Blocked | PlanStatus::Admitted | PlanStatus::Completed)
         {
             return plan;
         }

@@ -1,5 +1,5 @@
 use crate::api::InvocationCommandApi;
-use crate::db::{EnvironmentRecord, SourceStateEventRecord};
+use crate::db::{EnvironmentRecord, PlanStatus, SourceStateEventRecord};
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::start_prepared_invocation;
 use crate::server::AppState;
@@ -182,7 +182,7 @@ async fn automatic_reconcile_backoff_until(
         .list_environment_run_plans_by_scope(environment.project_id, environment.id)
         .await?
         .into_iter()
-        .find(|plan| matches!(plan.status.as_str(), "failed" | "canceled"));
+        .find(|plan| matches!(plan.status, PlanStatus::Failed | PlanStatus::Canceled));
     let Some(plan) = latest_failed_plan else {
         return Ok(None);
     };
@@ -211,11 +211,7 @@ async fn ensure_target_manifest_for_reconcile_async(
         .get_environment_actual_state(&environment.project_ref, &environment.slug)
         .await?
         .last_successful_run_id
-        .ok_or_else(|| {
-            AppError::Io(std::io::Error::other(
-                "automatic manifest preparation requires a successful baseline run",
-            ))
-        })?;
+        .ok_or(AppError::ReconciliationRequiresBaseline)?;
     let input_fingerprint =
         target_manifest_input_fingerprint(&code_change_input_fingerprint(
             &desired_commit_sha,
@@ -334,14 +330,76 @@ pub async fn auto_admit_blocked_plans_for_environment(
 }
 
 fn should_ignore_reconcile_error(err: &AppError) -> bool {
-    match err {
-        AppError::Io(io_err) => {
-            let message = io_err.to_string();
-            message.contains("environment is already reconciled to known desired state")
-                || message.contains("environment reconciliation is already in progress")
-                || message.contains("plan ")
-                    && message.contains(" is not admissible from status ")
-        }
-        _ => false,
+    matches!(
+        err,
+        AppError::EnvironmentAlreadyReconciled
+            | AppError::ReconciliationInProgress
+            | AppError::PlanNotAdmissible(_, _)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::AppError;
+
+    #[test]
+    fn ignores_already_reconciled_error() {
+        let err = AppError::EnvironmentAlreadyReconciled;
+        assert!(should_ignore_reconcile_error(&err));
+    }
+
+    #[test]
+    fn ignores_reconciliation_in_progress_error() {
+        let err = AppError::ReconciliationInProgress;
+        assert!(should_ignore_reconcile_error(&err));
+    }
+
+    #[test]
+    fn ignores_plan_not_admissible_error() {
+        let err = AppError::PlanNotAdmissible(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            "completed".to_string(),
+        );
+        assert!(should_ignore_reconcile_error(&err));
+    }
+
+    #[test]
+    fn does_not_ignore_unrelated_io_error() {
+        let err = AppError::Io(std::io::Error::other("connection refused"));
+        assert!(!should_ignore_reconcile_error(&err));
+    }
+
+    #[test]
+    fn does_not_ignore_non_io_errors() {
+        let err = AppError::SchemaOutOfDate;
+        assert!(!should_ignore_reconcile_error(&err));
+    }
+
+    #[test]
+    fn reconcile_interval_defaults_to_5s() {
+        // Clear env to test default
+        unsafe { std::env::remove_var("DBTX_RECONCILE_INTERVAL_MS") };
+        assert_eq!(reconcile_interval(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn reconcile_interval_reads_env() {
+        unsafe { std::env::set_var("DBTX_RECONCILE_INTERVAL_MS", "2000") };
+        assert_eq!(reconcile_interval(), Duration::from_millis(2000));
+        unsafe { std::env::remove_var("DBTX_RECONCILE_INTERVAL_MS") };
+    }
+
+    #[test]
+    fn reconcile_interval_ignores_zero() {
+        unsafe { std::env::set_var("DBTX_RECONCILE_INTERVAL_MS", "0") };
+        assert_eq!(reconcile_interval(), Duration::from_secs(5));
+        unsafe { std::env::remove_var("DBTX_RECONCILE_INTERVAL_MS") };
+    }
+
+    #[test]
+    fn blocked_plan_sweep_interval_defaults_to_2s() {
+        unsafe { std::env::remove_var("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS") };
+        assert_eq!(blocked_plan_sweep_interval(), Duration::from_secs(2));
     }
 }

@@ -127,6 +127,18 @@ pub enum AppError {
         "dbtx manages warehouse profiles internally; remove the user-supplied --profiles-dir argument"
     )]
     UserProfilesDirNotAllowed,
+    #[error("environment is already reconciled to known desired state")]
+    EnvironmentAlreadyReconciled,
+    #[error("environment reconciliation is already in progress")]
+    ReconciliationInProgress,
+    #[error("plan {0} is not admissible from status {1}")]
+    PlanNotAdmissible(String, String),
+    #[error("reconciliation requires a successful baseline run")]
+    ReconciliationRequiresBaseline,
+    #[error("reconciliation requires a desired git commit sha")]
+    ReconciliationRequiresCommitSha,
+    #[error("reconciliation plan resolved to no selected resources")]
+    ReconciliationEmptyPlan,
 }
 
 pub type AppResult<T> = Result<T, AppError>;

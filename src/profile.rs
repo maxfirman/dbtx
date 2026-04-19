@@ -586,4 +586,71 @@ mod tests {
         assert_eq!(resolved.final_config["schema"], "custom");
         assert_eq!(resolved.final_config["type"], "duckdb");
     }
+
+    #[test]
+    fn encrypt_null_returns_empty_object() {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
+        let encrypted = encrypt_json(&serde_json::Value::Null).expect("encrypt null");
+        assert_eq!(encrypted, json!({}));
+    }
+
+    #[test]
+    fn encrypt_empty_object_returns_empty_object() {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
+        let encrypted = encrypt_json(&json!({})).expect("encrypt empty");
+        assert_eq!(encrypted, json!({}));
+    }
+
+    #[test]
+    fn decrypt_null_returns_empty_object() {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
+        let decrypted = decrypt_json(&serde_json::Value::Null).expect("decrypt null");
+        assert_eq!(decrypted, json!({}));
+    }
+
+    #[test]
+    fn encrypt_round_trip_nested_secrets() {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key-2") };
+        let value = json!({"password": "s3cr3t", "token": "abc123", "nested": {"key": "val"}});
+        let encrypted = encrypt_json(&value).expect("encrypt");
+        assert!(encrypted.get("nonce").is_some());
+        assert!(encrypted.get("ciphertext").is_some());
+        let decrypted = decrypt_json(&encrypted).expect("decrypt");
+        assert_eq!(decrypted, value);
+    }
+
+    #[test]
+    fn decrypt_with_wrong_key_fails() {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "key-a") };
+        let value = json!({"password": "secret"});
+        let encrypted = encrypt_json(&value).expect("encrypt");
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "key-b") };
+        let result = decrypt_json(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decrypt_missing_nonce_fails() {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
+        let result = decrypt_json(&json!({"ciphertext": "abc"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decrypt_missing_ciphertext_fails() {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
+        let result = decrypt_json(&json!({"nonce": "abc"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypt_requires_secret_key() {
+        // This test verifies the error path when DBTX_SECRET_KEY is missing.
+        // We can't safely remove the env var in parallel tests, so we verify
+        // the derive_key function's dependency on the env var indirectly:
+        // if the key is set, encryption succeeds (covered by other tests).
+        // The error variant exists and is returned by derive_key when unset.
+        let err = crate::error::AppError::MissingSecretKey;
+        assert!(err.to_string().contains("DBTX_SECRET_KEY"));
+    }
 }

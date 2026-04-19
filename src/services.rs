@@ -4,8 +4,8 @@ use crate::db::{
     CreateProjectInput, CurrentNodeStatePlanningRecord, Db, EquivalentPlanLookup,
     EnvironmentActualStateRecord, EnvironmentDraftRecord, EnvironmentRecord,
     EnvironmentReleaseInput, EnvironmentRunPlanRecord, EnvironmentVersionRecord, GitState,
-    LocalEnvironmentUpsertInput, PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord,
-    SourceStateEventCreateInput, SourceStateEventRecord, RunFinalization, RunStart,
+    LocalEnvironmentUpsertInput, PlanStatus, PlanningManifestNodeRecord, ProjectDraftRecord,
+    ProjectRecord, SourceStateEventCreateInput, SourceStateEventRecord, RunFinalization, RunStart,
     UpdateEnvironmentDraftInput,
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
     read_dbt_project_name, read_git_state, spawn_dbt_child,
@@ -393,9 +393,7 @@ impl<'a> EnvironmentService<'a> {
         {
             Ok(())
         } else {
-            Err(AppError::Io(std::io::Error::other(
-                "environment reconciliation is already in progress",
-            )))
+            Err(AppError::ReconciliationInProgress)
         }
     }
 
@@ -799,11 +797,9 @@ impl<'a> EnvironmentService<'a> {
         self.acquire_reconcile_lease(environment.id, &lease_owner).await?;
         let result = async {
             let actual_state = self.db.get_environment_actual_state(&project, &slug).await?;
-            let baseline_run_id = actual_state.last_successful_run_id.ok_or_else(|| {
-                AppError::Io(std::io::Error::other(
-                    "reconciliation requires a successful baseline run",
-                ))
-            })?;
+            let baseline_run_id = actual_state.last_successful_run_id.ok_or(
+                AppError::ReconciliationRequiresBaseline
+            )?;
 
             let source_events = self
                 .db
@@ -812,18 +808,14 @@ impl<'a> EnvironmentService<'a> {
             let code_drift = environment.git_commit_sha != actual_state.last_successful_commit_sha;
 
             if !code_drift && source_events.is_empty() {
-                return Err(AppError::Io(std::io::Error::other(
-                    "environment is already reconciled to known desired state",
-                )));
+                return Err(AppError::EnvironmentAlreadyReconciled);
             }
 
             let (reason, input_fingerprint, selection_spec, selected_resources, source_event_id, metadata) =
                 if code_drift {
-                    let desired_commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
-                        AppError::Io(std::io::Error::other(
-                            "reconciliation requires a desired git commit sha",
-                        ))
-                    })?;
+                    let desired_commit_sha = environment.git_commit_sha.clone().ok_or(
+                        AppError::ReconciliationRequiresCommitSha
+                    )?;
                     let input_fingerprint =
                         code_change_input_fingerprint(&desired_commit_sha, baseline_run_id);
                     if let Some(target_manifest_run_id) = self
@@ -917,9 +909,7 @@ impl<'a> EnvironmentService<'a> {
                 };
 
             if selected_resources.is_empty() {
-                return Err(AppError::Io(std::io::Error::other(
-                    "reconciliation plan resolved to no selected resources",
-                )));
+                return Err(AppError::ReconciliationEmptyPlan);
             }
             if let Some(plan) = self
                 .db
@@ -980,14 +970,14 @@ impl<'a> EnvironmentService<'a> {
         let lease_owner = format!("admit:{}", invocation_id);
         self.acquire_reconcile_lease(environment_id, &lease_owner).await?;
         let result = async {
-            if !matches!(plan.status.as_str(), "planned" | "blocked") {
-                return Err(AppError::Io(std::io::Error::other(format!(
-                    "plan {plan_id} is not admissible from status {}",
-                    plan.status
-                ))));
+            if !plan.status.is_admissible() {
+                return Err(AppError::PlanNotAdmissible(
+                    plan_id.to_string(),
+                    plan.status.to_string(),
+                ));
             }
             let plan = self.replan_pending_plan(plan).await?;
-            if plan.status == "completed" {
+            if plan.status == PlanStatus::Completed {
                 return Ok(EnvironmentPlanAdmitPrepared {
                     plan,
                     invocation_id: None,
@@ -2231,5 +2221,110 @@ mod tests {
 
         let selected = plan_code_change_selected_resources(&baseline, &target, &edges, &current);
         assert_eq!(selected, vec!["model.pkg.customers".to_string()]);
+    }
+
+    #[test]
+    fn code_change_planning_selects_modified_node_and_downstream() {
+        let baseline = vec![
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.stg_orders".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("old-stg".to_string()),
+            },
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.orders".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("orders-v1".to_string()),
+            },
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.revenue".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("revenue-v1".to_string()),
+            },
+        ];
+        let target = vec![
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.stg_orders".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("new-stg".to_string()),
+            },
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.orders".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("orders-v1".to_string()),
+            },
+            PlanningManifestNodeRecord {
+                unique_id: "model.pkg.revenue".to_string(),
+                resource_type: Some("model".to_string()),
+                checksum: Some("revenue-v1".to_string()),
+            },
+        ];
+        let edges = vec![
+            ("model.pkg.stg_orders".to_string(), "model.pkg.orders".to_string()),
+            ("model.pkg.orders".to_string(), "model.pkg.revenue".to_string()),
+        ];
+        let current = vec![]; // No current state = never run
+
+        let selected = plan_code_change_selected_resources(&baseline, &target, &edges, &current);
+        assert_eq!(
+            selected,
+            vec![
+                "model.pkg.orders".to_string(),
+                "model.pkg.revenue".to_string(),
+                "model.pkg.stg_orders".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn code_change_planning_returns_empty_when_no_changes() {
+        let nodes = vec![PlanningManifestNodeRecord {
+            unique_id: "model.pkg.orders".to_string(),
+            resource_type: Some("model".to_string()),
+            checksum: Some("same".to_string()),
+        }];
+        let selected = plan_code_change_selected_resources(&nodes, &nodes, &[], &[]);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn code_change_planning_skips_non_plannable_resource_types() {
+        let baseline = vec![PlanningManifestNodeRecord {
+            unique_id: "source.pkg.raw_orders".to_string(),
+            resource_type: Some("source".to_string()),
+            checksum: Some("old".to_string()),
+        }];
+        let target = vec![PlanningManifestNodeRecord {
+            unique_id: "source.pkg.raw_orders".to_string(),
+            resource_type: Some("source".to_string()),
+            checksum: Some("new".to_string()),
+        }];
+        let selected = plan_code_change_selected_resources(&baseline, &target, &[], &[]);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn code_change_planning_includes_new_nodes_not_in_baseline() {
+        let baseline = vec![];
+        let target = vec![PlanningManifestNodeRecord {
+            unique_id: "model.pkg.new_model".to_string(),
+            resource_type: Some("model".to_string()),
+            checksum: Some("abc".to_string()),
+        }];
+        let selected = plan_code_change_selected_resources(&baseline, &target, &[], &[]);
+        assert_eq!(selected, vec!["model.pkg.new_model".to_string()]);
+    }
+
+    #[test]
+    fn input_fingerprint_deterministic() {
+        use super::{code_change_input_fingerprint, source_state_change_input_fingerprint};
+        let id = uuid::Uuid::nil();
+        let fp1 = code_change_input_fingerprint("abc123", id);
+        let fp2 = code_change_input_fingerprint("abc123", id);
+        assert_eq!(fp1, fp2);
+
+        let sfp1 = source_state_change_input_fingerprint(&[3, 1, 2]);
+        let sfp2 = source_state_change_input_fingerprint(&[1, 2, 3]);
+        assert_eq!(sfp1, sfp2); // sorted + deduped
     }
 }

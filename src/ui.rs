@@ -6,7 +6,7 @@ use crate::api::{
 use crate::db::{
     EnvironmentActualStateRecord, EnvironmentActiveResourceRecord, EnvironmentRecord,
     EnvironmentReconcilePreparationRecord, EnvironmentRunPlanRecord, EnvironmentVersionRecord,
-    InvocationListFilters, ProjectRecord,
+    InvocationListFilters, PlanStatus, ProjectRecord,
 };
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
@@ -1638,6 +1638,17 @@ fn fmt_optional_ts(value: Option<DateTime<Utc>>) -> String {
     value.map(fmt_ts).unwrap_or_default()
 }
 
+fn plan_status_class(status: PlanStatus) -> &'static str {
+    match status {
+        PlanStatus::Planned => "bg-amber-100 text-amber-800",
+        PlanStatus::Blocked => "bg-orange-100 text-orange-800",
+        PlanStatus::Admitted => "bg-sky-100 text-sky-800",
+        PlanStatus::Completed => "bg-emerald-100 text-emerald-800",
+        PlanStatus::Failed | PlanStatus::Canceled => "bg-rose-100 text-rose-800",
+        PlanStatus::Superseded => "bg-slate-100 text-slate-700",
+    }
+}
+
 fn invocation_display_status(invocation: &InvocationStatusResponse) -> &'static str {
     match invocation.status {
         InvocationLifecycleStatus::Running if invocation.claimed_by.is_none() => "queued",
@@ -2310,15 +2321,8 @@ fn environment_reconciliation_summary_view(
     let (latest_plan_status, latest_plan_status_class, latest_plan_reason) = latest_plan
         .map(|plan| {
             (
-                plan.status.clone(),
-                match plan.status.as_str() {
-                    "planned" => "bg-amber-100 text-amber-800",
-                    "blocked" => "bg-orange-100 text-orange-800",
-                    "admitted" => "bg-sky-100 text-sky-800",
-                    "completed" => "bg-emerald-100 text-emerald-800",
-                    "failed" | "canceled" => "bg-rose-100 text-rose-800",
-                    _ => "bg-slate-100 text-slate-700",
-                },
+                plan.status.to_string(),
+                plan_status_class(plan.status),
                 plan.reason.clone(),
             )
         })
@@ -2356,7 +2360,7 @@ fn environment_reconciliation_summary_view(
         .and_then(|preparation| preparation.next_attempt_at)
         .map(fmt_ts)
         .unwrap_or_else(|| "—".to_string());
-    let blocked_plan_count = plans.iter().filter(|plan| plan.status == "blocked").count();
+    let blocked_plan_count = plans.iter().filter(|plan| plan.status == PlanStatus::Blocked).count();
     EnvironmentReconciliationSummaryView {
         state,
         state_class,
@@ -2381,17 +2385,10 @@ fn environment_run_plan_view(
     slug: &str,
     plan: &EnvironmentRunPlanRecord,
 ) -> EnvironmentRunPlanView {
-    let status_class = match plan.status.as_str() {
-        "planned" => "bg-amber-100 text-amber-800",
-        "blocked" => "bg-orange-100 text-orange-800",
-        "admitted" => "bg-sky-100 text-sky-800",
-        "completed" => "bg-emerald-100 text-emerald-800",
-        "failed" | "canceled" => "bg-rose-100 text-rose-800",
-        _ => "bg-slate-100 text-slate-700",
-    };
+    let status_class = plan_status_class(plan.status);
     EnvironmentRunPlanView {
         plan_id: plan.plan_id.to_string(),
-        status: plan.status.clone(),
+        status: plan.status.to_string(),
         status_class,
         reason: plan.reason.replace('_', " "),
         input_summary: reconcile_plan_input_summary(plan),
@@ -2435,7 +2432,7 @@ fn environment_run_plan_view(
             "/ui/projects/{project_id}/environments/{slug}/plans/{}/admit",
             plan.plan_id
         ),
-        can_admit: matches!(plan.status.as_str(), "planned" | "blocked"),
+        can_admit: plan.status.is_admissible(),
     }
 }
 

@@ -6,6 +6,7 @@ pub mod cli_runtime;
 pub mod client;
 pub mod config;
 pub mod db;
+pub mod dbt_utils;
 pub mod error;
 pub mod event;
 pub mod execution;
