@@ -38,6 +38,7 @@ use crate::invocation_runtime::{
     InvocationManager, InvocationPersistence, InvocationRecorder, event_stream,
     started_invocation_event,
 };
+use crate::reconciler::auto_admit_blocked_plans_for_environment;
 use crate::services::{
     EnvironmentReleaseRequest, EnvironmentRollbackRequest, EnvironmentService, InvocationCommand,
     InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectCreateRequest, ProjectService,
@@ -478,42 +479,6 @@ async fn publish_terminal_invocation(
     runtime.push_event(sequence, completed_event).await;
     state.invocations.schedule_cleanup(invocation_id);
     Ok(())
-}
-
-async fn auto_admit_blocked_plans_for_environment(
-    state: &AppState,
-    project_id: i64,
-    environment_id: i64,
-) -> AppResult<usize> {
-    let blocked_plan_ids = state
-        .db
-        .list_blocked_environment_run_plan_ids(project_id, environment_id)
-        .await?;
-    let service = EnvironmentService::new(&state.db);
-    let mut admitted = 0usize;
-
-    for plan_id in blocked_plan_ids {
-        let invocation_id = Uuid::new_v4();
-        let prepared = service.admit_plan(invocation_id, plan_id).await?;
-        let Some(prepared_invocation) = prepared.prepared else {
-            continue;
-        };
-        start_prepared_invocation(
-            state,
-            invocation_id,
-            InvocationCommandApi::Build,
-            Some(plan_id),
-            prepared_invocation,
-        )
-        .await?;
-        state
-            .db
-            .mark_environment_run_plan_admitted(plan_id, invocation_id)
-            .await?;
-        admitted += 1;
-    }
-
-    Ok(admitted)
 }
 
 async fn healthz() -> Json<HealthResponse> {

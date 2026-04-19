@@ -1576,6 +1576,25 @@ impl Db {
         .map_err(Into::into)
     }
 
+    pub(crate) async fn list_blocked_environment_scopes(
+        &self,
+    ) -> AppResult<Vec<(i64, i64)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT project_id, environment_id
+            FROM environment_run_plans
+            WHERE status = 'blocked'
+            ORDER BY project_id ASC, environment_id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get("project_id"), row.get("environment_id")))
+            .collect())
+    }
+
     pub(crate) async fn get_environment_run_plan(
         &self,
         plan_id: Uuid,

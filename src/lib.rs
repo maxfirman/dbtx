@@ -13,6 +13,7 @@ pub mod invocation_bootstrap;
 pub mod invocation_runtime;
 pub mod manifest;
 pub mod profile;
+pub mod reconciler;
 pub mod server;
 pub mod services;
 pub mod ui;
