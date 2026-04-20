@@ -273,3 +273,217 @@ async fn sweep_tick_endpoint_works() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["admitted"], 0);
 }
+
+// --- HTML helpers ---
+
+async fn get_html(app: &axum::Router, path: &str) -> (StatusCode, String) {
+    let response = app.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+async fn post_form(app: &axum::Router, path: &str, form: &str) -> (StatusCode, String) {
+    let response = app.clone().oneshot(
+        Request::post(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(form.to_string())).unwrap()
+    ).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// Seed a project + environment + invocation for UI tests
+async fn seed_ui_test_data(pool: &PgPool) {
+    sqlx::query("INSERT INTO projects (project_id, project_name, mode, git_repo_url, project_root, metadata) VALUES ('prj_ui', 'ui_project', 'remote', 'https://example.com/repo.git', '.', '{}'::jsonb)")
+        .execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, git_branch, git_commit_sha, use_latest_commit, auto_deploy, immutable, profile_config, profile_secrets, metadata) VALUES (1, 'prod', 'ui_project', 'prod', 'duckdb', 'generic', 'main', 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', true, true, false, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)")
+        .execute(pool).await.unwrap();
+}
+
+// --- UI handler tests ---
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_dashboard_renders() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, html) = get_html(&app, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("dbtx"), "dashboard should contain dbtx branding");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_dashboard_summary_partial() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, _html) = get_html(&app, "/ui/dashboard/summary").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_dashboard_workers_partial() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/dashboard/workers").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_dashboard_queues_partial() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/dashboard/queues").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_projects_index_renders() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/projects").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("ui_project"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_project_create_modal_renders() {
+    let (app, _pool) = test_app().await;
+    let (status, html) = get_html(&app, "/ui/projects/new").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Create"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_environment_detail_renders() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/projects/prj_ui/environments/prod").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("prod"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_environment_panel_renders() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, _html) = get_html(&app, "/ui/projects/prj_ui/environments/prod/panel").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_invocations_index_renders() {
+    let (app, _pool) = test_app().await;
+    let (status, html) = get_html(&app, "/ui/invocations").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Invocations"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_invocations_table_renders() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/invocations/table").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_workers_index_renders() {
+    let (app, _pool) = test_app().await;
+    let (status, html) = get_html(&app, "/ui/workers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Workers"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_workers_table_renders() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/workers/table").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_queues_index_renders() {
+    let (app, _pool) = test_app().await;
+    let (status, html) = get_html(&app, "/ui/queues").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Queues"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_queues_table_renders() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/queues/table").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_environment_not_found_returns_error() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/projects/nonexistent/environments/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_invocation_detail_not_found() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/invocations/00000000-0000-0000-0000-000000000000").await;
+    assert!(status == StatusCode::NOT_FOUND || status == StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_project_delete_modal_renders() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/projects/prj_ui/delete").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Delete") || html.contains("delete"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_environment_create_modal_renders() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/projects/prj_ui/environments/new").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Create") || html.contains("Environment"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_invocations_with_filters() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/invocations?status=running&page=1").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_workers_with_stale_toggle() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/workers?show_stale=true").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_dashboard_recent_invocations_partial() {
+    let (app, _pool) = test_app().await;
+    let (status, _html) = get_html(&app, "/ui/dashboard/recent-invocations").await;
+    assert_eq!(status, StatusCode::OK);
+}
