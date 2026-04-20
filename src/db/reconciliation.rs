@@ -626,6 +626,71 @@ impl Db {
         Ok(rows)
     }
 
+    pub(crate) async fn conflicting_resources_for_plan_and_invocation(
+        &self,
+        plan_id: Uuid,
+        invocation_id: Uuid,
+        sample_limit: i64,
+    ) -> AppResult<(i64, Vec<String>)> {
+        let row = sqlx::query(
+            r#"
+            WITH plan_resources AS (
+                SELECT plan.plan_id, plan.project_id, plan.environment_id, sel.unique_id
+                FROM environment_run_plans plan
+                JOIN LATERAL jsonb_array_elements_text(plan.selected_resources) sel(unique_id) ON TRUE
+                WHERE plan.plan_id = $1
+            ),
+            active_resource_conflicts AS (
+                SELECT DISTINCT isr.unique_id
+                FROM plan_resources pr
+                JOIN invocation_selected_resources isr
+                  ON isr.project_id = pr.project_id
+                 AND isr.environment_id = pr.environment_id
+                 AND isr.unique_id = pr.unique_id
+                 AND isr.invocation_id = $2
+                 AND isr.finished_at IS NULL
+            ),
+            admitted_plan_conflicts AS (
+                SELECT DISTINCT other_sel.unique_id
+                FROM plan_resources pr
+                JOIN environment_run_plans other
+                  ON other.project_id = pr.project_id
+                 AND other.environment_id = pr.environment_id
+                 AND other.plan_id <> pr.plan_id
+                 AND other.status = 'admitted'
+                 AND other.admitted_invocation_id = $2
+                JOIN invocations inv
+                  ON inv.invocation_id = other.admitted_invocation_id
+                 AND inv.status = 'running'
+                 AND inv.completed_at IS NULL
+                JOIN LATERAL jsonb_array_elements_text(other.selected_resources) other_sel(unique_id)
+                  ON other_sel.unique_id = pr.unique_id
+            ),
+            overlap AS (
+                SELECT unique_id FROM active_resource_conflicts
+                UNION
+                SELECT unique_id FROM admitted_plan_conflicts
+            )
+            SELECT
+                COUNT(*)::BIGINT AS overlap_count,
+                COALESCE(
+                    ARRAY(SELECT unique_id FROM overlap ORDER BY unique_id ASC LIMIT $3),
+                    ARRAY[]::TEXT[]
+                ) AS overlapping_resources
+            FROM overlap
+            "#,
+        )
+        .bind(plan_id)
+        .bind(invocation_id)
+        .bind(sample_limit)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((
+            row.get::<i64, _>("overlap_count"),
+            row.get::<Vec<String>, _>("overlapping_resources"),
+        ))
+    }
+
     pub(crate) async fn list_manifest_node_unique_ids(
         &self,
         run_id: Uuid,

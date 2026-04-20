@@ -235,6 +235,35 @@
               · Invocation {{ plan.admitted_invocation_id }}
               {% endif %}
             </div>
+            {% match plan.blocker %}
+            {% when Some with (blocker) %}
+            <div class="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-slate-600">Blocking Invocation</span>
+                <a href="{{ blocker.invocation_url }}" class="font-mono text-xs text-slate-700 hover:text-slate-900">{{ blocker.invocation_id }}</a>
+                <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ blocker.status_class }}">{{ blocker.status }}</span>
+              </div>
+              <div class="mt-2 text-xs text-slate-600">
+                Queue {{ blocker.worker_queue }} · Claimed By {{ blocker.claimed_by }} · Overlap {{ blocker.overlap_count }}
+              </div>
+              {% if blocker.overlap_count > 0 %}
+              <div class="mt-3">
+                <div class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500">Overlapping Resources</div>
+                <div class="flex flex-wrap gap-2">
+                  {% for unique_id in blocker.overlapping_resources %}
+                  <span class="rounded-md bg-white px-2.5 py-1 font-mono text-xs text-slate-700 ring-1 ring-amber-200">{{ unique_id }}</span>
+                  {% endfor %}
+                  {% if blocker.remaining_overlap_count > 0 %}
+                  <span class="rounded-md bg-white px-2.5 py-1 text-xs text-slate-600 ring-1 ring-amber-200">+{{ blocker.remaining_overlap_count }} more</span>
+                  {% endif %}
+                </div>
+              </div>
+              {% else %}
+              <div class="mt-2 text-xs text-slate-600">No active overlap is currently detectable for this blocker.</div>
+              {% endif %}
+            </div>
+            {% when None %}
+            {% endmatch %}
           </div>
           {% if plan.can_admit %}
           <form hx-post="{{ plan.admit_url }}" hx-target="#environment-panel" hx-swap="outerHTML">

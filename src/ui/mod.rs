@@ -28,7 +28,7 @@ use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -1439,6 +1439,7 @@ async fn load_environment_panel(
         .list_active_environment_resources(&project.project_id, slug, None)
         .await?;
     let plans = db.list_environment_run_plans(&project.project_id, slug).await?;
+    let plan_views = build_environment_run_plan_views(db, &project.project_id, slug, &plans).await?;
 
     Ok(EnvironmentPanelTemplate {
         project: project_summary_view(&project),
@@ -1458,15 +1459,53 @@ async fn load_environment_panel(
             .iter()
             .map(environment_active_resource_view)
             .collect(),
-        plans: plans
-            .iter()
-            .map(|plan| environment_run_plan_view(&project.project_id, slug, plan))
-            .collect(),
+        plans: plan_views,
         versions: history.iter().map(environment_version_view).collect(),
         is_remote: project.mode == "remote",
         panel_url: format!("/ui/projects/{project_id}/environments/{slug}/panel"),
         reconcile_url: format!("/ui/projects/{project_id}/environments/{slug}/reconcile"),
     })
+}
+
+async fn build_environment_run_plan_views(
+    db: &crate::db::Db,
+    project_id: &str,
+    slug: &str,
+    plans: &[EnvironmentRunPlanRecord],
+) -> Result<Vec<EnvironmentRunPlanView>, UiError> {
+    let mut invocation_cache: HashMap<Uuid, Option<InvocationStatusResponse>> = HashMap::new();
+    let mut views = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let blocker = match plan.blocked_by_invocation_id {
+            Some(invocation_id) if plan.status == PlanStatus::Blocked => {
+                let invocation = if let Some(cached) = invocation_cache.get(&invocation_id) {
+                    cached.clone()
+                } else {
+                    let loaded = match db.get_invocation_status(invocation_id).await {
+                        Ok(status) => Some(status),
+                        Err(AppError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+                            None
+                        }
+                        Err(err) => return Err(UiError(err)),
+                    };
+                    invocation_cache.insert(invocation_id, loaded.clone());
+                    loaded
+                };
+                let (overlap_count, overlapping_resources) = db
+                    .conflicting_resources_for_plan_and_invocation(plan.plan_id, invocation_id, 8)
+                    .await?;
+                Some(environment_plan_blocker_view(
+                    invocation_id,
+                    invocation.as_ref(),
+                    overlap_count,
+                    overlapping_resources,
+                ))
+            }
+            _ => None,
+        };
+        views.push(environment_run_plan_view(project_id, slug, plan, blocker));
+    }
+    Ok(views)
 }
 
 fn htmx_headers() -> HeaderMap {
@@ -1925,8 +1964,22 @@ struct EnvironmentRunPlanView {
     admitted_at: String,
     completed_at: String,
     selected_resources: Vec<String>,
+    blocker: Option<EnvironmentPlanBlockerView>,
     admit_url: String,
     can_admit: bool,
+}
+
+#[derive(Clone)]
+struct EnvironmentPlanBlockerView {
+    invocation_id: String,
+    invocation_url: String,
+    status: String,
+    status_class: &'static str,
+    worker_queue: String,
+    claimed_by: String,
+    overlap_count: i64,
+    overlapping_resources: Vec<String>,
+    remaining_overlap_count: i64,
 }
 
 #[derive(Clone)]
@@ -2383,6 +2436,7 @@ fn environment_run_plan_view(
     project_id: &str,
     slug: &str,
     plan: &EnvironmentRunPlanRecord,
+    blocker: Option<EnvironmentPlanBlockerView>,
 ) -> EnvironmentRunPlanView {
     let status_class = plan_status_class(plan.status);
     EnvironmentRunPlanView {
@@ -2427,11 +2481,47 @@ fn environment_run_plan_view(
         admitted_at: fmt_optional_ts(plan.admitted_at),
         completed_at: fmt_optional_ts(plan.completed_at),
         selected_resources: plan.selected_resources.clone(),
+        blocker,
         admit_url: format!(
             "/ui/projects/{project_id}/environments/{slug}/plans/{}/admit",
             plan.plan_id
         ),
         can_admit: plan.status.is_admissible(),
+    }
+}
+
+fn environment_plan_blocker_view(
+    invocation_id: Uuid,
+    invocation: Option<&InvocationStatusResponse>,
+    overlap_count: i64,
+    overlapping_resources: Vec<String>,
+) -> EnvironmentPlanBlockerView {
+    let remaining_overlap_count = overlap_count.saturating_sub(overlapping_resources.len() as i64);
+    if let Some(invocation) = invocation {
+        let status = invocation_display_status(invocation).to_string();
+        EnvironmentPlanBlockerView {
+            invocation_id: invocation_id.to_string(),
+            invocation_url: format!("/ui/invocations/{invocation_id}"),
+            status_class: status_badge_class(&status),
+            status,
+            worker_queue: invocation.worker_queue.clone(),
+            claimed_by: invocation.claimed_by.clone().unwrap_or_else(|| "—".to_string()),
+            overlap_count,
+            overlapping_resources,
+            remaining_overlap_count,
+        }
+    } else {
+        EnvironmentPlanBlockerView {
+            invocation_id: invocation_id.to_string(),
+            invocation_url: format!("/ui/invocations/{invocation_id}"),
+            status: "missing".to_string(),
+            status_class: "bg-slate-100 text-slate-700",
+            worker_queue: "—".to_string(),
+            claimed_by: "—".to_string(),
+            overlap_count,
+            overlapping_resources,
+            remaining_overlap_count,
+        }
     }
 }
 
@@ -3329,6 +3419,20 @@ mod tests {
                     "source.pkg.raw_orders".to_string(),
                     "model.pkg.orders".to_string(),
                 ],
+                blocker: Some(EnvironmentPlanBlockerView {
+                    invocation_id: Uuid::nil().to_string(),
+                    invocation_url: format!("/ui/invocations/{}", Uuid::nil()),
+                    status: "running".to_string(),
+                    status_class: "bg-sky-100 text-sky-800",
+                    worker_queue: "generic".to_string(),
+                    claimed_by: "worker-1".to_string(),
+                    overlap_count: 2,
+                    overlapping_resources: vec![
+                        "source.pkg.raw_orders".to_string(),
+                        "model.pkg.orders".to_string(),
+                    ],
+                    remaining_overlap_count: 0,
+                }),
                 admit_url: "/ui/projects/prj_123/environments/prod/plans/00000000-0000-0000-0000-000000000000/admit".to_string(),
                 can_admit: true,
             }],
@@ -3348,5 +3452,7 @@ mod tests {
         assert!(rendered.contains("source.pkg.raw_orders"));
         assert!(rendered.contains("Input Fingerprint"));
         assert!(rendered.contains("Prepare target manifest for bbbbbbbb"));
+        assert!(rendered.contains("Blocking Invocation"));
+        assert!(rendered.contains("Overlap 2"));
     }
 }
