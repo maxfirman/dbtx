@@ -487,3 +487,228 @@ async fn ui_dashboard_recent_invocations_partial() {
     let (status, _html) = get_html(&app, "/ui/dashboard/recent-invocations").await;
     assert_eq!(status, StatusCode::OK);
 }
+
+// --- More API coverage tests ---
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn environment_release_and_history() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+
+    // Release to a new commit
+    let (status, _body) = post_json(&app, "/v1/projects/prj_ui/environments/prod/release", json!({
+        "git_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Check history
+    let (status, body) = get_json(&app, "/v1/projects/prj_ui/environments/prod/history").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["versions"].as_array().unwrap().len() >= 1);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn environment_actual_state_returns_default() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, _body) = get_json(&app, "/v1/projects/prj_ui/environments/prod/actual-state").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn environment_active_resources_empty() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, body) = get_json(&app, "/v1/projects/prj_ui/environments/prod/active-resources").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["resources"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn environment_plan_list_empty() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, body) = get_json(&app, "/v1/projects/prj_ui/environments/prod/plans").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["plans"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn worker_and_queue_list_empty() {
+    let (app, _pool) = test_app().await;
+    let (status, body) = get_json(&app, "/v1/workers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["workers"].as_array().unwrap().len(), 0);
+
+    let (status, body) = get_json(&app, "/v1/queues").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn invocation_claim_returns_none_when_empty() {
+    let (app, _pool) = test_app().await;
+    let (status, _body) = post_json(&app, "/v1/invocations/claim-next", json!({
+        "worker_id": "w1",
+        "worker_queues": ["generic"]
+    })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn invocation_full_lifecycle() {
+    let (app, pool) = test_app().await;
+
+    // Seed project + environment
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
+
+    // Create invocation via API
+    let (status, body) = post_json(&app, "/v1/invocations", json!({
+        "command": "ls",
+        "args": [],
+        "current_dir": tmp.path().to_str().unwrap(),
+        "project_id": null,
+        "environment_slug": null
+    })).await;
+    assert_eq!(status, StatusCode::OK, "create: {body}");
+    let inv_id = body["invocation_id"].as_str().unwrap();
+
+    // Claim
+    let (status, body) = post_json(&app, "/v1/invocations/claim-next", json!({
+        "execution_mode": "local",
+        "worker_id": "w1",
+        "worker_queues": [body["worker_queue"].as_str().unwrap()]
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    let worker_id = body["worker_id"].as_str().unwrap().to_string();
+    let lease_token = body["lease_token"].as_str().unwrap().to_string();
+
+    // Heartbeat
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/heartbeat"), json!({
+        "worker_id": worker_id,
+        "lease_token": lease_token
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Append events
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/events"), json!({
+        "worker_id": worker_id,
+        "lease_token": lease_token,
+        "events": [{
+            "kind": "StdoutLine",
+            "occurred_at": "2026-01-01T00:00:00Z",
+            "text": "hello",
+            "raw_line": "hello",
+            "dbt_event_name": null,
+            "node_unique_id": null,
+            "level": null,
+            "error": null
+        }]
+    })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Complete
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
+        "worker_id": worker_id,
+        "lease_token": lease_token,
+        "completion": {
+            "status": "succeeded",
+            "exit_code": 0,
+            "error": null,
+            "dbt_version": "1.0.0",
+            "manifest": null,
+            "result": null
+        }
+    })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Verify final status
+    let (status, body) = get_json(&app, &format!("/v1/invocations/{inv_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "succeeded");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn invocation_cancel_unclaimed() {
+    let (app, _pool) = test_app().await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
+
+    let (_, body) = post_json(&app, "/v1/invocations", json!({
+        "command": "ls",
+        "args": [],
+        "current_dir": tmp.path().to_str().unwrap(),
+        "project_id": null,
+        "environment_slug": null
+    })).await;
+    let inv_id = body["invocation_id"].as_str().unwrap();
+
+    // Cancel unclaimed
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/cancel"), json!({})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, body) = get_json(&app, &format!("/v1/invocations/{inv_id}")).await;
+    assert_eq!(body["status"], "canceled");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn source_state_event_create() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+
+    let (status, body) = post_json(&app, "/v1/projects/prj_ui/environments/prod/source-state-events", json!({
+        "source_key": "source.raw_orders",
+        "provider": "manual",
+        "state_version": "v1",
+        "observed_at": "2026-01-01T00:00:00Z",
+        "payload": {"reason": "test"}
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["event"]["id"].is_number());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn environment_reconcile_requires_baseline() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+
+    let (status, body) = post_json(&app, "/v1/projects/prj_ui/environments/prod/reconcile", json!({})).await;
+    // Should fail — no baseline run exists
+    assert_ne!(status, StatusCode::OK, "expected error: {body}");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_environment_release_post() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+
+    let (status, _html) = post_form(&app, "/ui/projects/prj_ui/environments/prod/release",
+        "git_commit_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").await;
+    // Should redirect (302/303) or return HTML
+    assert!(status.is_success() || status.is_redirection(), "release status: {status}");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_project_delete_post() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+
+    let (status, _html) = post_form(&app, "/ui/projects/prj_ui/delete", "").await;
+    // Should redirect or succeed
+    assert!(status.is_success() || status.is_redirection(), "delete status: {status}");
+}
