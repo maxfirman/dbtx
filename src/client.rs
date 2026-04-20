@@ -643,4 +643,34 @@ mod tests {
             "expected timeout-style internal error, got: {err}"
         );
     }
+
+    #[tokio::test]
+    async fn client_returns_schema_out_of_date_on_412() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::method;
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(412)
+                    .set_body_json(serde_json::json!({"error": "schema out of date"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = super::DaemonClient::new(mock_server.uri());
+        let err = client.project_list().await.expect_err("should fail");
+        assert!(matches!(err, crate::error::AppError::SchemaOutOfDate));
+    }
+
+    #[test]
+    fn parse_sse_frame_returns_none_for_empty_data() {
+        assert!(parse_sse_frame("event: ping\n\n").unwrap().is_none());
+        assert!(parse_sse_frame("").unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_sse_frame_returns_none_for_data_only_whitespace() {
+        assert!(parse_sse_frame("data: \n\n").unwrap().is_none());
+    }
 }

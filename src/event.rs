@@ -559,4 +559,89 @@ mod tests {
         let selected = event.selected_resources().expect("selected resources marker");
         assert_eq!(selected, vec!["model.pkg.orders", "seed.pkg.customers"]);
     }
+
+    #[test]
+    fn render_text_line_generic_version() {
+        let raw = r#"{"info":{"name":"Generic","msg":"dbt-fusion 2.0.0"},"data":{}}"#;
+        let event = LogEvent::parse(raw).unwrap();
+        let rendered = event.render_text_line_with_color(false).unwrap();
+        assert!(rendered.contains("dbt-fusion"));
+    }
+
+    #[test]
+    fn render_text_line_generic_error() {
+        let raw = r#"{"info":{"name":"Generic","msg":"error: something went wrong"},"data":{}}"#;
+        let event = LogEvent::parse(raw).unwrap();
+        let rendered = event.render_text_line_with_color(false).unwrap();
+        assert!(rendered.contains("error:"));
+    }
+
+    #[test]
+    fn render_text_line_generic_loading_profiles() {
+        let raw = r#"{"info":{"name":"Generic","msg":"Loading profiles.yml"},"data":{}}"#;
+        let event = LogEvent::parse(raw).unwrap();
+        let rendered = event.render_text_line_with_color(false).unwrap();
+        assert!(rendered.contains("Loading"));
+        assert!(rendered.contains("profiles.yml"));
+    }
+
+    #[test]
+    fn render_text_line_generic_indented() {
+        let raw = r#"{"info":{"name":"Generic","msg":" some indented text"},"data":{}}"#;
+        let event = LogEvent::parse(raw).unwrap();
+        let rendered = event.render_text_line_with_color(false).unwrap();
+        assert_eq!(rendered, " some indented text");
+    }
+
+    #[test]
+    fn render_text_line_generic_plain() {
+        let raw = r#"{"info":{"name":"Generic","msg":"plain message"},"data":{}}"#;
+        let event = LogEvent::parse(raw).unwrap();
+        let rendered = event.render_text_line_with_color(false).unwrap();
+        assert_eq!(rendered, "   plain message");
+    }
+
+    #[test]
+    fn render_text_line_empty_generic_returns_none() {
+        let raw = r#"{"info":{"name":"Generic","msg":""},"data":{}}"#;
+        let event = LogEvent::parse(raw).unwrap();
+        assert!(event.render_text_line_with_color(false).is_none());
+    }
+
+    #[test]
+    fn render_text_line_command_completed() {
+        let raw = r#"{"info":{"name":"CommandCompleted","msg":"Finished 'run' successfully"},"data":{}}"#;
+        let event = LogEvent::parse(raw).unwrap();
+        let rendered = event.render_text_line_with_color(false).unwrap();
+        assert!(rendered.contains("Finished"));
+    }
+
+    #[test]
+    fn render_text_line_unknown_event_returns_none() {
+        let raw = r#"{"info":{"name":"SomeUnknownEvent","msg":"hello"},"data":{}}"#;
+        let event = LogEvent::parse(raw).unwrap();
+        assert!(event.render_text_line_with_color(false).is_none());
+    }
+
+    #[test]
+    fn parse_returns_none_for_invalid_json() {
+        assert!(LogEvent::parse("not json").is_none());
+        assert!(LogEvent::parse("").is_none());
+    }
+
+    #[test]
+    fn selected_resources_returns_none_for_non_marker() {
+        let raw = r#"{"info":{"name":"Generic","msg":"just a message"},"data":{}}"#;
+        let event = LogEvent::parse(raw).unwrap();
+        assert!(event.selected_resources().is_none());
+    }
+
+    #[test]
+    fn parse_timestamp_handles_valid_and_invalid() {
+        use super::parse_timestamp;
+        assert!(parse_timestamp(Some("2025-01-01T00:00:00Z")).is_some());
+        assert!(parse_timestamp(Some("not-a-date")).is_none());
+        assert!(parse_timestamp(Some("")).is_none());
+        assert!(parse_timestamp(None).is_none());
+    }
 }

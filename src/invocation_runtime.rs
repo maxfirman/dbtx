@@ -318,6 +318,7 @@ mod tests {
     use chrono::Utc;
     use futures_util::StreamExt;
     use tokio::sync::broadcast;
+    use uuid::Uuid;
 
     fn sample_event(text: &str) -> InvocationEvent {
         InvocationEvent {
@@ -383,5 +384,34 @@ mod tests {
         .expect("send next live event");
 
         let _second = stream.next().await.expect("live item").expect("event");
+    }
+
+    #[test]
+    fn started_invocation_event_has_correct_type() {
+        let event = super::started_invocation_event();
+        assert_eq!(event.event_type, "invocation.started");
+        assert!(event.text.is_none());
+        assert!(event.exit_code.is_none());
+    }
+
+    #[tokio::test]
+    async fn invocation_manager_creates_and_retrieves_runtime() {
+        let manager = super::InvocationManager::default();
+        let id = Uuid::new_v4();
+        let runtime1 = manager.get_or_create(id, None).await;
+        let runtime2 = manager.get_or_create(id, None).await;
+        // Same Arc
+        assert!(std::sync::Arc::ptr_eq(&runtime1, &runtime2));
+    }
+
+    #[tokio::test]
+    async fn invocation_runtime_push_and_subscribe() {
+        let manager = super::InvocationManager::default();
+        let id = Uuid::new_v4();
+        let runtime = manager.get_or_create(id, None).await;
+        let mut rx = runtime.subscribe();
+        runtime.push_event(1, sample_event("hello")).await;
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.sequence, 1);
     }
 }

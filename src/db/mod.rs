@@ -840,4 +840,61 @@ mod tests {
         assert!(validate_environment_git_metadata(&project, "dev", None).is_err());
         assert!(validate_environment_git_metadata(&project, "dev", Some("deadbeef")).is_ok());
     }
+
+    #[test]
+    fn null_if_empty_returns_none_for_empty() {
+        use super::null_if_empty;
+        assert_eq!(null_if_empty(""), None);
+        assert_eq!(null_if_empty("hello"), Some("hello"));
+    }
+
+    #[test]
+    fn should_promote_manifest_for_run_and_build() {
+        use super::should_promote_manifest;
+        assert!(should_promote_manifest("run"));
+        assert!(should_promote_manifest("build"));
+        assert!(!should_promote_manifest("ls"));
+        assert!(!should_promote_manifest("test"));
+    }
+
+    #[test]
+    fn is_promotable_status_accepts_success_pass_created() {
+        use super::is_promotable_status;
+        assert!(is_promotable_status("success"));
+        assert!(is_promotable_status("pass"));
+        assert!(is_promotable_status("created"));
+        assert!(!is_promotable_status("error"));
+        assert!(!is_promotable_status("skipped"));
+    }
+
+    #[test]
+    fn execution_mode_from_db_maps_correctly() {
+        use super::execution_mode_from_db;
+        assert_eq!(execution_mode_from_db("local"), InvocationExecutionModeApi::Local);
+        assert_eq!(execution_mode_from_db("server"), InvocationExecutionModeApi::Server);
+        assert_eq!(execution_mode_from_db("unknown"), InvocationExecutionModeApi::Server);
+    }
+
+    #[test]
+    fn invocation_status_roundtrips_through_db() {
+        use super::{invocation_status_from_db, invocation_status_to_db};
+        use crate::api::InvocationLifecycleStatus;
+        for status in [
+            InvocationLifecycleStatus::Running,
+            InvocationLifecycleStatus::Succeeded,
+            InvocationLifecycleStatus::Failed,
+            InvocationLifecycleStatus::Canceled,
+        ] {
+            assert_eq!(invocation_status_from_db(invocation_status_to_db(status)), status);
+        }
+    }
+
+    #[test]
+    fn environment_query_builds_expected_sql() {
+        use super::environment_query;
+        let query = environment_query("WHERE e.id = $1");
+        assert!(query.contains("SELECT"));
+        assert!(query.contains("FROM environments e"));
+        assert!(query.contains("WHERE e.id = $1"));
+    }
 }
