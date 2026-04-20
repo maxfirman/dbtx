@@ -712,3 +712,182 @@ async fn ui_project_delete_post() {
     // Should redirect or succeed
     assert!(status.is_success() || status.is_redirection(), "delete status: {status}");
 }
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn invocation_complete_with_manifest_persists_state() {
+    let (app, pool) = test_app().await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
+
+    // Create a build invocation (persists state)
+    let (_, body) = post_json(&app, "/v1/invocations", json!({
+        "command": "build",
+        "args": [],
+        "current_dir": tmp.path().to_str().unwrap(),
+        "project_id": null,
+        "environment_slug": null
+    })).await;
+    let inv_id = body["invocation_id"].as_str().unwrap().to_string();
+    let wq = body["worker_queue"].as_str().unwrap().to_string();
+
+    let (_, body) = post_json(&app, "/v1/invocations/claim-next", json!({
+        "execution_mode": "local",
+        "worker_id": "w1",
+        "worker_queues": [wq]
+    })).await;
+    let worker_id = body["worker_id"].as_str().unwrap().to_string();
+    let lease_token = body["lease_token"].as_str().unwrap().to_string();
+
+    // Complete with a manifest
+    let manifest = json!({
+        "nodes": {
+            "model.demo.orders": {
+                "unique_id": "model.demo.orders",
+                "resource_type": "model",
+                "name": "orders",
+                "package_name": "demo",
+                "original_file_path": "models/orders.sql",
+                "tags": [],
+                "fqn": ["demo", "orders"],
+                "config": {"materialized": "table"},
+                "checksum": {"name": "sha256", "checksum": "abc123"},
+                "database": "db",
+                "schema": "main",
+                "alias": "orders",
+                "relation_name": "db.main.orders"
+            }
+        },
+        "parent_map": {"model.demo.orders": []},
+        "child_map": {"model.demo.orders": []}
+    });
+
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
+        "worker_id": worker_id,
+        "lease_token": lease_token,
+        "completion": {
+            "status": "succeeded",
+            "exit_code": 0,
+            "error": null,
+            "dbt_version": "1.0.0",
+            "manifest": manifest,
+            "result": null
+        }
+    })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Verify manifest was persisted
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM manifest_nodes")
+        .fetch_one(&pool).await.unwrap();
+    assert!(count > 0, "manifest nodes should be persisted");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn invocation_with_dbt_log_events() {
+    let (app, _pool) = test_app().await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
+
+    let (_, body) = post_json(&app, "/v1/invocations", json!({
+        "command": "build",
+        "args": [],
+        "current_dir": tmp.path().to_str().unwrap(),
+        "project_id": null,
+        "environment_slug": null
+    })).await;
+    let inv_id = body["invocation_id"].as_str().unwrap().to_string();
+    let wq = body["worker_queue"].as_str().unwrap().to_string();
+
+    let (_, body) = post_json(&app, "/v1/invocations/claim-next", json!({
+        "execution_mode": "local",
+        "worker_id": "w1",
+        "worker_queues": [wq]
+    })).await;
+    let worker_id = body["worker_id"].as_str().unwrap().to_string();
+    let lease_token = body["lease_token"].as_str().unwrap().to_string();
+
+    // Send dbt log events
+    let dbt_log = r#"{"info":{"name":"LogModelResult","code":"Q012","invocation_id":"abc","level":"info","msg":"Succeeded [table] model.demo.orders"},"data":{"node_info":{"unique_id":"model.demo.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"success","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"2026-01-01T00:00:01Z","node_relation":{"database":"db","schema":"main","alias":"orders","relation_name":"db.main.orders"},"node_checksum":"abc123"},"run_result":{"status":"success","execution_time":1.0}}}"#;
+
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/events"), json!({
+        "worker_id": worker_id,
+        "lease_token": lease_token,
+        "events": [{
+            "kind": "DbtLog",
+            "occurred_at": "2026-01-01T00:00:01Z",
+            "text": "Succeeded [table] model.demo.orders",
+            "raw_line": dbt_log,
+            "dbt_event_name": "LogModelResult",
+            "node_unique_id": "model.demo.orders",
+            "level": "info",
+            "error": null
+        }]
+    })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Complete
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
+        "worker_id": worker_id,
+        "lease_token": lease_token,
+        "completion": {
+            "status": "succeeded",
+            "exit_code": 0,
+            "error": null,
+            "dbt_version": "1.0.0",
+            "manifest": null,
+            "result": null
+        }
+    })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn invocation_complete_failed_records_error() {
+    let (app, _pool) = test_app().await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
+
+    let (_, body) = post_json(&app, "/v1/invocations", json!({
+        "command": "build",
+        "args": [],
+        "current_dir": tmp.path().to_str().unwrap(),
+        "project_id": null,
+        "environment_slug": null
+    })).await;
+    let inv_id = body["invocation_id"].as_str().unwrap().to_string();
+    let wq = body["worker_queue"].as_str().unwrap().to_string();
+
+    let (_, body) = post_json(&app, "/v1/invocations/claim-next", json!({
+        "execution_mode": "local",
+        "worker_id": "w1",
+        "worker_queues": [wq]
+    })).await;
+    let worker_id = body["worker_id"].as_str().unwrap().to_string();
+    let lease_token = body["lease_token"].as_str().unwrap().to_string();
+
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
+        "worker_id": worker_id,
+        "lease_token": lease_token,
+        "completion": {
+            "status": "failed",
+            "exit_code": 1,
+            "error": "compilation error",
+            "dbt_version": null,
+            "manifest": null,
+            "result": null
+        }
+    })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, body) = get_json(&app, &format!("/v1/invocations/{inv_id}")).await;
+    assert_eq!(body["status"], "failed");
+    assert_eq!(body["error"], "compilation error");
+}
