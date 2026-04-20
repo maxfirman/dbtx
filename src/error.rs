@@ -176,3 +176,27 @@ impl AppError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_code_returns_dbt_exit_code() {
+        assert_eq!(AppError::DbtFailed(42).exit_code(), 42);
+        assert_eq!(AppError::DbtFailed(0).exit_code(), 0);
+    }
+
+    #[test]
+    fn exit_code_returns_silent_exit_code() {
+        assert_eq!(AppError::SilentExit(0).exit_code(), 0);
+        assert_eq!(AppError::SilentExit(2).exit_code(), 2);
+    }
+
+    #[test]
+    fn exit_code_defaults_to_1_for_other_errors() {
+        assert_eq!(AppError::Internal("oops".to_string()).exit_code(), 1);
+        assert_eq!(AppError::NotDbtProjectRoot.exit_code(), 1);
+        assert_eq!(AppError::SchemaOutOfDate.exit_code(), 1);
+    }
+}

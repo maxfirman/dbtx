@@ -63,3 +63,14 @@ real-tests:
 
 projection-tests:
     cargo test --test projection -- --ignored
+
+# Coverage
+coverage:
+    cargo llvm-cov --lib
+
+coverage-html:
+    cargo llvm-cov --lib --html
+    @echo "Report: target/llvm-cov/html/index.html"
+
+coverage-json:
+    cargo llvm-cov --lib --json --output-path target/llvm-cov/coverage.json

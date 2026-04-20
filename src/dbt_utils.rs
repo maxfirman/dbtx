@@ -136,3 +136,43 @@ fn run_git<const N: usize>(args: [&str; N], cwd: &Path) -> AppResult<String> {
     }
     Ok(stdout)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn append_invocation_id_adds_flag_and_value() {
+        let args = vec![OsString::from("build")];
+        let id = Uuid::nil();
+        let result = append_invocation_id(args, id);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[1], OsString::from("--invocation-id"));
+        assert_eq!(result[2], OsString::from(id.to_string()));
+    }
+
+    #[test]
+    fn read_dbt_project_name_extracts_name_from_yaml() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("dbt_project.yml"), "name: my_project\n").unwrap();
+        assert_eq!(read_dbt_project_name(dir.path()), "my_project");
+    }
+
+    #[test]
+    fn read_dbt_project_name_falls_back_to_dir_name() {
+        let dir = TempDir::new().unwrap();
+        // No dbt_project.yml — should fall back to directory name
+        let name = read_dbt_project_name(dir.path());
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn read_git_state_returns_empty_for_non_repo() {
+        let dir = TempDir::new().unwrap();
+        let state = read_git_state(dir.path());
+        assert!(state.branch.is_none());
+        assert!(state.commit_sha.is_none());
+        assert!(state.repo_url.is_none());
+    }
+}

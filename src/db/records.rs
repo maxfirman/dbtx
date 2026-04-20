@@ -623,3 +623,87 @@ pub(crate) struct InvocationListFilters<'a> {
     pub(crate) worker_queues: &'a [String],
     pub(crate) claimed_bys: &'a [String],
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_status_roundtrips_through_parse_and_as_str() {
+        for status in [
+            PlanStatus::Planned, PlanStatus::Blocked, PlanStatus::Admitted,
+            PlanStatus::Completed, PlanStatus::Failed, PlanStatus::Canceled, PlanStatus::Superseded,
+        ] {
+            assert_eq!(PlanStatus::parse(status.as_str()), Some(status));
+            assert_eq!(status.to_string(), status.as_str());
+        }
+    }
+
+    #[test]
+    fn plan_status_parse_returns_none_for_unknown() {
+        assert_eq!(PlanStatus::parse("unknown"), None);
+        assert_eq!(PlanStatus::parse(""), None);
+    }
+
+    #[test]
+    fn plan_status_terminal_states() {
+        assert!(PlanStatus::Completed.is_terminal());
+        assert!(PlanStatus::Failed.is_terminal());
+        assert!(PlanStatus::Canceled.is_terminal());
+        assert!(PlanStatus::Superseded.is_terminal());
+        assert!(!PlanStatus::Planned.is_terminal());
+        assert!(!PlanStatus::Blocked.is_terminal());
+        assert!(!PlanStatus::Admitted.is_terminal());
+    }
+
+    #[test]
+    fn plan_status_admissible_states() {
+        assert!(PlanStatus::Planned.is_admissible());
+        assert!(PlanStatus::Blocked.is_admissible());
+        assert!(!PlanStatus::Admitted.is_admissible());
+        assert!(!PlanStatus::Completed.is_admissible());
+        assert!(!PlanStatus::Failed.is_admissible());
+    }
+
+    #[test]
+    fn environment_status_roundtrips() {
+        for (s, expected) in [
+            ("active", Some(EnvironmentStatus::Active)),
+            ("archived", Some(EnvironmentStatus::Archived)),
+            ("failed", Some(EnvironmentStatus::Failed)),
+            ("deleting", Some(EnvironmentStatus::Deleting)),
+            ("unknown", None),
+        ] {
+            assert_eq!(EnvironmentStatus::parse(s), expected);
+        }
+        assert_eq!(EnvironmentStatus::Active.as_str(), "active");
+        assert_eq!(EnvironmentStatus::Active.to_string(), "active");
+    }
+
+    #[test]
+    fn draft_status_roundtrips() {
+        for status in [
+            DraftStatus::Draft, DraftStatus::LoadingGit, DraftStatus::Ready,
+            DraftStatus::Validating, DraftStatus::Validated, DraftStatus::Failed,
+        ] {
+            assert_eq!(DraftStatus::parse(status.as_str()), Some(status));
+        }
+        assert_eq!(DraftStatus::parse("bogus"), None);
+    }
+
+    #[test]
+    fn draft_status_terminal() {
+        assert!(DraftStatus::Validated.is_terminal());
+        assert!(DraftStatus::Failed.is_terminal());
+        assert!(!DraftStatus::Draft.is_terminal());
+        assert!(!DraftStatus::Validating.is_terminal());
+    }
+
+    #[test]
+    fn preparation_status_roundtrips() {
+        for status in [PreparationStatus::Running, PreparationStatus::Succeeded, PreparationStatus::Failed] {
+            assert_eq!(PreparationStatus::parse(status.as_str()), Some(status));
+        }
+        assert_eq!(PreparationStatus::parse("invalid"), None);
+    }
+}

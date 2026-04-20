@@ -59,3 +59,26 @@ pub struct ExecutionCompletion {
     pub manifest: Option<serde_json::Value>,
     pub result: Option<serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_claim_timeout_is_shorter_than_server() {
+        assert!(claim_startup_timeout(InvocationExecutionModeApi::Local)
+            < claim_startup_timeout(InvocationExecutionModeApi::Server));
+    }
+
+    #[test]
+    fn local_heartbeat_timeout_is_shorter_than_server() {
+        assert!(heartbeat_stale_timeout(InvocationExecutionModeApi::Local)
+            < heartbeat_stale_timeout(InvocationExecutionModeApi::Server));
+    }
+
+    #[test]
+    fn claim_timeout_values_are_reasonable() {
+        assert_eq!(claim_startup_timeout(InvocationExecutionModeApi::Local), Duration::from_secs(10));
+        assert_eq!(claim_startup_timeout(InvocationExecutionModeApi::Server), Duration::from_secs(60));
+    }
+}
