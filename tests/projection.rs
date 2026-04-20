@@ -2651,7 +2651,7 @@ async fn reconcile_reuses_equivalent_pending_plan() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
