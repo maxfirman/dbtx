@@ -21,6 +21,8 @@ services:
       context: .
       dockerfile: Dockerfile.dev
       target: dev-base
+      args:
+        RUST_BASE_IMAGE: ${DBTX_RUST_BASE_IMAGE:-rust:1.93-bookworm}
     working_dir: /workspace
     depends_on:
       postgres:
@@ -45,6 +47,8 @@ services:
       context: .
       dockerfile: Dockerfile.dev
       target: dev-base
+      args:
+        RUST_BASE_IMAGE: ${DBTX_RUST_BASE_IMAGE:-rust:1.93-bookworm}
     working_dir: /workspace
     depends_on:
       migrate:
@@ -79,6 +83,8 @@ services:
       context: .
       dockerfile: Dockerfile.dev
       target: dev-base
+      args:
+        RUST_BASE_IMAGE: ${DBTX_RUST_BASE_IMAGE:-rust:1.93-bookworm}
     working_dir: /workspace
     depends_on:
       migrate:
@@ -104,6 +110,7 @@ services:
       dockerfile: Dockerfile.dev
       target: worker-dev
       args:
+        RUST_BASE_IMAGE: ${DBTX_RUST_BASE_IMAGE:-rust:1.93-bookworm}
         DBTX_FUSION_DOWNLOAD_URL: ${DBTX_FUSION_DOWNLOAD_URL:-https://public.cdn.getdbt.com/fs/install/install.sh}
     working_dir: /workspace
     depends_on:

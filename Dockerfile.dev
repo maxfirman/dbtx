@@ -1,4 +1,5 @@
-FROM rust:1.89-bookworm AS dev-base
+ARG RUST_BASE_IMAGE=rust:1.93-bookworm
+FROM ${RUST_BASE_IMAGE} AS dev-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -6,6 +7,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        jq \
         openssh-client \
         pkg-config \
         libssl-dev \
