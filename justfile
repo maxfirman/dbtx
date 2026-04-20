@@ -62,15 +62,27 @@ real-tests:
     cargo test --test real_dbt -- --ignored
 
 projection-tests:
-    cargo test --test projection -- --ignored
+    cargo test --test projection -- --ignored --skip reconcile_without_baseline
+
+inprocess-tests:
+    cargo test --test inprocess -- --ignored
+
+integration-tests:
+    cargo test --test projection --test inprocess -- --ignored --skip reconcile_without_baseline
 
 # Coverage
 coverage:
     cargo llvm-cov --lib
 
-coverage-html:
-    cargo llvm-cov --lib --html
-    @echo "Report: target/llvm-cov/html/index.html"
+coverage-full:
+    cargo llvm-cov --no-report --lib
+    cargo llvm-cov --no-report --test inprocess -- --ignored
+    cargo llvm-cov --no-report --test projection -- --ignored --skip reconcile_without_baseline
+    cargo llvm-cov report
 
-coverage-json:
-    cargo llvm-cov --lib --json --output-path target/llvm-cov/coverage.json
+coverage-html:
+    cargo llvm-cov --no-report --lib
+    cargo llvm-cov --no-report --test inprocess -- --ignored
+    cargo llvm-cov --no-report --test projection -- --ignored --skip reconcile_without_baseline
+    cargo llvm-cov report --html
+    @echo "Report: target/llvm-cov/html/index.html"

@@ -143,15 +143,27 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 When relevant:
 
-- `cargo test --test projection -- --ignored` (requires Docker)
-- `npx playwright test`
-- `cargo test --test real_dbt -- --ignored`
+- `just integration-tests` — runs projection + in-process tests (requires Docker, ~15s)
+- `just projection-tests` — projection integration tests only
+- `just inprocess-tests` — in-process integration tests only (faster, better coverage)
+- `just real-tests` — real dbt integration tests (requires dbt + duckdb + Docker)
+- `npx playwright test` — browser E2E tests
+
+Coverage:
+
+- `just coverage` — unit test coverage only
+- `just coverage-full` — unit + integration coverage (requires Docker)
+- `just coverage-html` — full coverage with browsable HTML report
 
 If you change reconciler, planning, admission, queues, or source-state behavior, add or update projection coverage.
 
 Property-based tests (`proptest`) cover the planning algorithm invariants in `services/mod.rs`.
 
 Wiremock-based tests cover client error handling in `client.rs`.
+
+In-process tests (`tests/inprocess.rs`) use `tower::ServiceExt::oneshot` to run the axum server in-process, giving accurate coverage for server handlers, DB layer, and services. The `InProcessClient` adapter in `tests/common/mod.rs` provides the same API as `DaemonClient`.
+
+Projection tests (`tests/projection.rs`) use `InProcessClient` with per-test database isolation via `CREATE DATABASE ... TEMPLATE`. Tests that need explicit reconciler control use `client.reconcile_tick()` and `client.sweep_tick()` instead of a background reconciler process.
 
 ## High-value invariants
 
