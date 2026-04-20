@@ -1,8 +1,11 @@
 //! In-process integration tests using axum's tower::ServiceExt.
 //! These run the server in the same process as the test, giving accurate coverage.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use common::InProcessClient;
 use dbtx::config::RuntimeConfig;
 use dbtx::db::Db;
 use dbtx::server::{router, AppState};

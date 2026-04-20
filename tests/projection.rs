@@ -1,3 +1,6 @@
+mod common;
+
+use common::InProcessClient;
 use dbtx::api::{
     EnvironmentActiveResourcesApiRequest, EnvironmentReconcileApiRequest,
     EnvironmentDraftUpdateApiRequest, SourceStateEventCreateApiRequest,
@@ -7,19 +10,18 @@ use dbtx::api::{
     InvocationHeartbeatApiRequest, InvocationLifecycleStatus, InvocationListApiRequest,
     ProjectDraftCreateApiRequest,
 };
-use dbtx::client::DaemonClient;
-use dbtx::db::{DraftStatus, PlanStatus};
+use dbtx::config::RuntimeConfig;
+use dbtx::db::{Db, DraftStatus, PlanStatus};
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
+use dbtx::server::{router, AppState};
 use dbtx::services::{
     code_change_input_fingerprint, infer_local_project_defaults, infer_remote_project_defaults,
     source_state_change_input_fingerprint, target_manifest_input_fingerprint,
 };
 use sqlx::{PgPool, Row};
 use std::fs;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::thread;
+use std::process::Command;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use testcontainers_modules::{
@@ -33,7 +35,7 @@ use uuid::Uuid;
 async fn remote_invocation_requires_remote_project_mode() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     client
         .invocation_create(local_invocation_request(
@@ -62,7 +64,7 @@ async fn remote_invocation_requires_remote_project_mode() {
 async fn remote_invocation_requires_commit_pinned_immutable_environment() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     bootstrap_remote_project_and_env_direct(
@@ -91,7 +93,7 @@ async fn remote_invocation_requires_commit_pinned_immutable_environment() {
 async fn lease_tokens_enforce_invocation_ownership() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     bootstrap_project_and_env(db.pool(), &repo, "dev").await;
     let created = client
@@ -218,7 +220,7 @@ async fn lease_tokens_enforce_invocation_ownership() {
 async fn selected_resources_are_tracked_until_node_finish_or_invocation_completion() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     bootstrap_remote_project_and_env_direct(
@@ -342,7 +344,7 @@ async fn selected_resources_are_tracked_until_node_finish_or_invocation_completi
 async fn source_state_reconcile_creates_and_admits_plan() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -447,7 +449,7 @@ async fn source_state_reconcile_creates_and_admits_plan() {
 async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconcile() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -563,7 +565,7 @@ async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconc
 async fn newer_source_state_event_after_satisfaction_creates_a_new_plan() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -652,7 +654,7 @@ async fn newer_source_state_event_after_satisfaction_creates_a_new_plan() {
 async fn periodic_reconciler_creates_and_admits_source_state_plan() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -718,7 +720,7 @@ async fn periodic_reconciler_creates_and_admits_source_state_plan() {
 async fn periodic_reconciler_creates_and_admits_code_change_plan() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -805,7 +807,7 @@ async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_befo
     )
     .await;
 
-    DaemonClient::new(db.service_url().to_string()).reconcile_tick().await.expect("reconcile tick for manifest prepare");
+    db.client().reconcile_tick().await.expect("reconcile tick for manifest prepare");
     wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", desired_commit).await;
 
     let row = sqlx::query(
@@ -855,7 +857,7 @@ async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_befo
 async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let desired_commit = "dddddddddddddddddddddddddddddddddddddddd";
 
@@ -1209,7 +1211,7 @@ async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desir
     .await
     .expect("insert failed old reconcile preparation");
 
-    DaemonClient::new(db.service_url().to_string()).reconcile_tick().await.expect("reconcile tick for manifest prepare bypass");
+    db.client().reconcile_tick().await.expect("reconcile tick for manifest prepare bypass");
     wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", new_desired_commit).await;
 }
 
@@ -1218,7 +1220,7 @@ async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desir
 async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1358,7 +1360,7 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
 async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1501,7 +1503,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
 async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1634,7 +1636,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
 async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1766,7 +1768,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
 async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1904,7 +1906,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
 async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2047,7 +2049,7 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
 async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2215,7 +2217,7 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
 async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_canceled() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2338,7 +2340,7 @@ async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_cance
 async fn manual_admit_after_auto_admit_fails_cleanly() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2471,7 +2473,7 @@ async fn manual_admit_after_auto_admit_fails_cleanly() {
 async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -2557,7 +2559,7 @@ async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
 async fn reconcile_reuses_equivalent_pending_plan() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2628,7 +2630,7 @@ async fn reconcile_reuses_equivalent_pending_plan() {
 async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let desired_commit_a = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -2716,7 +2718,7 @@ async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
 async fn reconcile_respects_active_environment_lease() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2790,7 +2792,7 @@ async fn reconcile_respects_active_environment_lease() {
 async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -2906,7 +2908,7 @@ async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
 async fn blocked_source_state_plan_completes_noop_when_source_event_is_already_satisfied() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -3019,7 +3021,7 @@ async fn blocked_source_state_plan_completes_noop_when_source_event_is_already_s
 async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -3129,7 +3131,7 @@ async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() 
 async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -3244,7 +3246,7 @@ async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
 async fn claimed_invocation_timeout_fails_without_reclaim() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     bootstrap_project_and_env(db.pool(), &repo, "dev").await;
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -3334,7 +3336,7 @@ async fn claimed_invocation_timeout_fails_without_reclaim() {
 async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     bootstrap_project_and_env(db.pool(), &repo, "dev").await;
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -3416,7 +3418,7 @@ async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations()
 async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     bootstrap_project_and_env(db.pool(), &repo, "dev").await;
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -3511,7 +3513,7 @@ async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
 async fn canceling_unclaimed_invocation_finishes_it_immediately() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     bootstrap_project_and_env(db.pool(), &repo, "dev").await;
 
@@ -3556,7 +3558,7 @@ async fn canceling_unclaimed_invocation_finishes_it_immediately() {
 async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finishes() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     bootstrap_project_and_env(db.pool(), &repo, "dev").await;
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -3602,7 +3604,7 @@ async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finish
 async fn worker_and_queue_views_aggregate_running_invocations() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     bootstrap_project_and_env(db.pool(), &repo, "dev").await;
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -3700,7 +3702,7 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
 async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     bootstrap_remote_project_only(db.pool(), repo.project_dir(), &project_id).await;
@@ -3758,7 +3760,7 @@ async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
 async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     fs::write(repo.project_dir().join("README.md"), "second commit\n").expect("write second commit file");
     git(&["add", "."], repo.project_dir().parent().expect("repo root"));
@@ -3862,7 +3864,7 @@ async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
 async fn project_draft_api_round_trip_and_confirms_validated_draft() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     let repo_root = repo.project_dir().parent().expect("repo root");
     let project_root = dbtx::services::relative_project_root(repo_root, repo.project_dir());
@@ -3918,7 +3920,7 @@ async fn project_draft_api_round_trip_and_confirms_validated_draft() {
 async fn validation_queue_routes_onboarding_but_not_normal_remote_invocations() {
     let db = TestDatabase::new_with_validation_queue("validation-only").await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     let repo_root = repo.project_dir().parent().expect("repo root");
     let project_root = dbtx::services::relative_project_root(repo_root, repo.project_dir());
@@ -4010,7 +4012,7 @@ async fn validation_queue_routes_onboarding_but_not_normal_remote_invocations() 
 async fn invocation_list_filters_apply_to_operator_views() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
 
     bootstrap_project_and_env(db.pool(), &repo, "dev").await;
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -4082,13 +4084,12 @@ async fn invocation_list_filters_apply_to_operator_views() {
 }
 
 struct TestDatabase {
-    daemon: TestDaemon,
+    client: InProcessClient,
     pool: PgPool,
     db_name: String,
     admin_pool: PgPool,
 }
 
-/// Shared Postgres container and template database, initialized once across all tests.
 struct SharedTestInfra {
     admin_url: String,
     _container: Option<ContainerAsync<Postgres>>,
@@ -4100,23 +4101,16 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
     SHARED_INFRA
         .get_or_init(|| async {
             if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
-                // For external DB, use the provided URL as the template and derive admin URL
                 let admin_url = url.rsplit_once('/').map(|(base, _)| format!("{base}/postgres"))
                     .unwrap_or_else(|| url.clone());
-                // Ensure the template database exists and has migrations
                 let admin_pool = PgPool::connect(&admin_url).await.expect("connect admin");
-                let _ = sqlx::query("CREATE DATABASE dbtx_template")
-                    .execute(&admin_pool).await;
+                let _ = sqlx::query("CREATE DATABASE dbtx_template").execute(&admin_pool).await;
                 admin_pool.close().await;
                 let template_url = url.rsplit_once('/').map(|(base, _)| format!("{base}/dbtx_template"))
                     .unwrap_or_else(|| url.clone());
-                let template_daemon = TestDaemon::start_inner(&template_url, None, false);
-                init_dbtx_schema(template_daemon.service_url());
-                drop(template_daemon);
-                return SharedTestInfra {
-                    admin_url,
-                    _container: None,
-                };
+                let db = Db::connect(&template_url).await.expect("connect template");
+                db.migrate().await.expect("migrate template");
+                return SharedTestInfra { admin_url, _container: None };
             }
 
             let container = Postgres::default()
@@ -4128,66 +4122,53 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
                 .expect("start shared postgres container");
 
             let host = container.get_host().await.expect("postgres host");
-            let port = container
-                .get_host_port_ipv4(5432)
-                .await
-                .expect("postgres port");
+            let port = container.get_host_port_ipv4(5432).await.expect("postgres port");
             let template_url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx_template");
             let admin_url = format!("postgres://dbtx:dbtx@{host}:{port}/postgres");
 
-            // Apply migrations to the template database
-            let template_daemon = TestDaemon::start_inner(&template_url, None, false);
-            init_dbtx_schema(template_daemon.service_url());
-            drop(template_daemon);
+            let db = Db::connect(&template_url).await.expect("connect template");
+            db.migrate().await.expect("migrate template");
 
-            SharedTestInfra {
-                admin_url,
-                _container: Some(container),
-            }
+            SharedTestInfra { admin_url, _container: Some(container) }
         })
         .await
 }
 
 impl TestDatabase {
     async fn new_without_reconciler() -> Self {
-        Self::new_inner(None, false).await
+        Self::new_inner().await
     }
 
     async fn new_with_validation_queue(queue: &str) -> Self {
-        Self::new_inner(Some(queue), false).await
+        if !queue.is_empty() {
+            unsafe { std::env::set_var("DBTX_VALIDATION_QUEUE", queue) };
+        }
+        Self::new_inner().await
     }
 
-    async fn new_inner(validation_queue: Option<&str>, with_reconciler: bool) -> Self {
+    async fn new_inner() -> Self {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-secret-key") };
         let infra = get_shared_infra().await;
         let db_name = format!("test_{}", Uuid::new_v4().simple());
 
-        // Connect to the postgres admin database to create the per-test database
-        let admin_pool = PgPool::connect(&infra.admin_url)
-            .await
-            .expect("connect admin db");
+        let admin_pool = PgPool::connect(&infra.admin_url).await.expect("connect admin db");
+        sqlx::query(&format!("CREATE DATABASE {db_name} TEMPLATE dbtx_template"))
+            .execute(&admin_pool).await.expect("create test database from template");
 
-        // Create a fresh database from the template
-        sqlx::query(&format!(
-            "CREATE DATABASE {db_name} TEMPLATE dbtx_template"
-        ))
-        .execute(&admin_pool)
-        .await
-        .expect("create test database from template");
-
-        // Build the per-test database URL
         let test_url = infra.admin_url.rsplit_once('/').map(|(base, _)| format!("{base}/{db_name}"))
             .unwrap_or_else(|| format!("{}/{db_name}", infra.admin_url));
 
-        let daemon = TestDaemon::start_inner(&test_url, validation_queue, with_reconciler);
-        let pool = PgPool::connect(&test_url)
-            .await
-            .expect("connect test db");
+        let db = Db::connect(&test_url).await.expect("connect app db");
+        let config = RuntimeConfig::from_database_url(test_url.clone());
+        let state = AppState::new(db, config);
+        let client = InProcessClient::new(router(state));
+        let pool = PgPool::connect(&test_url).await.expect("connect test db");
 
-        Self { daemon, pool, db_name, admin_pool }
+        Self { client, pool, db_name, admin_pool }
     }
 
-    fn service_url(&self) -> &str {
-        self.daemon.service_url()
+    fn client(&self) -> &InProcessClient {
+        &self.client
     }
 
     fn pool(&self) -> &PgPool {
@@ -4197,254 +4178,69 @@ impl TestDatabase {
 
 impl Drop for TestDatabase {
     fn drop(&mut self) {
-        // Close the test pool first so connections are released
         self.pool.close_event();
         let db_name = self.db_name.clone();
         let admin_pool = self.admin_pool.clone();
-        // Spawn a blocking task to drop the database
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("drop runtime");
+                .enable_all().build().expect("drop runtime");
             rt.block_on(async {
                 let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name} WITH (FORCE)"))
-                    .execute(&admin_pool)
-                    .await;
+                    .execute(&admin_pool).await;
             });
         });
     }
 }
 
-struct TestDaemon {
-    service_url: String,
-    server_child: Child,
-    reconciler_child: Option<Child>,
-}
-
-impl TestDaemon {
-    fn start_inner(database_url: &str, validation_queue: Option<&str>, with_reconciler: bool) -> Self {
-        let listen = next_listen_addr();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx-server"));
-        command
-            .args(["--listen", &listen])
-            .env("DBTX_DATABASE_URL", database_url)
-            .env("DBTX_SECRET_KEY", "test-secret-key")
-            .env("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS", "200")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if let Some(validation_queue) = validation_queue {
-            command.env("DBTX_VALIDATION_QUEUE", validation_queue);
-        }
-        let mut server_child = command.spawn().expect("start dbtx-server");
-
-        let service_url = format!("http://{listen}");
-        wait_for_server(&service_url, &mut server_child);
-
-        let reconciler_child = if with_reconciler {
-            Some(
-                Command::new(env!("CARGO_BIN_EXE_dbtx-reconciler"))
-                    .env("DBTX_DATABASE_URL", database_url)
-                    .env("DBTX_SECRET_KEY", "test-secret-key")
-                    .env("DBTX_RECONCILE_INTERVAL_MS", "200")
-                    .env("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS", "200")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .expect("start dbtx-reconciler"),
-            )
-        } else {
-            None
-        };
-
-        Self {
-            service_url,
-            server_child,
-            reconciler_child,
-        }
-    }
-
-    fn service_url(&self) -> &str {
-        &self.service_url
-    }
-}
-
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = self.server_child.kill();
-        let _ = self.server_child.wait();
-        if let Some(ref mut child) = self.reconciler_child {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-fn next_listen_addr() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    addr.to_string()
-}
-
-fn wait_for_server(service_url: &str, child: &mut Child) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let addr = service_url.trim_start_matches("http://");
-    loop {
-        if std::net::TcpStream::connect(addr).is_ok() {
-            // TCP is up — now poll /healthz to ensure HTTP is ready
-            let healthz_url = format!("{service_url}/healthz");
-            while Instant::now() < deadline {
-                let output = Command::new("curl")
-                    .args(["-sf", "--max-time", "1", &healthz_url])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-                if output.is_ok_and(|s| s.success()) {
-                    return;
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            panic!("dbtx-server TCP up but /healthz not ready at {service_url}");
-        }
-        if let Some(status) = child.try_wait().expect("poll dbtx-server") {
-            panic!("dbtx-server exited early with status {status}");
-        }
-        if Instant::now() >= deadline {
-            panic!("timed out waiting for dbtx-server at {service_url}");
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
 
 async fn wait_for_plan_status(
-    client: &DaemonClient,
+    client: &InProcessClient,
     plan_id: Uuid,
     expected_status: PlanStatus,
 ) -> dbtx::db::EnvironmentRunPlanRecord {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let plan = client
-            .environment_plan_get(plan_id)
-            .await
-            .expect("reload plan while waiting");
-        if plan.plan.status == expected_status {
-            return plan.plan;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for plan {plan_id} to reach status {expected_status}, last status was {}",
-            plan.plan.status
-        );
+        let plan = client.environment_plan_get(plan_id).await.expect("reload plan while waiting");
+        if plan.plan.status == expected_status { return plan.plan; }
+        assert!(Instant::now() < deadline,
+            "timed out waiting for plan {plan_id} to reach status {expected_status}, last status was {}", plan.plan.status);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
 async fn wait_for_plan_reason(
-    client: &DaemonClient,
+    client: &InProcessClient,
     project_id: &str,
     slug: &str,
     expected_reason: &str,
 ) -> dbtx::db::EnvironmentRunPlanRecord {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let plans = client
-            .environment_plan_list(project_id, slug)
-            .await
-            .expect("list plans while waiting")
-            .plans;
+        let plans = client.environment_plan_list(project_id, slug).await.expect("list plans while waiting").plans;
         if let Some(plan) = plans.into_iter().find(|plan| plan.reason == expected_reason)
             && matches!(plan.status, PlanStatus::Planned | PlanStatus::Blocked | PlanStatus::Admitted | PlanStatus::Completed)
-        {
-            return plan;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for plan with reason {expected_reason} in {project_id}/{slug}"
-        );
+        { return plan; }
+        assert!(Instant::now() < deadline, "timed out waiting for plan with reason {expected_reason} in {project_id}/{slug}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-async fn wait_for_manifest_prepare_invocation(
-    pool: &PgPool,
-    project_id: &str,
-    slug: &str,
-    commit_sha: &str,
-) {
+async fn wait_for_manifest_prepare_invocation(pool: &PgPool, project_id: &str, slug: &str, commit_sha: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let count: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*)
-            FROM invocations i
-            JOIN runs r ON r.run_id = i.run_id
-            JOIN projects p ON p.id = i.project_id
-            JOIN environments e ON e.id = i.environment_id
-            WHERE p.project_id = $1
-              AND e.slug = $2
-              AND i.command = 'manifest_prepare'
-              AND i.status = 'running'
-              AND i.completed_at IS NULL
-              AND r.git_commit_sha = $3
-            "#,
-        )
-        .bind(project_id)
-        .bind(slug)
-        .bind(commit_sha)
-        .fetch_one(pool)
-        .await
-        .expect("count manifest prepare invocations");
-        if count > 0 {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for manifest prepare invocation for {project_id}/{slug} at {commit_sha}"
-        );
+            r#"SELECT COUNT(*) FROM invocations i JOIN runs r ON r.run_id = i.run_id JOIN projects p ON p.id = i.project_id JOIN environments e ON e.id = i.environment_id WHERE p.project_id = $1 AND e.slug = $2 AND i.command = 'manifest_prepare' AND i.status = 'running' AND i.completed_at IS NULL AND r.git_commit_sha = $3"#,
+        ).bind(project_id).bind(slug).bind(commit_sha).fetch_one(pool).await.expect("count manifest prepare invocations");
+        if count > 0 { return; }
+        assert!(Instant::now() < deadline, "timed out waiting for manifest prepare invocation for {commit_sha}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-async fn latest_run_id_for_commit(
-    pool: &PgPool,
-    project_id: &str,
-    slug: &str,
-    commit_sha: &str,
-) -> Uuid {
+async fn latest_run_id_for_commit(pool: &PgPool, project_id: &str, slug: &str, commit_sha: &str) -> Uuid {
     sqlx::query_scalar(
-        r#"
-        SELECT r.run_id
-        FROM runs r
-        JOIN projects p ON p.id = r.project_id
-        JOIN environments e ON e.id = r.environment_id
-        WHERE p.project_id = $1
-          AND e.slug = $2
-          AND r.git_commit_sha = $3
-        ORDER BY r.id DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(commit_sha)
-    .fetch_one(pool)
-    .await
-    .expect("load latest run id for commit")
-}
-
-fn init_dbtx_schema(service_url: &str) {
-    let output = Command::new(env!("CARGO_BIN_EXE_dbtx"))
-        .args(["state", "migrate"])
-        .env("DBTX_SERVICE_URL", service_url)
-        .output()
-        .expect("run dbtx migrate");
-    assert!(
-        output.status.success(),
-        "dbtx init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+        r#"SELECT r.run_id FROM runs r JOIN projects p ON p.id = r.project_id JOIN environments e ON e.id = r.environment_id WHERE p.project_id = $1 AND e.slug = $2 AND r.git_commit_sha = $3 ORDER BY r.id DESC LIMIT 1"#,
+    ).bind(project_id).bind(slug).bind(commit_sha).fetch_one(pool).await.expect("load latest run id for commit")
 }
 
 struct TempProjectRepo {
@@ -5333,7 +5129,7 @@ fn sample_execution_completion(
 async fn reconcile_already_reconciled_environment_returns_conflict() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -5371,7 +5167,7 @@ async fn reconcile_already_reconciled_environment_returns_conflict() {
 async fn admit_completed_plan_returns_conflict() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let baseline_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let desired_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -5457,7 +5253,7 @@ async fn admit_completed_plan_returns_conflict() {
 async fn reconcile_without_baseline_returns_unprocessable() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
-    let client = DaemonClient::new(db.service_url().to_string());
+    let client = db.client().clone();
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let desired_sha = "cccccccccccccccccccccccccccccccccccccccc";
 
