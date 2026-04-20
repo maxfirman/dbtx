@@ -5,14 +5,12 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::InProcessClient;
 use dbtx::config::RuntimeConfig;
 use dbtx::db::Db;
 use dbtx::server::{router, AppState};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use std::sync::OnceLock;
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, runners::AsyncRunner},
@@ -176,7 +174,7 @@ async fn project_crud() {
     assert_eq!(body["project"]["project_name"], "test_project");
 
     // Update project
-    let (status, body) = post_json(&app, "/v1/projects/prj_test_1", json!({
+    let (_status, _body) = post_json(&app, "/v1/projects/prj_test_1", json!({
         "git_repo_url": "https://example.com/new-repo.git"
     }))
     .await;
