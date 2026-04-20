@@ -418,10 +418,7 @@ struct ApiDoc;
 
 pub async fn serve(listen: &str, state: AppState) -> AppResult<()> {
     let addr: SocketAddr = listen.parse().map_err(|err| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid listen address '{listen}': {err}"),
-        ))
+        AppError::InvalidInput(format!("invalid listen address '{listen}': {err}"))
     })?;
     info!(listen = %addr, "starting dbtx server");
     let timed_out_invocations = reconcile_timed_out_invocations(&state).await.unwrap_or(0);
@@ -1545,10 +1542,9 @@ fn normalize_worker_queues(worker_queues: &[String]) -> Result<Vec<String>, ApiE
     normalized.sort();
     normalized.dedup();
     if normalized.is_empty() {
-        return Err(ApiError(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "worker_queues must not be empty",
-        ))));
+        return Err(ApiError(AppError::InvalidInput(
+            "worker_queues must not be empty".to_string(),
+        )));
     }
     Ok(normalized)
 }
@@ -1728,10 +1724,9 @@ async fn invocation_cleanup(
     Json(request): Json<InvocationCleanupApiRequest>,
 ) -> Result<Json<InvocationCleanupResponse>, ApiError> {
     if request.older_than_seconds <= 0 {
-        return Err(ApiError(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "older_than_seconds must be greater than 0",
-        ))));
+        return Err(ApiError(AppError::InvalidInput(
+            "older_than_seconds must be greater than 0".to_string(),
+        )));
     }
     let cutoff = Utc::now() - chrono::Duration::seconds(request.older_than_seconds);
     let deleted = state
@@ -1921,16 +1916,21 @@ impl IntoResponse for ApiError {
             | AppError::InvalidProfileConfig(_)
             | AppError::InvalidProfileSecret(_)
             | AppError::MissingSecretKey
+            | AppError::InvalidInput(_)
             | AppError::UnsupportedLocalExecution(_) => StatusCode::BAD_REQUEST,
             AppError::ProjectIdNotFound(_)
             | AppError::EnvironmentNotFound(_, _)
-            | AppError::PlanNotFound(_) => {
+            | AppError::PlanNotFound(_)
+            | AppError::InvocationNotFound(_)
+            | AppError::ProjectDraftNotFound(_)
+            | AppError::EnvironmentDraftNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
             AppError::EnvironmentAlreadyExists(_, _) | AppError::ProjectIdAlreadyConfigured(_) => {
                 StatusCode::CONFLICT
             }
             AppError::ProjectDeleteBlocked(_) => StatusCode::CONFLICT,
+            AppError::ImmutableEnvironment(_) => StatusCode::CONFLICT,
             AppError::InvocationAlreadyClaimed(_) => StatusCode::CONFLICT,
             AppError::InvocationNotClaimable(_) => StatusCode::BAD_REQUEST,
             AppError::EnvironmentAlreadyReconciled

@@ -146,6 +146,18 @@ pub enum AppError {
     InvocationCanceled,
     #[error("invocation is owned by a different worker or is not running")]
     InvocationOwnershipMismatch,
+    #[error("invocation '{0}' was not found")]
+    InvocationNotFound(String),
+    #[error("project draft '{0}' was not found")]
+    ProjectDraftNotFound(String),
+    #[error("environment draft '{0}' was not found")]
+    EnvironmentDraftNotFound(String),
+    #[error("environment '{0}' is immutable and cannot be modified")]
+    ImmutableEnvironment(String),
+    #[error("timed out: {0}")]
+    TimedOut(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("worker setup failed: {0}")]
     WorkerSetupFailed(String),
     #[error("git target not found: {0}")]

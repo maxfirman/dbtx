@@ -36,16 +36,16 @@ impl PlanStatus {
         }
     }
 
-    pub fn parse(s: &str) -> Self {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "planned" => Self::Planned,
-            "blocked" => Self::Blocked,
-            "admitted" => Self::Admitted,
-            "completed" => Self::Completed,
-            "failed" => Self::Failed,
-            "canceled" => Self::Canceled,
-            "superseded" => Self::Superseded,
-            _ => Self::Failed,
+            "planned" => Some(Self::Planned),
+            "blocked" => Some(Self::Blocked),
+            "admitted" => Some(Self::Admitted),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "canceled" => Some(Self::Canceled),
+            "superseded" => Some(Self::Superseded),
+            _ => None,
         }
     }
 
@@ -125,14 +125,15 @@ impl DraftStatus {
         }
     }
 
-    pub fn parse(s: &str) -> Self {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "draft" => Self::Draft,
-            "loading_git" => Self::LoadingGit,
-            "ready" => Self::Ready,
-            "validating" => Self::Validating,
-            "validated" => Self::Validated,
-            _ => Self::Failed,
+            "draft" => Some(Self::Draft),
+            "loading_git" => Some(Self::LoadingGit),
+            "ready" => Some(Self::Ready),
+            "validating" => Some(Self::Validating),
+            "validated" => Some(Self::Validated),
+            "failed" => Some(Self::Failed),
+            _ => None,
         }
     }
 
@@ -165,11 +166,12 @@ impl PreparationStatus {
         }
     }
 
-    pub fn parse(s: &str) -> Self {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "running" => Self::Running,
-            "succeeded" => Self::Succeeded,
-            _ => Self::Failed,
+            "running" => Some(Self::Running),
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            _ => None,
         }
     }
 }

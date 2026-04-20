@@ -8,8 +8,10 @@ use crate::db::{
     LocalEnvironmentUpsertInput, PlanStatus, PlanningManifestNodeRecord, ProjectDraftRecord,
     ProjectRecord, SourceStateEventCreateInput, SourceStateEventRecord, RunFinalization, RunStart,
     UpdateEnvironmentDraftInput,
+};
+use crate::dbt_utils::{
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
-    read_dbt_project_name, read_git_state,
+    git_repo_root, read_dbt_project_name, read_git_state,
 };
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
@@ -329,7 +331,7 @@ pub fn infer_remote_project_defaults(
         .map(ToString::to_string)
         .or(git_state.repo_url)
         .ok_or(AppError::RemoteProjectRequiresGitRepo)?;
-    let repo_root = crate::db::git_repo_root(current_dir)
+    let repo_root = git_repo_root(current_dir)
         .map_err(|_| AppError::RemoteProjectRequiresGitRepo)?;
     let inferred_project_root = project_root
         .map(ToString::to_string)
@@ -400,18 +402,13 @@ fn validate_release_target_request(
         ));
     }
     if let Some(git_commit_sha) = request.git_commit_sha.as_deref()
-        && !is_valid_release_commit_sha(git_commit_sha)
+        && !crate::db::is_valid_git_commit_sha(git_commit_sha)
     {
         return Err(AppError::InvalidReleaseTarget(format!(
             "invalid git commit sha '{git_commit_sha}': expected 7 to 64 hexadecimal characters"
         )));
     }
     Ok(request)
-}
-
-fn is_valid_release_commit_sha(value: &str) -> bool {
-    let trimmed = value.trim();
-    (7..=64).contains(&trimmed.len()) && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse_release_target_args(args: &[OsString]) -> AppResult<ReleaseTargetRequest> {
@@ -695,21 +692,21 @@ fn short_hash(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_valid_release_commit_sha, plan_code_change_selected_resources,
+        plan_code_change_selected_resources,
         parse_release_target_args, validation_worker_queue_from_env,
     };
-    use crate::db::{CurrentNodeStatePlanningRecord, PlanningManifestNodeRecord};
+    use crate::db::{is_valid_git_commit_sha, CurrentNodeStatePlanningRecord, PlanningManifestNodeRecord};
     use std::ffi::OsString;
 
     #[test]
     fn release_commit_sha_requires_hex_shape() {
-        assert!(is_valid_release_commit_sha("deadbeef"));
-        assert!(is_valid_release_commit_sha(
+        assert!(is_valid_git_commit_sha("deadbeef"));
+        assert!(is_valid_git_commit_sha(
             "0123456789abcdef0123456789abcdef01234567"
         ));
-        assert!(!is_valid_release_commit_sha("abc123"));
-        assert!(!is_valid_release_commit_sha("main"));
-        assert!(!is_valid_release_commit_sha("dead beef"));
+        assert!(!is_valid_git_commit_sha("abc123"));
+        assert!(!is_valid_git_commit_sha("main"));
+        assert!(!is_valid_git_commit_sha("dead beef"));
     }
 
     #[test]

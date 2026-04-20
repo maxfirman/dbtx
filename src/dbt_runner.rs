@@ -78,4 +78,9 @@ impl DbtChild {
             stderr_lines,
         })
     }
+
+    /// Send a kill signal to the child process.
+    pub fn start_kill(&mut self) {
+        let _ = self.child.start_kill();
+    }
 }

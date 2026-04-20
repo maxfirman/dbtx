@@ -709,10 +709,9 @@ fn parse_display_status_filters(values: &[String]) -> AppResult<Vec<String>> {
                 display_statuses.push(value)
             }
             other => {
-                return Err(AppError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
+                return Err(AppError::InvalidInput(
                     format!("invalid invocation status filter: {other}"),
-                )));
+                ));
             }
         }
     }
@@ -724,10 +723,9 @@ fn parse_execution_mode_filters(values: &[String]) -> AppResult<Vec<String>> {
         .into_iter()
         .map(|value| match value.as_str() {
             "local" | "server" => Ok(value),
-            other => Err(AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            other => Err(AppError::InvalidInput(
                 format!("invalid invocation execution mode filter: {other}"),
-            ))),
+            )),
         })
         .collect()
 }
@@ -746,10 +744,9 @@ fn normalized_invocation_filters(query: &InvocationFilterQuery) -> AppResult<Nor
 fn parse_page_number(value: Option<usize>) -> AppResult<usize> {
     match value {
         None => Ok(1),
-        Some(0) => Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "invalid invocation page: must be >= 1",
-        ))),
+        Some(0) => Err(AppError::InvalidInput(
+            "invalid invocation page: must be >= 1".to_string(),
+        )),
         Some(page) => Ok(page),
     }
 }
@@ -760,7 +757,7 @@ fn parse_invocation_filter_query(raw_query: Option<&str>) -> AppResult<Invocatio
         return Ok(query);
     };
     let url = reqwest::Url::parse(&format!("http://localhost/ui/invocations?{raw_query}"))
-        .map_err(|err| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, err)))?;
+        .map_err(|err| AppError::InvalidInput(format!("invalid query string: {err}")))?;
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
             "status" => query.status.push(value.into_owned()),
@@ -769,10 +766,7 @@ fn parse_invocation_filter_query(raw_query: Option<&str>) -> AppResult<Invocatio
             "claimed_by" => query.claimed_by.push(value.into_owned()),
             "page" => {
                 let page = value.parse::<usize>().map_err(|err| {
-                    AppError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("invalid invocation page filter: {err}"),
-                    ))
+                    AppError::InvalidInput(format!("invalid invocation page filter: {err}"))
                 })?;
                 query.page = Some(page);
             }
@@ -1516,10 +1510,7 @@ fn htmx_headers() -> HeaderMap {
 
 fn parse_uuid(value: &str) -> AppResult<Uuid> {
     Uuid::parse_str(value).map_err(|err| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid uuid: {err}"),
-        ))
+        AppError::InvalidInput(format!("invalid uuid: {err}"))
     })
 }
 

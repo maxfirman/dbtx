@@ -216,10 +216,7 @@ impl Db {
             .await?;
 
         if existing.immutable {
-            return Err(AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("environment '{}' is immutable and cannot be released", existing.slug),
-            )));
+            return Err(AppError::ImmutableEnvironment(existing.slug.clone()));
         }
 
         validate_environment_git_metadata(&project, &existing.slug, Some(&input.git_commit_sha))?;

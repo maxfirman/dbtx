@@ -23,13 +23,6 @@ use uuid::Uuid;
 mod records;
 pub use records::*;
 
-// Re-export dbt utility functions for backward compatibility.
-// New code should import from crate::dbt_utils directly.
-pub(crate) use crate::dbt_utils::{
-    append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
-    git_repo_root, read_dbt_project_name, read_git_state,
-};
-
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
@@ -210,7 +203,7 @@ fn validate_environment_git_metadata(
     }
 }
 
-fn is_valid_git_commit_sha(value: &str) -> bool {
+pub(crate) fn is_valid_git_commit_sha(value: &str) -> bool {
     let trimmed = value.trim();
     (7..=64).contains(&trimmed.len()) && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -240,7 +233,7 @@ fn project_draft_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectDraftRec
         id: row.get("id"),
         git_repo_url: row.get("git_repo_url"),
         project_root: row.get("project_root"),
-        status: DraftStatus::parse(&row.get::<String, _>("status")),
+        status: DraftStatus::parse(&row.get::<String, _>("status")).unwrap_or(DraftStatus::Failed),
         validation_error: row.get("validation_error"),
         project_name: row.get("project_name"),
         default_branch: row.get("default_branch"),
@@ -268,7 +261,7 @@ fn environment_draft_record_from_row(row: &sqlx::postgres::PgRow) -> Environment
         profile_secrets: row.get::<sqlx::types::Json<Value>, _>("profile_secrets").0,
         branch_options: row.get::<sqlx::types::Json<Value>, _>("branch_options").0,
         commit_options: row.get::<sqlx::types::Json<Value>, _>("commit_options").0,
-        status: DraftStatus::parse(&row.get::<String, _>("status")),
+        status: DraftStatus::parse(&row.get::<String, _>("status")).unwrap_or(DraftStatus::Failed),
         validation_error: row.get("validation_error"),
         validation_invocation_id: row.get("validation_invocation_id"),
         created_at: row.get("created_at"),
@@ -350,7 +343,7 @@ fn environment_reconcile_preparation_from_row(
         kind: row.get("kind"),
         input_fingerprint: row.get("input_fingerprint"),
         target_git_commit_sha: row.get("target_git_commit_sha"),
-        status: PreparationStatus::parse(&row.get::<String, _>("status")),
+        status: PreparationStatus::parse(&row.get::<String, _>("status")).unwrap_or(PreparationStatus::Failed),
         invocation_id: row.get("invocation_id"),
         error: row.get("error"),
         failure_count: row.get("failure_count"),
@@ -366,7 +359,7 @@ fn environment_run_plan_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRunP
         plan_id: row.get("plan_id"),
         project_id: row.get("project_id"),
         environment_id: row.get("environment_id"),
-        status: PlanStatus::parse(&row.get::<String, _>("status")),
+        status: PlanStatus::parse(&row.get::<String, _>("status")).unwrap_or(PlanStatus::Failed),
         reason: row.get("reason"),
         input_fingerprint: row.get("input_fingerprint"),
         target_git_branch: row.get("target_git_branch"),

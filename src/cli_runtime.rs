@@ -124,10 +124,9 @@ pub async fn handle_environment_command(
                 git_commit_sha.as_deref(),
             );
             if git_commit_sha.is_none() == git_ref.is_none() {
-                return Err(AppError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "provide exactly one of --git-commit-sha or --git-ref",
-                )));
+                return Err(AppError::InvalidInput(
+                    "provide exactly one of --git-commit-sha or --git-ref".to_string(),
+                ));
             }
             if let Some(candidate_sha) = git_commit_sha.as_deref()
                 && current_commit_sha.as_deref() == Some(candidate_sha)
@@ -234,10 +233,7 @@ pub async fn handle_invocation_command(
         }
         InvocationCliCommand::Show { invocation_id } => {
             let invocation_id = uuid::Uuid::parse_str(&invocation_id).map_err(|err| {
-                AppError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("invalid invocation id: {err}"),
-                ))
+                AppError::InvalidInput(format!("invalid invocation id: {err}"))
             })?;
             let invocation = client.invocation_status(invocation_id).await?;
             print_invocation(&invocation);
@@ -247,10 +243,7 @@ pub async fn handle_invocation_command(
             wait,
         } => {
             let invocation_id = uuid::Uuid::parse_str(&invocation_id).map_err(|err| {
-                AppError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("invalid invocation id: {err}"),
-                ))
+                AppError::InvalidInput(format!("invalid invocation id: {err}"))
             })?;
             client
                 .invocation_cancel(invocation_id, api::InvocationCancelApiRequest::default())
@@ -265,10 +258,9 @@ pub async fn handle_invocation_command(
         }
         InvocationCliCommand::Cleanup { older_than_hours } => {
             if older_than_hours <= 0 {
-                return Err(AppError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "--older-than-hours must be greater than 0",
-                )));
+                return Err(AppError::InvalidInput(
+                    "--older-than-hours must be greater than 0".to_string(),
+                ));
             }
             let response = client
                 .invocation_cleanup(api::InvocationCleanupApiRequest {
@@ -476,10 +468,9 @@ fn parse_invocation_status_filter(
         Some("succeeded") => Ok(Some(InvocationLifecycleStatus::Succeeded)),
         Some("failed") => Ok(Some(InvocationLifecycleStatus::Failed)),
         Some("canceled") => Ok(Some(InvocationLifecycleStatus::Canceled)),
-        Some(other) => Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        Some(other) => Err(AppError::InvalidInput(
             format!("invalid invocation status filter: {other}"),
-        ))),
+        )),
     }
 }
 
@@ -490,10 +481,9 @@ fn parse_execution_mode_filter(
         None => Ok(None),
         Some("server") => Ok(Some(InvocationExecutionModeApi::Server)),
         Some("local") => Ok(Some(InvocationExecutionModeApi::Local)),
-        Some(other) => Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        Some(other) => Err(AppError::InvalidInput(
             format!("invalid execution mode filter: {other}"),
-        ))),
+        )),
     }
 }
 
@@ -503,10 +493,9 @@ fn parse_cancel_state_filter(value: Option<&str>) -> AppResult<Option<Invocation
         Some("none") => Ok(Some(InvocationCancelStateApi::None)),
         Some("requested") => Ok(Some(InvocationCancelStateApi::Requested)),
         Some("completed") => Ok(Some(InvocationCancelStateApi::Completed)),
-        Some(other) => Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        Some(other) => Err(AppError::InvalidInput(
             format!("invalid cancel state filter: {other}"),
-        ))),
+        )),
     }
 }
 

@@ -175,10 +175,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("project draft '{draft_id}' was not found"),
-            ))
+            AppError::ProjectDraftNotFound(draft_id.to_string())
         })?;
         Ok(project_draft_record_from_row(&row))
     }
@@ -222,10 +219,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("environment draft '{draft_id}' was not found"),
-            ))
+            AppError::EnvironmentDraftNotFound(draft_id.to_string())
         })?;
         Ok(environment_draft_record_from_row(&row))
     }
@@ -274,10 +268,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("environment draft '{draft_id}' was not found"),
-            ))
+            AppError::EnvironmentDraftNotFound(draft_id.to_string())
         })?;
         Ok(environment_draft_record_from_row(&row))
     }
@@ -304,7 +295,7 @@ impl Db {
         .bind(draft_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, format!("environment draft '{draft_id}' was not found"))))?;
+        .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
         Ok(environment_draft_record_from_row(&row))
     }
 
@@ -330,7 +321,7 @@ impl Db {
         .bind(draft_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, format!("environment draft '{draft_id}' was not found"))))?;
+        .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
         Ok(environment_draft_record_from_row(&row))
     }
 
@@ -378,10 +369,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("environment draft '{draft_id}' was not found"),
-            ))
+            AppError::EnvironmentDraftNotFound(draft_id.to_string())
         })?;
         Ok(environment_draft_record_from_row(&row))
     }
@@ -392,10 +380,9 @@ impl Db {
     ) -> AppResult<EnvironmentRecord> {
         let draft = self.get_environment_draft(draft_id).await?;
         if draft.status != DraftStatus::Validated {
-            return Err(AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "environment draft must be validated before confirmation",
-            )));
+            return Err(AppError::InvalidInput(
+                "environment draft must be validated before confirmation".to_string(),
+            ));
         }
         let project = self.get_project_by_id(draft.project_id).await?;
         let project_ref = project.project_id.clone();
@@ -446,10 +433,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("project draft '{draft_id}' was not found"),
-            ))
+            AppError::ProjectDraftNotFound(draft_id.to_string())
         })?;
         Ok(project_draft_record_from_row(&row))
     }
@@ -477,10 +461,9 @@ impl Db {
     pub async fn confirm_project_draft(&self, draft_id: Uuid) -> AppResult<ProjectRecord> {
         let draft = self.get_project_draft(draft_id).await?;
         if draft.status != DraftStatus::Validated {
-            return Err(AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "project draft must be validated before confirmation",
-            )));
+            return Err(AppError::InvalidInput(
+                "project draft must be validated before confirmation".to_string(),
+            ));
         }
         let project_name = draft.project_name.clone().ok_or_else(|| {
             AppError::Internal("validated project draft missing project_name".to_string())

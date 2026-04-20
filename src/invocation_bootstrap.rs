@@ -320,10 +320,9 @@ async fn wait_for_terminal_invocation(
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
+            return Err(AppError::TimedOut(
                 format!("timed out waiting for invocation {invocation_id}"),
-            )));
+            ));
         }
         sleep(std::time::Duration::from_millis(250)).await;
     }

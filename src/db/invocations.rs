@@ -190,10 +190,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "invocation not found",
-            ))
+            AppError::InvocationNotFound(invocation_id.to_string())
         })?;
         Ok(invocation_status_from_row(&row))
     }
@@ -572,12 +569,10 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
-            return Err(AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "invocation not found",
-            )));
+            return Err(AppError::InvocationNotFound(invocation_id.to_string()));
         };
-        if row.get::<String, _>("status") == "canceled"
+        let status_str: String = row.get("status");
+        if status_str == InvocationLifecycleStatus::Canceled.to_string()
             && row.get::<Option<String>, _>("claimed_by").is_none()
         {
             return Ok(Some(InvocationCancellationRecord {
@@ -694,10 +689,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "invocation not found",
-            ))
+            AppError::InvocationNotFound(invocation_id.to_string())
         })?;
         Ok(InvocationPersistenceRecord {
             plan_id: row.get("plan_id"),
@@ -730,10 +722,7 @@ impl Db {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "invocation not found",
-            ))
+            AppError::InvocationNotFound(invocation_id.to_string())
         })?;
         let sequence_no: i64 = row.get("next_event_sequence");
         sqlx::query(

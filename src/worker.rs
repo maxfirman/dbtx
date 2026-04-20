@@ -14,7 +14,6 @@ use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tracing::{info, warn};
 
@@ -100,42 +99,19 @@ pub async fn execute_claimed_invocation(
     dbt_args.push(profiles_dir.path().as_os_str().to_os_string());
 
     let command = map_command(command_name);
-    let mut child = match TokioCommand::new(
-        std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string()),
-    )
-    .arg(command)
-    .args(&dbt_args)
-    .current_dir(&project_dir)
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .spawn()
-    {
+    let dbt_path = std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
+    let mut dbt_child = match crate::dbt_runner::DbtChild::spawn(
+        &dbt_path,
+        command,
+        &dbt_args,
+        &project_dir,
+    ) {
         Ok(child) => child,
         Err(err) => {
-            let error = AppError::Io(err);
-            report_setup_failure(client, &claim, &error.to_string()).await?;
-            return Err(error);
+            report_setup_failure(client, &claim, &err.to_string()).await?;
+            return Err(err);
         }
     };
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| AppError::Internal("missing child stdout".to_string()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| AppError::Internal("missing child stderr".to_string()))?;
-
-    let mut stdout_reader = BufReader::new(stdout).lines();
-    let stderr_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr).lines();
-        let mut lines = Vec::new();
-        while let Some(line) = reader.next_line().await? {
-            lines.push(line);
-        }
-        Result::<Vec<String>, std::io::Error>::Ok(lines)
-    });
 
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
     let mut dbt_version: Option<String> = None;
@@ -143,7 +119,7 @@ pub async fn execute_claimed_invocation(
 
     loop {
         tokio::select! {
-            line = stdout_reader.next_line() => {
+            line = dbt_child.stdout_lines.next_line() => {
                 let Some(line) = line? else { break; };
                 if persists_state(command_name)
                     && let Some(event) = LogEvent::parse(&line)
@@ -161,30 +137,21 @@ pub async fn execute_claimed_invocation(
                         &claim.worker_id,
                         &event,
                     );
-                    client
-                        .invocation_append_events(
-                            claim.invocation_id,
-                            InvocationEventBatchApiRequest {
-                                worker_id: claim.worker_id.clone(),
-                                lease_token: claim.lease_token,
-                                events: vec![crate::execution::ExecutionEvent {
-                                    kind: crate::execution::ExecutionEventKind::DbtLog,
-                                    occurred_at: chrono::Utc::now(),
-                                    text: event.render_text_line(),
-                                    raw_line: Some(line),
-                                    dbt_event_name: Some(event.info.name.clone()),
-                                    node_unique_id: event
-                                        .data
-                                        .get("node_info")
-                                        .and_then(|value| value.get("unique_id"))
-                                        .and_then(|value| value.as_str())
-                                        .map(ToString::to_string),
-                                    level: Some(event.info.level.clone()),
-                                    error: None,
-                                }],
-                            },
-                        )
-                        .await?;
+                    send_event(client, &claim, crate::execution::ExecutionEvent {
+                        kind: crate::execution::ExecutionEventKind::DbtLog,
+                        occurred_at: chrono::Utc::now(),
+                        text: event.render_text_line(),
+                        raw_line: Some(line),
+                        dbt_event_name: Some(event.info.name.clone()),
+                        node_unique_id: event
+                            .data
+                            .get("node_info")
+                            .and_then(|value| value.get("unique_id"))
+                            .and_then(|value| value.as_str())
+                            .map(ToString::to_string),
+                        level: Some(event.info.level.clone()),
+                        error: None,
+                    }).await?;
                 } else {
                     emit_stream_output(
                         pretty_terminal_output,
@@ -193,25 +160,16 @@ pub async fn execute_claimed_invocation(
                         "stdout",
                         &line,
                     );
-                    client
-                        .invocation_append_events(
-                            claim.invocation_id,
-                            InvocationEventBatchApiRequest {
-                                worker_id: claim.worker_id.clone(),
-                                lease_token: claim.lease_token,
-                                events: vec![crate::execution::ExecutionEvent {
-                                    kind: crate::execution::ExecutionEventKind::StdoutLine,
-                                    occurred_at: chrono::Utc::now(),
-                                    text: Some(line.clone()),
-                                    raw_line: Some(line),
-                                    dbt_event_name: None,
-                                    node_unique_id: None,
-                                    level: None,
-                                    error: None,
-                                }],
-                            },
-                        )
-                        .await?;
+                    send_event(client, &claim, crate::execution::ExecutionEvent {
+                        kind: crate::execution::ExecutionEventKind::StdoutLine,
+                        occurred_at: chrono::Utc::now(),
+                        text: Some(line.clone()),
+                        raw_line: Some(line),
+                        dbt_event_name: None,
+                        node_unique_id: None,
+                        level: None,
+                        error: None,
+                    }).await?;
                 }
             }
             _ = heartbeat.tick() => {
@@ -231,48 +189,37 @@ pub async fn execute_claimed_invocation(
                         "cancel requested by control plane"
                     );
                     cancel_requested = true;
-                    let _ = child.start_kill();
+                    dbt_child.start_kill();
                 }
             }
         }
     }
 
-    let status = child.wait().await?;
-    for line in stderr_handle.await.map_err(|err| {
-        AppError::Internal(format!("stderr task failed: {err}"))
-    })?? {
+    let result = dbt_child.wait().await?;
+    for line in &result.stderr_lines {
         emit_stream_output(
             pretty_terminal_output,
             claim.invocation_id,
             &claim.worker_id,
             "stderr",
-            &line,
+            line,
         );
-        client
-            .invocation_append_events(
-                claim.invocation_id,
-                InvocationEventBatchApiRequest {
-                    worker_id: claim.worker_id.clone(),
-                    lease_token: claim.lease_token,
-                    events: vec![crate::execution::ExecutionEvent {
-                        kind: crate::execution::ExecutionEventKind::StderrLine,
-                        occurred_at: chrono::Utc::now(),
-                        text: Some(line.clone()),
-                        raw_line: Some(line),
-                        dbt_event_name: None,
-                        node_unique_id: None,
-                        level: None,
-                        error: None,
-                    }],
-                },
-            )
-            .await?;
+        send_event(client, &claim, crate::execution::ExecutionEvent {
+            kind: crate::execution::ExecutionEventKind::StderrLine,
+            occurred_at: chrono::Utc::now(),
+            text: Some(line.clone()),
+            raw_line: Some(line.clone()),
+            dbt_event_name: None,
+            node_unique_id: None,
+            level: None,
+            error: None,
+        }).await?;
     }
 
     let exit_code = if cancel_requested {
         130
     } else {
-        status.code().unwrap_or(1)
+        result.exit_code
     };
     let manifest = if persists_state(command_name) {
         let manifest_path = project_dir.join("target").join("manifest.json");
@@ -292,7 +239,7 @@ pub async fn execute_claimed_invocation(
                 completion: crate::execution::ExecutionCompletion {
                     status: if cancel_requested {
                         InvocationLifecycleStatus::Canceled
-                    } else if !status.success() {
+                    } else if exit_code != 0 {
                         InvocationLifecycleStatus::Failed
                     } else {
                         InvocationLifecycleStatus::Succeeded
@@ -300,7 +247,7 @@ pub async fn execute_claimed_invocation(
                     exit_code,
                     error: if cancel_requested {
                         Some("invocation canceled".to_string())
-                    } else if status.success() {
+                    } else if exit_code == 0 {
                         None
                     } else {
                         Some(format!("dbt invocation failed with exit code {exit_code}"))
@@ -323,7 +270,7 @@ pub async fn execute_claimed_invocation(
 
     if cancel_requested {
         Err(AppError::InvocationCanceled)
-    } else if status.success() {
+    } else if exit_code == 0 {
         Ok(())
     } else {
         Err(AppError::DbtFailed(exit_code))
@@ -406,6 +353,24 @@ fn emit_stream_output(
         text = %line,
         "worker invocation event"
     );
+}
+
+/// Send a single execution event to the server for the given invocation.
+async fn send_event(
+    client: &DaemonClient,
+    claim: &InvocationClaimResponse,
+    event: crate::execution::ExecutionEvent,
+) -> AppResult<()> {
+    client
+        .invocation_append_events(
+            claim.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                events: vec![event],
+            },
+        )
+        .await
 }
 
 impl InvocationExecutionSpecApi {
@@ -809,25 +774,16 @@ async fn send_worker_event(
         "stdout",
         &text,
     );
-    client
-        .invocation_append_events(
-            claim.invocation_id,
-            InvocationEventBatchApiRequest {
-                worker_id: claim.worker_id.clone(),
-                lease_token: claim.lease_token,
-                events: vec![crate::execution::ExecutionEvent {
-                    kind,
-                    occurred_at: chrono::Utc::now(),
-                    text: Some(text),
-                    raw_line: None,
-                    dbt_event_name: None,
-                    node_unique_id: None,
-                    level: None,
-                    error: None,
-                }],
-            },
-        )
-        .await
+    send_event(client, claim, crate::execution::ExecutionEvent {
+        kind,
+        occurred_at: chrono::Utc::now(),
+        text: Some(text),
+        raw_line: None,
+        dbt_event_name: None,
+        node_unique_id: None,
+        level: None,
+        error: None,
+    }).await
 }
 
 async fn materialize_execution_project_dir(
@@ -986,10 +942,9 @@ async fn resolve_remote_git_target(
             ensure_commit_exists_in_mirror(repo_url, &mirror_dir, git_commit_sha).await?;
             Ok(git_commit_sha.to_string())
         }
-        _ => Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "provide exactly one of git_ref or git_commit_sha",
-        ))),
+        _ => Err(AppError::InvalidInput(
+            "provide exactly one of git_ref or git_commit_sha".to_string(),
+        )),
     }
 }
 
