@@ -32,7 +32,6 @@ use uuid::Uuid;
 #[ignore = "requires docker for postgres testcontainer"]
 async fn remote_invocation_requires_remote_project_mode() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -62,7 +61,6 @@ async fn remote_invocation_requires_remote_project_mode() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn remote_invocation_requires_commit_pinned_immutable_environment() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -92,7 +90,6 @@ async fn remote_invocation_requires_commit_pinned_immutable_environment() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn lease_tokens_enforce_invocation_ownership() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -220,7 +217,6 @@ async fn lease_tokens_enforce_invocation_ownership() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn selected_resources_are_tracked_until_node_finish_or_invocation_completion() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -345,7 +341,6 @@ async fn selected_resources_are_tracked_until_node_finish_or_invocation_completi
 #[ignore = "requires docker for postgres testcontainer"]
 async fn source_state_reconcile_creates_and_admits_plan() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -451,7 +446,6 @@ async fn source_state_reconcile_creates_and_admits_plan() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconcile() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -568,7 +562,6 @@ async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconc
 #[ignore = "requires docker for postgres testcontainer"]
 async fn newer_source_state_event_after_satisfaction_creates_a_new_plan() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -658,7 +651,6 @@ async fn newer_source_state_event_after_satisfaction_creates_a_new_plan() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_creates_and_admits_source_state_plan() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -725,7 +717,6 @@ async fn periodic_reconciler_creates_and_admits_source_state_plan() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_creates_and_admits_code_change_plan() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -791,7 +782,6 @@ async fn periodic_reconciler_creates_and_admits_code_change_plan() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_before_planning() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -864,7 +854,6 @@ async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_befo
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -918,7 +907,6 @@ async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1018,7 +1006,6 @@ async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_respects_failed_plan_retry_backoff() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1150,7 +1137,6 @@ async fn periodic_reconciler_respects_failed_plan_retry_backoff() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desired_commit() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1231,7 +1217,6 @@ async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desir
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -1372,7 +1357,6 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -1516,7 +1500,6 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -1650,7 +1633,6 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -1783,7 +1765,6 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -1922,7 +1903,6 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2066,7 +2046,6 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2235,7 +2214,6 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_canceled() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2359,7 +2337,6 @@ async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_cance
 #[ignore = "requires docker for postgres testcontainer"]
 async fn manual_admit_after_auto_admit_fails_cleanly() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2493,7 +2470,6 @@ async fn manual_admit_after_auto_admit_fails_cleanly() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2580,7 +2556,6 @@ async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_reuses_equivalent_pending_plan() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2652,7 +2627,6 @@ async fn reconcile_reuses_equivalent_pending_plan() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2741,7 +2715,6 @@ async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_respects_active_environment_lease() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2816,7 +2789,6 @@ async fn reconcile_respects_active_environment_lease() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2933,7 +2905,6 @@ async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_source_state_plan_completes_noop_when_source_event_is_already_satisfied() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -3047,7 +3018,6 @@ async fn blocked_source_state_plan_completes_noop_when_source_event_is_already_s
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -3158,7 +3128,6 @@ async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() 
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -3274,7 +3243,6 @@ async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn claimed_invocation_timeout_fails_without_reclaim() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3365,7 +3333,6 @@ async fn claimed_invocation_timeout_fails_without_reclaim() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3448,7 +3415,6 @@ async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations()
 #[ignore = "requires docker for postgres testcontainer"]
 async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3544,7 +3510,6 @@ async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn canceling_unclaimed_invocation_finishes_it_immediately() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3590,7 +3555,6 @@ async fn canceling_unclaimed_invocation_finishes_it_immediately() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finishes() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3637,7 +3601,6 @@ async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finish
 #[ignore = "requires docker for postgres testcontainer"]
 async fn worker_and_queue_views_aggregate_running_invocations() {
     let db = TestDatabase::new_without_reconciler().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3736,7 +3699,6 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3795,7 +3757,6 @@ async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3900,7 +3861,6 @@ async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn project_draft_api_round_trip_and_confirms_validated_draft() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3957,7 +3917,6 @@ async fn project_draft_api_round_trip_and_confirms_validated_draft() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn validation_queue_routes_onboarding_but_not_normal_remote_invocations() {
     let db = TestDatabase::new_with_validation_queue("validation-only").await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -4050,7 +4009,6 @@ async fn validation_queue_routes_onboarding_but_not_normal_remote_invocations() 
 #[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_list_filters_apply_to_operator_views() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -4126,7 +4084,68 @@ async fn invocation_list_filters_apply_to_operator_views() {
 struct TestDatabase {
     daemon: TestDaemon,
     pool: PgPool,
+    db_name: String,
+    admin_pool: PgPool,
+}
+
+/// Shared Postgres container and template database, initialized once across all tests.
+struct SharedTestInfra {
+    admin_url: String,
     _container: Option<ContainerAsync<Postgres>>,
+}
+
+static SHARED_INFRA: tokio::sync::OnceCell<SharedTestInfra> = tokio::sync::OnceCell::const_new();
+
+async fn get_shared_infra() -> &'static SharedTestInfra {
+    SHARED_INFRA
+        .get_or_init(|| async {
+            if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
+                // For external DB, use the provided URL as the template and derive admin URL
+                let admin_url = url.rsplit_once('/').map(|(base, _)| format!("{base}/postgres"))
+                    .unwrap_or_else(|| url.clone());
+                // Ensure the template database exists and has migrations
+                let admin_pool = PgPool::connect(&admin_url).await.expect("connect admin");
+                let _ = sqlx::query("CREATE DATABASE dbtx_template")
+                    .execute(&admin_pool).await;
+                admin_pool.close().await;
+                let template_url = url.rsplit_once('/').map(|(base, _)| format!("{base}/dbtx_template"))
+                    .unwrap_or_else(|| url.clone());
+                let template_daemon = TestDaemon::start_inner(&template_url, None, false);
+                init_dbtx_schema(template_daemon.service_url());
+                drop(template_daemon);
+                return SharedTestInfra {
+                    admin_url,
+                    _container: None,
+                };
+            }
+
+            let container = Postgres::default()
+                .with_db_name("dbtx_template")
+                .with_user("dbtx")
+                .with_password("dbtx")
+                .start()
+                .await
+                .expect("start shared postgres container");
+
+            let host = container.get_host().await.expect("postgres host");
+            let port = container
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("postgres port");
+            let template_url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx_template");
+            let admin_url = format!("postgres://dbtx:dbtx@{host}:{port}/postgres");
+
+            // Apply migrations to the template database
+            let template_daemon = TestDaemon::start_inner(&template_url, None, false);
+            init_dbtx_schema(template_daemon.service_url());
+            drop(template_daemon);
+
+            SharedTestInfra {
+                admin_url,
+                _container: Some(container),
+            }
+        })
+        .await
 }
 
 impl TestDatabase {
@@ -4143,51 +4162,61 @@ impl TestDatabase {
     }
 
     async fn new_inner(validation_queue: Option<&str>, with_reconciler: bool) -> Self {
-        if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
-            let daemon = TestDaemon::start_inner(&url, validation_queue, with_reconciler);
-            init_dbtx_schema(daemon.service_url());
-            let pool = PgPool::connect(&url)
-                .await
-                .expect("connect external test db");
-            return Self {
-                daemon,
-                pool,
-                _container: None,
-            };
-        }
+        let infra = get_shared_infra().await;
+        let db_name = format!("test_{}", Uuid::new_v4().simple());
 
-        let container = Postgres::default()
-            .with_db_name("dbtx")
-            .with_user("dbtx")
-            .with_password("dbtx")
-            .start()
+        // Connect to the postgres admin database to create the per-test database
+        let admin_pool = PgPool::connect(&infra.admin_url)
             .await
-            .expect("start postgres container");
+            .expect("connect admin db");
 
-        let host = container.get_host().await.expect("postgres host");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("postgres port");
-        let url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx");
-        let daemon = TestDaemon::start_inner(&url, validation_queue, with_reconciler);
-        init_dbtx_schema(daemon.service_url());
-        let pool = PgPool::connect(&url)
-            .await
-            .expect("connect testcontainer db");
+        // Create a fresh database from the template
+        sqlx::query(&format!(
+            "CREATE DATABASE {db_name} TEMPLATE dbtx_template"
+        ))
+        .execute(&admin_pool)
+        .await
+        .expect("create test database from template");
 
-        Self {
-            daemon,
-            pool,
-            _container: Some(container),
-        }
+        // Build the per-test database URL
+        let test_url = infra.admin_url.rsplit_once('/').map(|(base, _)| format!("{base}/{db_name}"))
+            .unwrap_or_else(|| format!("{}/{db_name}", infra.admin_url));
+
+        let daemon = TestDaemon::start_inner(&test_url, validation_queue, with_reconciler);
+        let pool = PgPool::connect(&test_url)
+            .await
+            .expect("connect test db");
+
+        Self { daemon, pool, db_name, admin_pool }
     }
+
     fn service_url(&self) -> &str {
         self.daemon.service_url()
     }
 
     fn pool(&self) -> &PgPool {
         &self.pool
+    }
+}
+
+impl Drop for TestDatabase {
+    fn drop(&mut self) {
+        // Close the test pool first so connections are released
+        self.pool.close_event();
+        let db_name = self.db_name.clone();
+        let admin_pool = self.admin_pool.clone();
+        // Spawn a blocking task to drop the database
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("drop runtime");
+            rt.block_on(async {
+                let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name} WITH (FORCE)"))
+                    .execute(&admin_pool)
+                    .await;
+            });
+        });
     }
 }
 
@@ -4478,15 +4507,6 @@ fn git(args: &[&str], cwd: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-}
-
-async fn reset_db(pool: &PgPool) {
-    sqlx::query(
-        "TRUNCATE invocation_events, invocations, environment_seeds, promoted_manifest_nodes, promoted_manifest_meta, current_node_state, manifest_edges, manifest_nodes, manifest_snapshots, node_executions, run_events, runs, environments, projects CASCADE",
-    )
-    .execute(pool)
-    .await
-    .expect("truncate db");
 }
 
 async fn bootstrap_project_and_env(pool: &PgPool, repo: &TempProjectRepo, slug: &str) {
@@ -5303,7 +5323,6 @@ fn sample_execution_completion(
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_already_reconciled_environment_returns_conflict() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -5342,7 +5361,6 @@ async fn reconcile_already_reconciled_environment_returns_conflict() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn admit_completed_plan_returns_conflict() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -5429,7 +5447,6 @@ async fn admit_completed_plan_returns_conflict() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_without_baseline_returns_unprocessable() {
     let db = TestDatabase::new().await;
-    reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
