@@ -100,6 +100,8 @@ pub enum AppError {
     EnvironmentAlreadyExists(String, String),
     #[error("environment version '{2}' for environment '{1}' in project '{0}' was not found")]
     EnvironmentVersionNotFound(String, String, i64),
+    #[error("plan '{0}' was not found")]
+    PlanNotFound(String),
     #[error("invalid project mode '{0}'")]
     InvalidProjectMode(String),
     #[error("invalid environment status '{0}'")]

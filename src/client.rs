@@ -28,13 +28,18 @@ pub struct DaemonClient {
 
 impl DaemonClient {
     pub fn new(base_url: String) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self::with_http(base_url, http)
+    }
+
+    fn with_http(base_url: String, http: reqwest::Client) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http,
         }
     }
 
@@ -533,7 +538,11 @@ async fn ensure_success(response: reqwest::Response) -> AppResult<reqwest::Respo
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> AppError {
-    AppError::Internal(error.to_string())
+    if error.is_timeout() {
+        AppError::Internal(format!("request timed out: {error}"))
+    } else {
+        AppError::Internal(error.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -623,18 +632,15 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        // DaemonClient has a 30s timeout by default; use a custom reqwest client
-        // to test timeout behavior with a shorter duration
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(100))
             .build()
             .unwrap();
-        let response = http
-            .get(format!("{}/v1/projects", mock_server.uri()))
-            .send()
-            .await;
-        assert!(response.is_err());
-        let err = response.unwrap_err();
-        assert!(err.is_timeout());
+        let client = super::DaemonClient::with_http(mock_server.uri(), http);
+        let err = client.project_list().await.expect_err("should time out");
+        assert!(
+            matches!(err, crate::error::AppError::Internal(ref message) if message.contains("timed out")),
+            "expected timeout-style internal error, got: {err}"
+        );
     }
 }

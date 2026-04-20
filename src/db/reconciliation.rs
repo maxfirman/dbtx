@@ -223,12 +223,7 @@ impl Db {
         .bind(plan_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "plan not found",
-            ))
-        })?;
+        .ok_or_else(|| AppError::PlanNotFound(plan_id.to_string()))?;
         Ok(environment_run_plan_from_row(&row))
     }
 

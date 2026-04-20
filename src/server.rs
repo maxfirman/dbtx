@@ -106,7 +106,6 @@ pub fn router(state: AppState) -> Router {
         .merge(environment_routes())
         .merge(invocation_routes())
         .merge(operator_routes())
-        .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
                 let request_id = request
@@ -122,6 +121,9 @@ pub fn router(state: AppState) -> Router {
                 )
             }),
         )
+        // The request-id middleware must run before the trace layer so spans
+        // for requests without an incoming X-Request-Id still get the generated id.
+        .layer(axum::middleware::from_fn(request_id_middleware))
         .with_state(state)
 }
 
@@ -1920,7 +1922,9 @@ impl IntoResponse for ApiError {
             | AppError::InvalidProfileSecret(_)
             | AppError::MissingSecretKey
             | AppError::UnsupportedLocalExecution(_) => StatusCode::BAD_REQUEST,
-            AppError::ProjectIdNotFound(_) | AppError::EnvironmentNotFound(_, _) => {
+            AppError::ProjectIdNotFound(_)
+            | AppError::EnvironmentNotFound(_, _)
+            | AppError::PlanNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
             AppError::EnvironmentAlreadyExists(_, _) | AppError::ProjectIdAlreadyConfigured(_) => {
@@ -2071,6 +2075,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let resp = ApiError(AppError::EnvironmentNotFound("prj_1".to_string(), "dev".to_string())).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = ApiError(AppError::PlanNotFound(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        ))
+        .into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
