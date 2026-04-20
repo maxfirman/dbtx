@@ -4198,14 +4198,6 @@ struct TestDaemon {
 }
 
 impl TestDaemon {
-    fn start(database_url: &str, validation_queue: Option<&str>) -> Self {
-        Self::start_inner(database_url, validation_queue, true)
-    }
-
-    fn start_without_reconciler(database_url: &str, validation_queue: Option<&str>) -> Self {
-        Self::start_inner(database_url, validation_queue, false)
-    }
-
     fn start_inner(database_url: &str, validation_queue: Option<&str>, with_reconciler: bool) -> Self {
         let listen = next_listen_addr();
         let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx-server"));
