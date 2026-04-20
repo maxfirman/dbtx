@@ -16,7 +16,7 @@ use dbtx::services::{
 };
 use sqlx::{PgPool, Row};
 use std::fs;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -31,7 +31,7 @@ use uuid::Uuid;
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn remote_invocation_requires_remote_project_mode() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -60,7 +60,7 @@ async fn remote_invocation_requires_remote_project_mode() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn remote_invocation_requires_commit_pinned_immutable_environment() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -89,7 +89,7 @@ async fn remote_invocation_requires_commit_pinned_immutable_environment() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn lease_tokens_enforce_invocation_ownership() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -216,7 +216,7 @@ async fn lease_tokens_enforce_invocation_ownership() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn selected_resources_are_tracked_until_node_finish_or_invocation_completion() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -2714,7 +2714,7 @@ async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_respects_active_environment_lease() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -3332,7 +3332,7 @@ async fn claimed_invocation_timeout_fails_without_reclaim() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3414,7 +3414,7 @@ async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations()
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3509,7 +3509,7 @@ async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn canceling_unclaimed_invocation_finishes_it_immediately() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3554,7 +3554,7 @@ async fn canceling_unclaimed_invocation_finishes_it_immediately() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finishes() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3698,7 +3698,7 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3756,7 +3756,7 @@ async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -3860,7 +3860,7 @@ async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn project_draft_api_round_trip_and_confirms_validated_draft() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -4008,7 +4008,7 @@ async fn validation_queue_routes_onboarding_but_not_normal_remote_invocations() 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_list_filters_apply_to_operator_views() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
 
@@ -4149,16 +4149,12 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
 }
 
 impl TestDatabase {
-    async fn new() -> Self {
-        Self::new_inner(None, true).await
-    }
-
     async fn new_without_reconciler() -> Self {
         Self::new_inner(None, false).await
     }
 
     async fn new_with_validation_queue(queue: &str) -> Self {
-        Self::new_inner(Some(queue), true).await
+        Self::new_inner(Some(queue), false).await
     }
 
     async fn new_inner(validation_queue: Option<&str>, with_reconciler: bool) -> Self {
@@ -4295,8 +4291,21 @@ fn wait_for_server(service_url: &str, child: &mut Child) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let addr = service_url.trim_start_matches("http://");
     loop {
-        if TcpStream::connect(addr).is_ok() {
-            return;
+        if std::net::TcpStream::connect(addr).is_ok() {
+            // TCP is up — now poll /healthz to ensure HTTP is ready
+            let healthz_url = format!("{service_url}/healthz");
+            while Instant::now() < deadline {
+                let output = Command::new("curl")
+                    .args(["-sf", "--max-time", "1", &healthz_url])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                if output.is_ok_and(|s| s.success()) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            panic!("dbtx-server TCP up but /healthz not ready at {service_url}");
         }
         if let Some(status) = child.try_wait().expect("poll dbtx-server") {
             panic!("dbtx-server exited early with status {status}");
@@ -5322,7 +5331,7 @@ fn sample_execution_completion(
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_already_reconciled_environment_returns_conflict() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -5360,7 +5369,7 @@ async fn reconcile_already_reconciled_environment_returns_conflict() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn admit_completed_plan_returns_conflict() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -5446,7 +5455,7 @@ async fn admit_completed_plan_returns_conflict() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_without_baseline_returns_unprocessable() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
