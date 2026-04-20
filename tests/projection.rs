@@ -450,7 +450,7 @@ async fn source_state_reconcile_creates_and_admits_plan() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconcile() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -657,7 +657,7 @@ async fn newer_source_state_event_after_satisfaction_creates_a_new_plan() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_creates_and_admits_source_state_plan() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -705,17 +705,26 @@ async fn periodic_reconciler_creates_and_admits_source_state_plan() {
         .expect("create source state event")
         .event;
 
-    let created_plan =
-        wait_for_plan_reason(&client, &project_id, "remote", "source_state_change").await;
+    client.reconcile_tick().await.expect("reconcile tick");
+
+    let plans = client
+        .environment_plan_list(&project_id, "remote")
+        .await
+        .expect("list plans")
+        .plans;
+    let created_plan = plans
+        .into_iter()
+        .find(|p| p.reason == "source_state_change")
+        .expect("source_state_change plan should exist");
     assert_eq!(created_plan.source_event_id, Some(source_event.id));
-    let admitted = wait_for_plan_status(&client, created_plan.plan_id, PlanStatus::Admitted).await;
-    assert!(admitted.admitted_invocation_id.is_some());
+    assert_eq!(created_plan.status, PlanStatus::Admitted);
+    assert!(created_plan.admitted_invocation_id.is_some());
 }
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_creates_and_admits_code_change_plan() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -756,8 +765,18 @@ async fn periodic_reconciler_creates_and_admits_code_change_plan() {
     )
     .await;
 
-    let created_plan = wait_for_plan_reason(&client, &project_id, "remote", "code_change").await;
-    let plan = wait_for_plan_status(&client, created_plan.plan_id, PlanStatus::Admitted).await;
+    client.reconcile_tick().await.expect("reconcile tick");
+
+    let plans = client
+        .environment_plan_list(&project_id, "remote")
+        .await
+        .expect("list plans")
+        .plans;
+    let plan = plans
+        .into_iter()
+        .find(|p| p.reason == "code_change")
+        .expect("code_change plan should exist");
+    assert_eq!(plan.status, PlanStatus::Admitted);
     assert!(plan.admitted_invocation_id.is_some());
     assert_eq!(
         plan.selected_resources,
@@ -771,7 +790,7 @@ async fn periodic_reconciler_creates_and_admits_code_change_plan() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_before_planning() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -796,6 +815,7 @@ async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_befo
     )
     .await;
 
+    DaemonClient::new(db.service_url().to_string()).reconcile_tick().await.expect("reconcile tick for manifest prepare");
     wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", desired_commit).await;
 
     let row = sqlx::query(
@@ -843,7 +863,7 @@ async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_befo
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -859,6 +879,7 @@ async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
     )
     .await;
 
+    client.reconcile_tick().await.expect("reconcile tick for manifest prepare");
     wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", desired_commit).await;
 
     seed_manifest_run_only(
@@ -874,6 +895,7 @@ async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
     )
     .await;
 
+    client.reconcile_tick().await.expect("reconcile tick for plan creation");
     let created_plan = wait_for_plan_reason(&client, &project_id, "remote", "code_change").await;
     let plan = wait_for_plan_status(&client, created_plan.plan_id, PlanStatus::Admitted).await;
     assert!(plan.admitted_invocation_id.is_some());
@@ -895,7 +917,7 @@ async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -995,7 +1017,7 @@ async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_respects_failed_plan_retry_backoff() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -1127,7 +1149,7 @@ async fn periodic_reconciler_respects_failed_plan_retry_backoff() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desired_commit() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
@@ -1201,13 +1223,14 @@ async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desir
     .await
     .expect("insert failed old reconcile preparation");
 
+    DaemonClient::new(db.service_url().to_string()).reconcile_tick().await.expect("reconcile tick for manifest prepare bypass");
     wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", new_desired_commit).await;
 }
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -1338,6 +1361,7 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
         .expect("create second source event")
         .event;
 
+    client.reconcile_tick().await.expect("reconcile tick for source backoff bypass");
     let new_plan = wait_for_plan_reason(&client, &project_id, "remote", "source_state_change").await;
     assert_eq!(new_plan.source_event_id, Some(second.id));
     let admitted = wait_for_plan_status(&client, new_plan.plan_id, PlanStatus::Admitted).await;
@@ -1347,7 +1371,7 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -1491,7 +1515,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -1625,7 +1649,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -1758,7 +1782,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -1897,7 +1921,7 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -2041,7 +2065,7 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -2210,7 +2234,7 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_canceled() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -2334,7 +2358,7 @@ async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_cance
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn manual_admit_after_auto_admit_fails_cleanly() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -2555,7 +2579,7 @@ async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_reuses_equivalent_pending_plan() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -2791,7 +2815,7 @@ async fn reconcile_respects_active_environment_lease() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -2908,7 +2932,7 @@ async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn blocked_source_state_plan_completes_noop_when_source_event_is_already_satisfied() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -3022,7 +3046,7 @@ async fn blocked_source_state_plan_completes_noop_when_source_event_is_already_s
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -3118,7 +3142,14 @@ async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() 
     )
     .await;
 
-    let admitted = wait_for_plan_status(&client, plan.plan_id, PlanStatus::Admitted).await;
+    client.sweep_tick().await.expect("sweep tick");
+
+    let admitted = client
+        .environment_plan_get(plan.plan_id)
+        .await
+        .expect("reload plan after sweep")
+        .plan;
+    assert_eq!(admitted.status, PlanStatus::Admitted);
     assert_eq!(admitted.selected_resources, vec!["model.pkg.customers".to_string()]);
     assert!(admitted.admitted_invocation_id.is_some());
 }
@@ -3126,7 +3157,7 @@ async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -3223,7 +3254,14 @@ async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
     )
     .await;
 
-    let completed = wait_for_plan_status(&client, plan.plan_id, PlanStatus::Completed).await;
+    client.sweep_tick().await.expect("sweep tick");
+
+    let completed = client
+        .environment_plan_get(plan.plan_id)
+        .await
+        .expect("reload plan after sweep")
+        .plan;
+    assert_eq!(completed.status, PlanStatus::Completed);
     assert!(completed.admitted_invocation_id.is_none());
     assert_eq!(completed.selected_resources, Vec::<String>::new());
     assert_eq!(
@@ -3235,7 +3273,7 @@ async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn claimed_invocation_timeout_fails_without_reclaim() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -3598,7 +3636,7 @@ async fn canceling_claimed_invocation_marks_cancel_requested_until_worker_finish
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn worker_and_queue_views_aggregate_running_invocations() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -4093,16 +4131,20 @@ struct TestDatabase {
 
 impl TestDatabase {
     async fn new() -> Self {
-        Self::new_inner(None).await
+        Self::new_inner(None, true).await
+    }
+
+    async fn new_without_reconciler() -> Self {
+        Self::new_inner(None, false).await
     }
 
     async fn new_with_validation_queue(queue: &str) -> Self {
-        Self::new_inner(Some(queue)).await
+        Self::new_inner(Some(queue), true).await
     }
 
-    async fn new_inner(validation_queue: Option<&str>) -> Self {
+    async fn new_inner(validation_queue: Option<&str>, with_reconciler: bool) -> Self {
         if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
-            let daemon = TestDaemon::start(&url, validation_queue);
+            let daemon = TestDaemon::start_inner(&url, validation_queue, with_reconciler);
             init_dbtx_schema(daemon.service_url());
             let pool = PgPool::connect(&url)
                 .await
@@ -4128,7 +4170,7 @@ impl TestDatabase {
             .await
             .expect("postgres port");
         let url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx");
-        let daemon = TestDaemon::start(&url, validation_queue);
+        let daemon = TestDaemon::start_inner(&url, validation_queue, with_reconciler);
         init_dbtx_schema(daemon.service_url());
         let pool = PgPool::connect(&url)
             .await
@@ -4152,11 +4194,19 @@ impl TestDatabase {
 struct TestDaemon {
     service_url: String,
     server_child: Child,
-    reconciler_child: Child,
+    reconciler_child: Option<Child>,
 }
 
 impl TestDaemon {
     fn start(database_url: &str, validation_queue: Option<&str>) -> Self {
+        Self::start_inner(database_url, validation_queue, true)
+    }
+
+    fn start_without_reconciler(database_url: &str, validation_queue: Option<&str>) -> Self {
+        Self::start_inner(database_url, validation_queue, false)
+    }
+
+    fn start_inner(database_url: &str, validation_queue: Option<&str>, with_reconciler: bool) -> Self {
         let listen = next_listen_addr();
         let mut command = Command::new(env!("CARGO_BIN_EXE_dbtx-server"));
         command
@@ -4173,15 +4223,23 @@ impl TestDaemon {
 
         let service_url = format!("http://{listen}");
         wait_for_server(&service_url, &mut server_child);
-        let reconciler_child = Command::new(env!("CARGO_BIN_EXE_dbtx-reconciler"))
-            .env("DBTX_DATABASE_URL", database_url)
-            .env("DBTX_SECRET_KEY", "test-secret-key")
-            .env("DBTX_RECONCILE_INTERVAL_MS", "200")
-            .env("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS", "200")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start dbtx-reconciler");
+
+        let reconciler_child = if with_reconciler {
+            Some(
+                Command::new(env!("CARGO_BIN_EXE_dbtx-reconciler"))
+                    .env("DBTX_DATABASE_URL", database_url)
+                    .env("DBTX_SECRET_KEY", "test-secret-key")
+                    .env("DBTX_RECONCILE_INTERVAL_MS", "200")
+                    .env("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS", "200")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("start dbtx-reconciler"),
+            )
+        } else {
+            None
+        };
+
         Self {
             service_url,
             server_child,
@@ -4198,8 +4256,10 @@ impl Drop for TestDaemon {
     fn drop(&mut self) {
         let _ = self.server_child.kill();
         let _ = self.server_child.wait();
-        let _ = self.reconciler_child.kill();
-        let _ = self.reconciler_child.wait();
+        if let Some(ref mut child) = self.reconciler_child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 

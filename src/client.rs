@@ -363,6 +363,14 @@ impl DaemonClient {
         self.send(self.http.get(self.url("/v1/queues"))).await
     }
 
+    pub async fn reconcile_tick(&self) -> AppResult<serde_json::Value> {
+        self.send(self.http.post(self.url("/v1/reconcile/tick"))).await
+    }
+
+    pub async fn sweep_tick(&self) -> AppResult<serde_json::Value> {
+        self.send(self.http.post(self.url("/v1/reconcile/sweep"))).await
+    }
+
     pub async fn invocation_cleanup(
         &self,
         request: InvocationCleanupApiRequest,

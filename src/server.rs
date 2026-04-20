@@ -267,6 +267,8 @@ fn operator_routes() -> Router<AppState> {
     Router::new()
         .route("/v1/workers", get(worker_list))
         .route("/v1/queues", get(queue_list))
+        .route("/v1/reconcile/tick", post(reconcile_tick))
+        .route("/v1/reconcile/sweep", post(reconcile_sweep))
 }
 
 async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
@@ -1706,6 +1708,20 @@ async fn queue_list(State(state): State<AppState>) -> Result<Json<QueuesResponse
     let queues = state.db.list_queues().await?;
     info!(count = queues.len(), "listed queues");
     Ok(Json(QueuesResponse { queues }))
+}
+
+async fn reconcile_tick(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let planned = crate::reconciler::reconcile_environments_once(&state).await?;
+    Ok(Json(serde_json::json!({ "planned": planned })))
+}
+
+async fn reconcile_sweep(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let admitted = crate::reconciler::sweep_blocked_plans_once(&state).await?;
+    Ok(Json(serde_json::json!({ "admitted": admitted })))
 }
 
 #[utoipa::path(
