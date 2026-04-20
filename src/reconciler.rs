@@ -5,7 +5,7 @@ use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::start_prepared_invocation;
 use crate::server::AppState;
 use crate::services::{
-    EnvironmentService, InvocationService, code_change_input_fingerprint,
+    EnvironmentService, InvocationService, code_change_input_fingerprint_for_baseline,
     source_state_change_input_fingerprint, target_manifest_input_fingerprint,
 };
 use chrono::Utc;
@@ -173,9 +173,8 @@ async fn automatic_reconcile_backoff_until(
         environment
             .git_commit_sha
             .as_deref()
-            .zip(baseline_run_id)
-            .map(|(desired_commit_sha, baseline_run_id)| {
-                code_change_input_fingerprint(desired_commit_sha, baseline_run_id)
+            .map(|desired_commit_sha| {
+                code_change_input_fingerprint_for_baseline(desired_commit_sha, baseline_run_id)
             })
     } else {
         None
@@ -227,10 +226,9 @@ async fn ensure_target_manifest_for_reconcile_async(
         .db()
         .get_environment_actual_state(&environment.project_ref, &environment.slug)
         .await?
-        .last_successful_run_id
-        .ok_or(AppError::ReconciliationRequiresBaseline)?;
+        .last_successful_run_id;
     let input_fingerprint =
-        target_manifest_input_fingerprint(&code_change_input_fingerprint(
+        target_manifest_input_fingerprint(&code_change_input_fingerprint_for_baseline(
             &desired_commit_sha,
             baseline_run_id,
         ));

@@ -14,7 +14,7 @@ Today the system supports:
 
 ## Binaries
 
-The runtime is split into four binaries:
+The runtime is split into five binaries:
 
 - `dbtx-server`
   - API server
@@ -31,6 +31,9 @@ The runtime is split into four binaries:
   - manifest-prepare coordination
 - `dbtx`
   - operator CLI
+- `dbtx-migrate`
+  - direct database migration runner
+  - useful for local bootstrapping and container init flows
 
 ## Architecture
 
@@ -140,7 +143,79 @@ Plans can move through states such as:
 
 ## Running locally
 
-### 1. Start PostgreSQL
+### 1. Fastest path: Docker Compose
+
+From a fresh clone, the default local stack is:
+
+- `postgres`
+- `migrate` (one-shot schema init)
+- `dbtx-server`
+- `dbtx-reconciler`
+- `dbtx-worker`
+
+Start it with:
+
+```bash
+docker compose up --build
+```
+
+That flow:
+
+- starts PostgreSQL on `127.0.0.1:55432`
+- applies all SQL migrations automatically before any app service starts
+- serves the UI at `http://127.0.0.1:8585`
+- starts a default server worker on queue `generic`
+
+Useful commands:
+
+```bash
+docker compose up --build -d
+docker compose logs -f migrate server reconciler worker
+docker compose down
+```
+
+Compose notes:
+
+- the app containers run directly from the checked-out source tree with `cargo run`
+- Rust build caches are stored in named volumes for faster restarts
+- the worker image is Fusion-only and requires a downloadable Fusion binary at build time
+- the worker mounts the host `~/.ssh` directory read-only for SSH git remotes
+
+The default worker build uses the official Fusion installer:
+
+```bash
+curl -fsSL https://public.cdn.getdbt.com/fs/install/install.sh | sh -s -- --update
+```
+
+In compose, that installer is now the default unless you override `DBTX_FUSION_DOWNLOAD_URL` with a different installer script URL.
+
+For private SSH repositories, make sure:
+
+- `~/.ssh` contains the key, config, and `known_hosts` entries needed to reach the remote
+- the mounted keys are readable by the container user
+
+Quick check:
+
+```bash
+ls -la ~/.ssh
+```
+
+Before the first build, create a local env file:
+
+```bash
+cp .env.example .env
+```
+
+Then update `.env` or export the values directly:
+
+```bash
+export DBTX_FUSION_DOWNLOAD_URL=https://public.cdn.getdbt.com/fs/install/install.sh
+docker compose up --build
+```
+
+If `DBTX_FUSION_DOWNLOAD_URL` is unset, compose falls back to the official installer URL above.
+
+### 2. Manual local process flow
 
 Use any PostgreSQL instance reachable by `DBTX_DATABASE_URL`.
 
@@ -150,39 +225,31 @@ Example:
 export DBTX_DATABASE_URL=postgres://dbtx:dbtx@127.0.0.1:55432/dbtx
 ```
 
-For local development, the repo now includes `docker-compose.yml`.
-
-Start only PostgreSQL:
+If you only want Postgres via Docker:
 
 ```bash
 docker compose up -d postgres
 ```
 
-Optionally start the API server and reconciler inside containers as well:
-
-```bash
-docker compose --profile app up -d postgres server reconciler
-```
-
-Notes:
-
-- the compose file is intended for local development, not production deployment
-- `server` and `reconciler` run directly from the checked-out source tree with `cargo run`
-- `dbtx-worker` is intentionally not included there yet because real execution still requires a dbt executable in the runtime environment
-
-### 2. Start the API server
+### 3. Start the API server
 
 ```bash
 DBTX_DATABASE_URL=$DBTX_DATABASE_URL cargo run --bin dbtx-server -- --listen 127.0.0.1:8585
 ```
 
-### 3. Apply migrations
+### 4. Apply migrations
+
+```bash
+DBTX_DATABASE_URL=$DBTX_DATABASE_URL cargo run --bin dbtx-migrate
+```
+
+The older API-driven migration command still exists:
 
 ```bash
 DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run --bin dbtx -- state migrate
 ```
 
-### 4. Start at least one worker
+### 5. Start at least one worker
 
 Remote/server worker example:
 
@@ -202,7 +269,7 @@ Workers can consume multiple queues:
 DBTX_SERVICE_URL=http://127.0.0.1:8585 cargo run --bin dbtx-worker -- --execution-mode server --queue generic --queue analytics
 ```
 
-### 5. Start the reconciler
+### 6. Start the reconciler
 
 ```bash
 DBTX_DATABASE_URL=$DBTX_DATABASE_URL cargo run --bin dbtx-reconciler

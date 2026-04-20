@@ -842,6 +842,58 @@ async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_befo
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
+    let db = TestDatabase::new().await;
+    reset_db(db.pool()).await;
+    let repo = TempProjectRepo::new("proj");
+    let client = DaemonClient::new(db.service_url().to_string());
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let desired_commit = "dddddddddddddddddddddddddddddddddddddddd";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(desired_commit),
+    )
+    .await;
+
+    wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", desired_commit).await;
+
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "remote",
+        desired_commit,
+        &[
+            ("model.pkg.orders", "model", Some("orders-checksum")),
+            ("model.pkg.customers", "model", Some("customers-checksum")),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+
+    let created_plan = wait_for_plan_reason(&client, &project_id, "remote", "code_change").await;
+    let plan = wait_for_plan_status(&client, created_plan.plan_id, PlanStatus::Admitted).await;
+    assert!(plan.admitted_invocation_id.is_some());
+    assert_eq!(
+        plan.selection_spec.as_deref(),
+        Some("full_graph"),
+        "fresh environments should bootstrap with a full-graph initial plan"
+    );
+    assert_eq!(
+        plan.selected_resources,
+        vec![
+            "model.pkg.customers".to_string(),
+            "model.pkg.orders".to_string(),
+        ]
+    );
+    assert_eq!(plan.baseline_run_id, None);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
     let db = TestDatabase::new().await;
     reset_db(db.pool()).await;

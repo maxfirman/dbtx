@@ -4,7 +4,7 @@ This file is for coding agents working in this repository.
 
 ## Project shape
 
-`dbtx` has four binaries:
+`dbtx` has five binaries:
 
 - `dbtx-server`
   - API server
@@ -24,6 +24,9 @@ This file is for coding agents working in this repository.
   - graceful shutdown on SIGINT
 - `dbtx`
   - operator CLI
+- `dbtx-migrate`
+  - direct database migration runner
+  - intended for init/bootstrap flows rather than normal operator use
 
 ## Module structure
 
@@ -80,6 +83,7 @@ Split into domain submodules:
 - Always add schema changes in a new file under `migrations/`.
 - Do not rewrite older migration files unless explicitly instructed.
 - Keep migration names sequential and descriptive.
+- Local container bootstrap uses `dbtx-migrate`; keep it working as a direct DB path independent of the HTTP API.
 
 ### Error handling
 
@@ -188,6 +192,8 @@ Worker / execution:
 - `DBTX_DBT_PATH` — path to dbt executable
 - `DBTX_GIT_CACHE_DIR` — git mirror cache directory
 - `DBTX_WORKER_PATH` — worker binary path
+- `DBTX_FUSION_DOWNLOAD_URL` — optional override for the Fusion-only worker Docker image build; defaults to the official dbt install script
+- local compose mounts the host `~/.ssh` directory into the worker read-only for SSH git access
 
 Reconciliation:
 

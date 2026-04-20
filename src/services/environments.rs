@@ -434,9 +434,7 @@ impl<'a> EnvironmentService<'a> {
         self.acquire_reconcile_lease(environment.id, &lease_owner).await?;
         let result = async {
             let actual_state = self.db.get_environment_actual_state(&project, &slug).await?;
-            let baseline_run_id = actual_state.last_successful_run_id.ok_or(
-                AppError::ReconciliationRequiresBaseline
-            )?;
+            let baseline_run_id = actual_state.last_successful_run_id;
 
             let source_events = self
                 .db
@@ -453,8 +451,10 @@ impl<'a> EnvironmentService<'a> {
                     let desired_commit_sha = environment.git_commit_sha.clone().ok_or(
                         AppError::ReconciliationRequiresCommitSha
                     )?;
-                    let input_fingerprint =
-                        code_change_input_fingerprint(&desired_commit_sha, baseline_run_id);
+                    let input_fingerprint = code_change_input_fingerprint_for_baseline(
+                        &desired_commit_sha,
+                        baseline_run_id,
+                    );
                     if let Some(target_manifest_run_id) = self
                         .db
                         .latest_manifest_run_id_for_commit(
@@ -464,47 +464,70 @@ impl<'a> EnvironmentService<'a> {
                         )
                         .await?
                     {
-                        let target_nodes = self
-                            .db
-                            .load_planning_manifest_nodes(target_manifest_run_id)
-                            .await?;
-                        let baseline_nodes =
-                            self.db.load_planning_manifest_nodes(baseline_run_id).await?;
-                        let target_edges = self.db.load_manifest_edges(target_manifest_run_id).await?;
-                        let current_nodes = self
-                            .db
-                            .load_current_node_state_for_planning(
-                                environment.project_id,
-                                environment.id,
+                        if let Some(baseline_run_id) = baseline_run_id {
+                            let target_nodes = self
+                                .db
+                                .load_planning_manifest_nodes(target_manifest_run_id)
+                                .await?;
+                            let baseline_nodes =
+                                self.db.load_planning_manifest_nodes(baseline_run_id).await?;
+                            let target_edges = self.db.load_manifest_edges(target_manifest_run_id).await?;
+                            let current_nodes = self
+                                .db
+                                .load_current_node_state_for_planning(
+                                    environment.project_id,
+                                    environment.id,
+                                )
+                                .await?;
+                            let selected_resources = plan_code_change_selected_resources(
+                                &baseline_nodes,
+                                &target_nodes,
+                                &target_edges,
+                                &current_nodes,
+                            );
+                            let selection_spec = if selected_resources.is_empty() {
+                                "state_modified_live"
+                            } else {
+                                "state_modified_live_plus"
+                            };
+                            (
+                                "code_change",
+                                input_fingerprint.clone(),
+                                Some(selection_spec.to_string()),
+                                selected_resources,
+                                None,
+                                serde_json::json!({
+                                    "code_drift": true,
+                                    "actual_commit_sha": actual_state.last_successful_commit_sha,
+                                    "desired_commit_sha": desired_commit_sha,
+                                    "source_event_count": source_events.len(),
+                                    "target_manifest_run_id": target_manifest_run_id,
+                                    "planning_mode": "live_state_diff",
+                                }),
                             )
-                            .await?;
-                        let selected_resources = plan_code_change_selected_resources(
-                            &baseline_nodes,
-                            &target_nodes,
-                            &target_edges,
-                            &current_nodes,
-                        );
-                        let selection_spec = if selected_resources.is_empty() {
-                            "state_modified_live"
                         } else {
-                            "state_modified_live_plus"
-                        };
-                        (
-                            "code_change",
-                            input_fingerprint.clone(),
-                            Some(selection_spec.to_string()),
-                            selected_resources,
-                            None,
-                            serde_json::json!({
-                                "code_drift": true,
-                                "actual_commit_sha": actual_state.last_successful_commit_sha,
-                                "desired_commit_sha": desired_commit_sha,
-                                "source_event_count": source_events.len(),
-                                "target_manifest_run_id": target_manifest_run_id,
-                                "planning_mode": "live_state_diff",
-                            }),
-                        )
+                            (
+                                "code_change",
+                                input_fingerprint.clone(),
+                                Some("full_graph".to_string()),
+                                self.db
+                                    .list_manifest_node_unique_ids(target_manifest_run_id)
+                                    .await?,
+                                None,
+                                serde_json::json!({
+                                    "code_drift": true,
+                                    "actual_commit_sha": actual_state.last_successful_commit_sha,
+                                    "desired_commit_sha": desired_commit_sha,
+                                    "source_event_count": source_events.len(),
+                                    "target_manifest_run_id": target_manifest_run_id,
+                                    "planning_mode": "initial_full_graph_no_baseline",
+                                }),
+                            )
+                        }
                     } else {
+                        let Some(baseline_run_id) = baseline_run_id else {
+                            return Err(AppError::ReconciliationRequiresBaseline);
+                        };
                         (
                             "code_change",
                             input_fingerprint,
@@ -521,6 +544,8 @@ impl<'a> EnvironmentService<'a> {
                         )
                     }
                 } else {
+                    let source_baseline_run_id =
+                        baseline_run_id.ok_or(AppError::ReconciliationRequiresBaseline)?;
                     let source_keys: Vec<String> = source_events
                         .iter()
                         .map(|event| event.source_key.clone())
@@ -534,7 +559,10 @@ impl<'a> EnvironmentService<'a> {
                         input_fingerprint,
                         Some("source_downstream".to_string()),
                         self.db
-                            .list_downstream_manifest_node_unique_ids(baseline_run_id, &source_keys)
+                            .list_downstream_manifest_node_unique_ids(
+                                source_baseline_run_id,
+                                &source_keys,
+                            )
                             .await?,
                         source_events.first().map(|event| event.id),
                         serde_json::json!({
@@ -557,7 +585,7 @@ impl<'a> EnvironmentService<'a> {
                     input_fingerprint: &input_fingerprint,
                     target_git_branch: environment.git_branch.as_deref(),
                     target_git_commit_sha: environment.git_commit_sha.as_deref(),
-                    baseline_run_id: Some(baseline_run_id),
+                    baseline_run_id,
                     selection_spec: selection_spec.as_deref(),
                     selected_resources: &selected_resources,
                 })
@@ -572,7 +600,7 @@ impl<'a> EnvironmentService<'a> {
                     environment: &environment,
                     reason,
                     input_fingerprint: &input_fingerprint,
-                    baseline_run_id: Some(baseline_run_id),
+                    baseline_run_id,
                     selection_spec: selection_spec.as_deref(),
                     selected_resources: &selected_resources,
                     source_event_id,
@@ -664,4 +692,3 @@ impl<'a> EnvironmentService<'a> {
     }
 
 }
-

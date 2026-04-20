@@ -10,6 +10,16 @@ pub fn target_manifest_input_fingerprint(target_git_commit_sha: &str) -> String 
     format!("target_manifest:{target_git_commit_sha}")
 }
 
+pub fn code_change_input_fingerprint_for_baseline(
+    desired_commit_sha: &str,
+    baseline_run_id: Option<Uuid>,
+) -> String {
+    match baseline_run_id {
+        Some(baseline_run_id) => code_change_input_fingerprint(desired_commit_sha, baseline_run_id),
+        None => format!("code_change:{desired_commit_sha}:initial"),
+    }
+}
+
 pub fn code_change_input_fingerprint(
     desired_commit_sha: &str,
     baseline_run_id: Uuid,
@@ -626,4 +636,3 @@ impl<'a> InvocationService<'a> {
         }
     }
 }
-

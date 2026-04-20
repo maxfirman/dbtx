@@ -16,23 +16,58 @@ services:
       timeout: 5s
       retries: 10
 
-  server:
-    image: rust:1.89-bookworm
-    profiles: ["app"]
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      target: dev-base
     working_dir: /workspace
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       DBTX_DATABASE_URL: postgres://dbtx:dbtx@postgres:5432/dbtx
+      RUST_LOG: dbtx=info
+    command:
+      - cargo
+      - run
+      - --bin
+      - dbtx-migrate
+    restart: "no"
+    volumes:
+      - .:/workspace
+      - dbtx-cargo-registry:/usr/local/cargo/registry
+      - dbtx-cargo-git:/usr/local/cargo/git
+      - dbtx-target:/workspace/target
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      target: dev-base
+    working_dir: /workspace
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DBTX_DATABASE_URL: postgres://dbtx:dbtx@postgres:5432/dbtx
       DBTX_SECRET_KEY: local-dev-secret-key
       RUST_LOG: dbtx=info
     command:
-      - bash
-      - -lc
-      - cargo run --bin dbtx-server -- --listen 0.0.0.0:8585
+      - cargo
+      - run
+      - --bin
+      - dbtx-server
+      - --
+      - --listen
+      - 0.0.0.0:8585
     ports:
       - "8585:8585"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8585/healthz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     volumes:
       - .:/workspace
       - dbtx-cargo-registry:/usr/local/cargo/registry
@@ -40,25 +75,60 @@ services:
       - dbtx-target:/workspace/target
 
   reconciler:
-    image: rust:1.89-bookworm
-    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      target: dev-base
     working_dir: /workspace
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       DBTX_DATABASE_URL: postgres://dbtx:dbtx@postgres:5432/dbtx
       DBTX_SECRET_KEY: local-dev-secret-key
       RUST_LOG: dbtx=info
     command:
-      - bash
-      - -lc
-      - cargo run --bin dbtx-reconciler
+      - cargo
+      - run
+      - --bin
+      - dbtx-reconciler
     volumes:
       - .:/workspace
       - dbtx-cargo-registry:/usr/local/cargo/registry
       - dbtx-cargo-git:/usr/local/cargo/git
       - dbtx-target:/workspace/target
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      target: worker-dev
+      args:
+        DBTX_FUSION_DOWNLOAD_URL: ${DBTX_FUSION_DOWNLOAD_URL:-https://public.cdn.getdbt.com/fs/install/install.sh}
+    working_dir: /workspace
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      DBTX_SERVICE_URL: http://server:8585
+      DBTX_DBT_PATH: /usr/local/bin/dbt
+      RUST_LOG: dbtx=info
+    command:
+      - cargo
+      - run
+      - --bin
+      - dbtx-worker
+      - --
+      - --execution-mode
+      - server
+      - --queue
+      - generic
+    volumes:
+      - .:/workspace
+      - dbtx-cargo-registry:/usr/local/cargo/registry
+      - dbtx-cargo-git:/usr/local/cargo/git
+      - dbtx-target:/workspace/target
+      - ${HOME}/.ssh:/root/.ssh:ro
 
 volumes:
   dbtx-postgres-data:

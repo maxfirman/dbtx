@@ -281,7 +281,8 @@ pub use projects::ProjectService;
 pub use environments::{EnvironmentService, EnvironmentPlanAdmitPrepared};
 pub use invocations::InvocationService;
 pub use invocations::{
-    code_change_input_fingerprint, source_state_change_input_fingerprint,
+    code_change_input_fingerprint, code_change_input_fingerprint_for_baseline,
+    source_state_change_input_fingerprint,
     target_manifest_input_fingerprint,
 };
 

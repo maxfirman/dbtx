@@ -1,0 +1,7 @@
+.git
+target
+node_modules
+test-results
+playwright-report
+.DS_Store
+warehouse.duckdb
