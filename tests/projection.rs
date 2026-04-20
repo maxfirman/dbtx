@@ -344,7 +344,7 @@ async fn selected_resources_are_tracked_until_node_finish_or_invocation_completi
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn source_state_reconcile_creates_and_admits_plan() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -567,7 +567,7 @@ async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconc
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn newer_source_state_event_after_satisfaction_creates_a_new_plan() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
@@ -2053,13 +2053,13 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
         .await
         .expect("reload third plan")
         .plan;
-    assert_eq!(second_reloaded.status, PlanStatus::Admitted);
-    assert_eq!(third_reloaded.status, PlanStatus::Blocked);
-    assert!(second_reloaded.admitted_invocation_id.is_some());
-    assert_eq!(
-        third_reloaded.blocked_by_invocation_id,
-        second_reloaded.admitted_invocation_id
-    );
+    // After the first plan succeeds and satisfies the source state,
+    // both remaining plans should be completed as noops — there is no
+    // remaining drift to reconcile.
+    assert_eq!(second_reloaded.status, PlanStatus::Completed);
+    assert_eq!(third_reloaded.status, PlanStatus::Completed);
+    assert!(second_reloaded.admitted_invocation_id.is_none());
+    assert!(third_reloaded.admitted_invocation_id.is_none());
 }
 
 #[tokio::test]
@@ -2492,7 +2492,7 @@ async fn manual_admit_after_auto_admit_fails_cleanly() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
-    let db = TestDatabase::new().await;
+    let db = TestDatabase::new_without_reconciler().await;
     reset_db(db.pool()).await;
     let repo = TempProjectRepo::new("proj");
     let client = DaemonClient::new(db.service_url().to_string());
