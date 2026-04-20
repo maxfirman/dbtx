@@ -777,4 +777,67 @@ mod tests {
         };
         assert_eq!(compute_cancel_state(&status), InvocationCancelStateApi::Requested);
     }
+
+    #[test]
+    fn validate_project_mode_accepts_local_and_remote() {
+        use super::validate_project_mode;
+        assert!(validate_project_mode("local").is_ok());
+        assert!(validate_project_mode("remote").is_ok());
+    }
+
+    #[test]
+    fn validate_project_mode_rejects_unknown() {
+        use super::validate_project_mode;
+        assert!(matches!(
+            validate_project_mode("hybrid"),
+            Err(AppError::InvalidProjectMode(m)) if m == "hybrid"
+        ));
+    }
+
+    #[test]
+    fn validate_project_input_requires_project_root_for_remote() {
+        use super::validate_project_input;
+        assert!(validate_project_input("remote", None).is_err());
+        assert!(validate_project_input("remote", Some(".")).is_ok());
+        assert!(validate_project_input("local", None).is_ok());
+    }
+
+    #[test]
+    fn validate_project_input_rejects_absolute_remote_root() {
+        use super::validate_project_input;
+        assert!(validate_project_input("remote", Some("/tmp/proj")).is_err());
+        assert!(validate_project_input("remote", Some("../proj")).is_err());
+    }
+
+    #[test]
+    fn validate_environment_status_accepts_known_values() {
+        use super::validate_environment_status;
+        assert!(validate_environment_status("active").is_ok());
+        assert!(validate_environment_status("archived").is_ok());
+        assert!(validate_environment_status("failed").is_ok());
+        assert!(validate_environment_status("deleting").is_ok());
+    }
+
+    #[test]
+    fn validate_environment_status_rejects_unknown() {
+        use super::validate_environment_status;
+        assert!(matches!(
+            validate_environment_status("pending"),
+            Err(AppError::InvalidEnvironmentStatus(s)) if s == "pending"
+        ));
+    }
+
+    #[test]
+    fn validate_environment_git_metadata_skips_local_projects() {
+        let mut project = remote_project();
+        project.mode = "local".to_string();
+        assert!(validate_environment_git_metadata(&project, "dev", None).is_ok());
+    }
+
+    #[test]
+    fn validate_environment_git_metadata_requires_sha_for_remote() {
+        let project = remote_project();
+        assert!(validate_environment_git_metadata(&project, "dev", None).is_err());
+        assert!(validate_environment_git_metadata(&project, "dev", Some("deadbeef")).is_ok());
+    }
 }

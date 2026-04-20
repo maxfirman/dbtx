@@ -84,3 +84,65 @@ impl DbtChild {
         let _ = self.child.start_kill();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spawn_captures_stdout() {
+        let mut child = DbtChild::spawn("echo", "hello world", &[], Path::new("."))
+            .expect("spawn echo");
+        let line = child.stdout_lines.next_line().await.unwrap();
+        assert_eq!(line.as_deref(), Some("hello world"));
+        let result = child.wait().await.unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stderr_lines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spawn_captures_stderr() {
+        let mut child = DbtChild::spawn(
+            "sh",
+            "-c",
+            &[OsString::from("echo err >&2")],
+            Path::new("."),
+        )
+        .expect("spawn sh");
+        while child.stdout_lines.next_line().await.unwrap().is_some() {}
+        let result = child.wait().await.unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stderr_lines, vec!["err"]);
+    }
+
+    #[tokio::test]
+    async fn spawn_reports_nonzero_exit_code() {
+        let mut child = DbtChild::spawn("sh", "-c", &[OsString::from("exit 42")], Path::new("."))
+            .expect("spawn sh");
+        while child.stdout_lines.next_line().await.unwrap().is_some() {}
+        let result = child.wait().await.unwrap();
+        assert_eq!(result.exit_code, 42);
+    }
+
+    #[tokio::test]
+    async fn spawn_fails_for_missing_executable() {
+        let err = DbtChild::spawn("/nonexistent/binary", "arg", &[], Path::new("."));
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn start_kill_terminates_process() {
+        let mut child = DbtChild::spawn(
+            "sleep",
+            "60",
+            &[],
+            Path::new("."),
+        )
+        .expect("spawn sleep");
+        child.start_kill();
+        // After kill, stdout closes and wait completes
+        while child.stdout_lines.next_line().await.unwrap().is_some() {}
+        let result = child.wait().await.unwrap();
+        assert_ne!(result.exit_code, 0);
+    }
+}

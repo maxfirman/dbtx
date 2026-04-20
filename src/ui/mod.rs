@@ -462,7 +462,7 @@ async fn environment_draft_confirm(
         let mut response = Html(String::new()).into_response();
         response
             .headers_mut()
-            .insert("HX-Redirect", HeaderValue::from_str(&redirect).unwrap());
+            .insert("HX-Redirect", HeaderValue::from_str(&redirect).unwrap_or_else(|_| HeaderValue::from_static("/")));
         Ok(response)
     } else {
         Ok(Redirect::to(&redirect).into_response())

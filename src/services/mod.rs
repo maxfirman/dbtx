@@ -692,7 +692,7 @@ fn short_hash(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        plan_code_change_selected_resources,
+        plan_code_change_selected_resources, plan_source_event_ids,
         parse_release_target_args, validation_worker_queue_from_env,
     };
     use crate::db::{is_valid_git_commit_sha, CurrentNodeStatePlanningRecord, PlanningManifestNodeRecord};
@@ -907,6 +907,41 @@ mod tests {
         let sfp1 = source_state_change_input_fingerprint(&[3, 1, 2]);
         let sfp2 = source_state_change_input_fingerprint(&[1, 2, 3]);
         assert_eq!(sfp1, sfp2); // sorted + deduped
+    }
+
+    #[test]
+    fn plan_source_event_ids_reads_from_metadata_array() {
+        let metadata = serde_json::json!({"source_event_ids": [5, 3, 1]});
+        let ids = plan_source_event_ids(None, &metadata);
+        assert_eq!(ids, vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn plan_source_event_ids_falls_back_to_source_event_id() {
+        let metadata = serde_json::json!({});
+        let ids = plan_source_event_ids(Some(42), &metadata);
+        assert_eq!(ids, vec![42]);
+    }
+
+    #[test]
+    fn plan_source_event_ids_empty_when_no_source() {
+        let metadata = serde_json::json!({});
+        let ids = plan_source_event_ids(None, &metadata);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn plan_source_event_ids_deduplicates() {
+        let metadata = serde_json::json!({"source_event_ids": [3, 3, 1, 1]});
+        let ids = plan_source_event_ids(None, &metadata);
+        assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn plan_source_event_ids_ignores_fallback_when_metadata_present() {
+        let metadata = serde_json::json!({"source_event_ids": [10]});
+        let ids = plan_source_event_ids(Some(99), &metadata);
+        assert_eq!(ids, vec![10]);
     }
 }
 

@@ -5,6 +5,7 @@ use crate::api::{
     InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
 };
 use crate::client::DaemonClient;
+use crate::db::validate_remote_project_root;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::services::read_dbt_project_name_from_root;
@@ -12,7 +13,7 @@ use serde_yaml::Value as YamlValue;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tokio::process::Command as TokioCommand;
 use tracing::{info, warn};
@@ -1262,19 +1263,6 @@ async fn run_git<const N: usize>(cwd: Option<&std::path::Path>, args: [&str; N])
 fn short_hash(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     format!("{digest:x}").chars().take(20).collect()
-}
-
-fn validate_remote_project_root(project_root: &str) -> AppResult<()> {
-    let path = Path::new(project_root);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        Err(AppError::InvalidRemoteProjectRoot(project_root.to_string()))
-    } else {
-        Ok(())
-    }
 }
 
 struct RepoLock {

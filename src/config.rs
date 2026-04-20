@@ -43,7 +43,6 @@ impl RuntimeConfig {
 }
 
 impl InvocationContext {
-    #[allow(dead_code)]
     pub fn from_args(args: &[OsString], inject_json_logging: bool) -> AppResult<Self> {
         let current_dir = env::current_dir().map_err(AppError::Io)?;
         Self::from_args_in_dir(args, inject_json_logging, &current_dir)
