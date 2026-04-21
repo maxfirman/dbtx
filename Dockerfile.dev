@@ -8,6 +8,7 @@ RUN apt-get update \
         curl \
         git \
         jq \
+        ncat \
         openssh-client \
         pkg-config \
         libssl-dev \
