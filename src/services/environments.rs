@@ -574,6 +574,17 @@ impl<'a> EnvironmentService<'a> {
                 };
 
             if selected_resources.is_empty() {
+                if code_drift {
+                    if let Some(ref sha) = environment.git_commit_sha {
+                        self.db
+                            .advance_environment_actual_state_commit(
+                                environment.project_id,
+                                environment.id,
+                                sha,
+                            )
+                            .await?;
+                    }
+                }
                 return Err(AppError::ReconciliationEmptyPlan);
             }
             if let Some(plan) = self

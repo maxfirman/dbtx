@@ -356,6 +356,7 @@ fn should_ignore_reconcile_error(err: &AppError) -> bool {
         err,
         AppError::EnvironmentAlreadyReconciled
             | AppError::ReconciliationInProgress
+            | AppError::ReconciliationEmptyPlan
             | AppError::PlanNotAdmissible(_, _)
     )
 }
@@ -374,6 +375,12 @@ mod tests {
     #[test]
     fn ignores_reconciliation_in_progress_error() {
         let err = AppError::ReconciliationInProgress;
+        assert!(should_ignore_reconcile_error(&err));
+    }
+
+    #[test]
+    fn ignores_empty_plan_error() {
+        let err = AppError::ReconciliationEmptyPlan;
         assert!(should_ignore_reconcile_error(&err));
     }
 

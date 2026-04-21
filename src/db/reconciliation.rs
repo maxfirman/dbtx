@@ -990,4 +990,28 @@ impl Db {
         .map_err(Into::into)
     }
 
+    /// Advance the environment actual state commit SHA without requiring a run.
+    /// Used when a code change produces an empty diff (e.g. noop rollback).
+    pub(crate) async fn advance_environment_actual_state_commit(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        commit_sha: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO environment_actual_state (project_id, environment_id, last_successful_commit_sha, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (project_id, environment_id) DO UPDATE SET
+                last_successful_commit_sha = $3,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(commit_sha)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
