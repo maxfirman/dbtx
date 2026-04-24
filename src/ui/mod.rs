@@ -106,6 +106,25 @@ pub fn router() -> Router<AppState> {
             "/ui/projects/{project_id}/environments/{slug}/rollback",
             post(environment_rollback),
         )
+        .route("/ui/models", get(models_index))
+        .route(
+            "/ui/models/{project_id}/{env_slug}/{unique_id}",
+            get(model_detail),
+        )
+        .route(
+            "/ui/models/{project_id}/{env_slug}/{unique_id}/tab",
+            get(model_tab),
+        )
+        .route(
+            "/ui/models/{project_id}/{env_slug}/{unique_id}/test-history/{test_unique_id}",
+            get(model_test_history),
+        )
+        .route(
+            "/ui/models/{project_id}/{env_slug}/{unique_id}/history-diff",
+            get(model_history_diff),
+        )
+        .route("/ui/assets/lineage.js", get(lineage_js_asset))
+        .route("/ui/assets/lineage.css", get(lineage_css_asset))
 }
 
 #[derive(Debug)]
@@ -2800,6 +2819,765 @@ struct EnvironmentPanelTemplate {
 struct ErrorTemplate<'a> {
     title: &'a str,
     message: &'a str,
+}
+
+// --- Model UI view structs ---
+
+struct ModelFilterSelectView {
+    value: String,
+    label: String,
+    selected: bool,
+}
+
+struct ModelFiltersView {
+    projects: Vec<ModelFilterSelectView>,
+    environments: Vec<ModelFilterSelectView>,
+}
+
+struct ModelSummaryViewItem {
+    name: String,
+    node_path: String,
+    package_name: String,
+    materialized: String,
+    status: String,
+    status_class: String,
+    schema: String,
+    finished_at: String,
+    last_success_at: String,
+    detail_url: String,
+}
+
+struct ModelTabView {
+    label: &'static str,
+    url: String,
+    partial_url: String,
+    active: bool,
+}
+
+struct ModelColumnView {
+    name: String,
+    data_type: String,
+    description: String,
+}
+
+struct ModelExecView {
+    invocation_id: String,
+    invocation_url: String,
+    command: String,
+    status: String,
+    status_class: String,
+    started_at: String,
+    duration: String,
+    git_commit_sha: String,
+}
+
+struct ModelTestView {
+    index: usize,
+    name: String,
+    test_type: String,
+    status: String,
+    status_class: String,
+    finished_at: String,
+    history_url: String,
+}
+
+struct ModelHistoryEntryView {
+    index: usize,
+    git_commit_sha: String,
+    git_url: String,
+    started_at: String,
+    checksum_short: String,
+    prev_checksum: String,
+    prev_checksum_short: String,
+    diff_url: String,
+}
+
+struct DiffLineView {
+    kind: String,
+    text: String,
+}
+
+// --- Model UI template structs ---
+
+#[derive(Template)]
+#[template(path = "models/index.html")]
+struct ModelsPageTemplate {
+    title: &'static str,
+    filters: ModelFiltersView,
+    models: Vec<ModelSummaryViewItem>,
+    needs_selection: bool,
+}
+
+#[derive(Template)]
+#[template(path = "models/show.html")]
+struct ModelDetailTemplate {
+    title: &'static str,
+    project_id: String,
+    project_name: String,
+    environment_slug: String,
+    model_name: String,
+    unique_id: String,
+    project_mode: String,
+    tabs: Vec<ModelTabView>,
+    tab_content_html: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview.html")]
+struct ModelOverviewTemplate {
+    description: String,
+    materialized: String,
+    database: String,
+    schema: String,
+    alias: String,
+    file_path: String,
+    package_name: String,
+    tags: Vec<String>,
+    status: String,
+    status_class: String,
+    columns: Vec<ModelColumnView>,
+    raw_code: String,
+    promoted_raw_code: String,
+    is_stale: bool,
+}
+
+#[derive(Template)]
+#[template(path = "models/_invocations.html")]
+struct ModelInvocationsTemplate {
+    executions: Vec<ModelExecView>,
+}
+
+#[derive(Template)]
+#[template(path = "models/_lineage.html")]
+struct ModelLineageTemplate {
+    lineage_json: String,
+    depth_options: Vec<(i32, bool)>,
+    direction: String,
+    partial_url: String,
+    node_count: usize,
+    project_id: String,
+    environment_slug: String,
+    model_selector: String,
+    project_mode: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_tests.html")]
+struct ModelTestsTemplate {
+    tests: Vec<ModelTestView>,
+}
+
+#[derive(Template)]
+#[template(path = "models/_test_history.html")]
+struct ModelTestHistoryTemplate {
+    executions: Vec<ModelExecView>,
+}
+
+#[derive(Template)]
+#[template(path = "models/_history.html")]
+struct ModelHistoryTemplate {
+    entries: Vec<ModelHistoryEntryView>,
+}
+
+#[derive(Template)]
+#[template(path = "models/_history_diff.html")]
+struct ModelHistoryDiffTemplate {
+    diff_lines: Vec<DiffLineView>,
+}
+
+// --- Model UI helpers ---
+
+const LINEAGE_JS: &str = include_str!("../../lineage-ui/dist/lineage.js");
+const LINEAGE_CSS: &str = include_str!("../../lineage-ui/dist/lineage.css");
+
+#[derive(Debug, Default, Deserialize)]
+struct ModelListQuery {
+    project_id: Option<String>,
+    environment_slug: Option<String>,
+}
+
+async fn models_index(
+    State(state): State<AppState>,
+    Query(query): Query<ModelListQuery>,
+) -> Result<impl IntoResponse, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let projects = db.list_projects().await?;
+
+    // Auto-select first project if none specified
+    let resolved_pid = query
+        .project_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| projects.first().map(|p| p.project_id.as_str()))
+        .map(String::from);
+
+    let mut environments = Vec::new();
+    let mut models = Vec::new();
+    let mut resolved_env_slug: Option<String> = None;
+
+    if let Some(ref pid) = resolved_pid {
+        environments = db.list_environments(pid).await?;
+
+        // Auto-select first environment if none specified or specified one doesn't exist
+        resolved_env_slug = query
+            .environment_slug
+            .as_deref()
+            .filter(|s| !s.is_empty() && environments.iter().any(|e| e.slug == *s))
+            .or_else(|| environments.first().map(|e| e.slug.as_str()))
+            .map(String::from);
+
+        if let Some(ref slug) = resolved_env_slug {
+            if let Some(env) = environments.iter().find(|e| &e.slug == slug)
+                && let Some(project) = projects.iter().find(|p| &p.project_id == pid)
+            {
+                let raw = db.list_models_for_environment(project.id, env.id).await?;
+                models = raw
+                    .iter()
+                    .map(|m| ModelSummaryViewItem {
+                        name: m.node_name.clone().unwrap_or_else(|| m.unique_id.clone()),
+                        node_path: m.node_path.clone().unwrap_or_default(),
+                        package_name: m.package_name.clone().unwrap_or_default(),
+                        materialized: m.materialized.clone().unwrap_or_default(),
+                        status: m.status.clone().unwrap_or("unknown".into()),
+                        status_class: model_status_class(m.status.as_deref().unwrap_or("")).to_string(),
+                        schema: m.relation_schema.clone().unwrap_or_default(),
+                        finished_at: fmt_opt_time(m.finished_at),
+                        last_success_at: fmt_opt_time(m.last_success_at),
+                        detail_url: format!(
+                            "/ui/models/{}/{}/{}",
+                            pid,
+                            slug,
+                            urlencoding::encode(&m.unique_id)
+                        ),
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    let needs_selection = projects.is_empty();
+
+    let filters = ModelFiltersView {
+        projects: projects
+            .iter()
+            .map(|p| ModelFilterSelectView {
+                selected: resolved_pid.as_deref() == Some(&p.project_id),
+                value: p.project_id.clone(),
+                label: p.project_name.clone(),
+            })
+            .collect(),
+        environments: environments
+            .iter()
+            .map(|e| ModelFilterSelectView {
+                selected: resolved_env_slug.as_deref() == Some(&e.slug),
+                value: e.slug.clone(),
+                label: e.slug.clone(),
+            })
+            .collect(),
+    };
+
+    render_template(&ModelsPageTemplate {
+        title: "Models",
+        filters,
+        models,
+        needs_selection,
+    })
+    .map(|html| html.into_response())
+
+    // Note: HTMX requests also get the full page; the template uses
+    // hx-select to extract the section content for cascading filter updates.
+}
+
+async fn lineage_js_asset() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        LINEAGE_JS,
+    )
+}
+
+async fn lineage_css_asset() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css")],
+        LINEAGE_CSS,
+    )
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ModelTabQuery {
+    tab: Option<String>,
+    depth: Option<i32>,
+    direction: Option<String>,
+}
+
+async fn model_detail(
+    State(state): State<AppState>,
+    Path((project_id, env_slug, unique_id)): Path<(String, String, String)>,
+    Query(query): Query<ModelTabQuery>,
+) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let project = db.get_project_by_project_id(&project_id).await?;
+    let env = db.get_environment(&project.project_id, &env_slug).await?;
+    let unique_id = urlencoding::decode(&unique_id).unwrap_or_default().to_string();
+
+    let tab = query.tab.as_deref().unwrap_or("overview");
+    let base = format!("/ui/models/{}/{}/{}", project_id, env_slug, urlencoding::encode(&unique_id));
+
+    let tab_content_html = render_tab(db, &project, &env, &unique_id, tab, &base, &query).await?;
+
+    let detail = db.get_model_detail(project.id, env.id, &unique_id).await?;
+    let model_name = detail
+        .latest_manifest_node
+        .as_ref()
+        .and_then(|n| n.get("name").and_then(Value::as_str))
+        .unwrap_or(&unique_id)
+        .to_string();
+
+    let tabs = ["overview", "invocations", "lineage", "tests", "history"]
+        .iter()
+        .map(|&t| ModelTabView {
+            label: match t {
+                "overview" => "Overview",
+                "invocations" => "Invocations",
+                "lineage" => "Lineage",
+                "tests" => "Tests",
+                "history" => "History",
+                _ => t,
+            },
+            url: format!("{base}?tab={t}"),
+            partial_url: format!("{base}/tab?tab={t}"),
+            active: t == tab,
+        })
+        .collect();
+
+    render_template(&ModelDetailTemplate {
+        title: "Model",
+        project_id: project_id.clone(),
+        project_name: project.project_name.clone(),
+        environment_slug: env_slug.clone(),
+        model_name,
+        unique_id,
+        project_mode: project.mode.clone(),
+        tabs,
+        tab_content_html,
+    })
+}
+
+async fn model_tab(
+    State(state): State<AppState>,
+    Path((project_id, env_slug, unique_id)): Path<(String, String, String)>,
+    Query(query): Query<ModelTabQuery>,
+) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let project = db.get_project_by_project_id(&project_id).await?;
+    let env = db.get_environment(&project.project_id, &env_slug).await?;
+    let unique_id = urlencoding::decode(&unique_id).unwrap_or_default().to_string();
+    let tab = query.tab.as_deref().unwrap_or("overview");
+    let base = format!("/ui/models/{}/{}/{}", project_id, env_slug, urlencoding::encode(&unique_id));
+    let html = render_tab(db, &project, &env, &unique_id, tab, &base, &query).await?;
+    Ok(Html(html))
+}
+
+async fn render_tab(
+    db: &crate::db::Db,
+    project: &crate::db::ProjectRecord,
+    env: &crate::db::EnvironmentRecord,
+    unique_id: &str,
+    tab: &str,
+    base: &str,
+    query: &ModelTabQuery,
+) -> Result<String, UiError> {
+    match tab {
+        "overview" => render_overview_tab(db, project, env, unique_id).await,
+        "invocations" => render_invocations_tab(db, project, env, unique_id).await,
+        "lineage" => render_lineage_tab(db, project, env, unique_id, base, query).await,
+        "tests" => render_tests_tab(db, project, env, unique_id, base).await,
+        "history" => render_history_tab(db, project, env, unique_id, base).await,
+        _ => render_overview_tab(db, project, env, unique_id).await,
+    }
+}
+
+fn model_status_class(status: &str) -> &'static str {
+    match status {
+        "success" | "pass" => "bg-emerald-100 text-emerald-800",
+        "error" | "fail" => "bg-rose-100 text-rose-800",
+        "skipped" => "bg-slate-100 text-slate-600",
+        _ => "bg-slate-100 text-slate-600",
+    }
+}
+
+async fn render_overview_tab(
+    db: &crate::db::Db,
+    project: &crate::db::ProjectRecord,
+    env: &crate::db::EnvironmentRecord,
+    unique_id: &str,
+) -> Result<String, UiError> {
+    let detail = db.get_model_detail(project.id, env.id, unique_id).await?;
+    let node = detail.latest_manifest_node.as_ref();
+    let promoted = detail.promoted_manifest_node.as_ref();
+
+    let latest_checksum = node
+        .and_then(|n| n.get("checksum").and_then(|c| c.get("checksum")).and_then(Value::as_str));
+    let promoted_checksum = promoted
+        .and_then(|n| n.get("checksum").and_then(|c| c.get("checksum")).and_then(Value::as_str));
+    let is_stale = match (latest_checksum, promoted_checksum) {
+        (Some(l), Some(p)) => l != p,
+        (Some(_), None) => true,
+        _ => false,
+    };
+
+    let empty = Value::Object(Default::default());
+    let n = node.unwrap_or(&empty);
+
+    let columns_obj = n.get("columns").and_then(Value::as_object);
+    let columns: Vec<ModelColumnView> = columns_obj
+        .into_iter()
+        .flat_map(|cols| cols.values())
+        .map(|col| ModelColumnView {
+            name: extract_str(col, "name"),
+            data_type: extract_str(col, "data_type"),
+            description: extract_str(col, "description"),
+        })
+        .collect();
+
+    let tags: Vec<String> = n
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(String::from)
+        .collect();
+
+    let materialized = n
+        .get("config")
+        .and_then(|c| c.get("materialized"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let status = detail.status.as_deref().unwrap_or("unknown");
+
+    let promoted_raw_code = if is_stale {
+        promoted
+            .and_then(|p| p.get("raw_code").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    ModelOverviewTemplate {
+        description: extract_str(n, "description"),
+        materialized,
+        database: extract_str(n, "database"),
+        schema: extract_str(n, "schema"),
+        alias: extract_str(n, "alias"),
+        file_path: extract_str(n, "original_file_path"),
+        package_name: extract_str(n, "package_name"),
+        tags,
+        status: status.to_string(),
+        status_class: model_status_class(status).to_string(),
+        columns,
+        raw_code: n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string(),
+        promoted_raw_code,
+        is_stale,
+    }
+    .render()
+    .map_err(|e| UiError(AppError::Internal(e.to_string())))
+}
+
+async fn render_invocations_tab(
+    db: &crate::db::Db,
+    project: &crate::db::ProjectRecord,
+    env: &crate::db::EnvironmentRecord,
+    unique_id: &str,
+) -> Result<String, UiError> {
+    let execs = db.get_model_node_executions(project.id, env.id, unique_id, 50).await?;
+    let executions = execs.iter().map(build_exec_view).collect();
+    ModelInvocationsTemplate { executions }
+        .render()
+        .map_err(|e| UiError(AppError::Internal(e.to_string())))
+}
+
+fn build_exec_view(e: &crate::db::ModelNodeExecutionRecord) -> ModelExecView {
+    let status = e.status.as_deref().unwrap_or("unknown");
+    ModelExecView {
+        invocation_id: e.invocation_id.map(|id| id.to_string()).unwrap_or_default(),
+        invocation_url: e.invocation_id.map(|id| format!("/ui/invocations/{id}")).unwrap_or_default(),
+        command: e.command.clone(),
+        status: status.to_string(),
+        status_class: model_status_class(status).to_string(),
+        started_at: fmt_opt_time(e.started_at),
+        duration: fmt_duration(e.execution_time_seconds),
+        git_commit_sha: e.git_commit_sha.as_deref().map(short_hash).unwrap_or_default(),
+    }
+}
+
+fn fmt_opt_time(t: Option<chrono::DateTime<Utc>>) -> String {
+    t.map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_default()
+}
+
+async fn render_lineage_tab(
+    db: &crate::db::Db,
+    project: &crate::db::ProjectRecord,
+    env: &crate::db::EnvironmentRecord,
+    unique_id: &str,
+    base: &str,
+    query: &ModelTabQuery,
+) -> Result<String, UiError> {
+    let depth = query.depth.unwrap_or(2).clamp(1, 5);
+    let direction = query.direction.as_deref().unwrap_or("both");
+    let lineage = db.get_model_lineage(project.id, env.id, unique_id, depth, direction).await?;
+
+    let base_url = format!("/ui/models/{}/{}", project.project_id, env.slug);
+
+    let test_ids: std::collections::HashSet<&str> = lineage
+        .nodes.iter()
+        .filter(|n| n.resource_type.as_deref() == Some("test"))
+        .map(|n| n.unique_id.as_str())
+        .collect();
+    let mut test_counts: std::collections::HashMap<&str, (u32, u32)> =
+        std::collections::HashMap::new();
+    for (parent, child) in &lineage.edges {
+        if test_ids.contains(child.as_str()) {
+            if let Some(tn) = lineage.nodes.iter().find(|n| n.unique_id == *child) {
+                let e = test_counts.entry(parent.as_str()).or_insert((0, 0));
+                match tn.status.as_deref() {
+                    Some("pass" | "success") => e.0 += 1,
+                    Some("fail" | "error") => e.1 += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let nodes_json: Vec<Value> = lineage.nodes.iter()
+        .filter(|n| !test_ids.contains(n.unique_id.as_str()))
+        .map(|n| {
+            let (pass, fail) = test_counts.get(n.unique_id.as_str()).copied().unwrap_or((0, 0));
+            serde_json::json!({
+                "id": n.unique_id,
+                "data": {
+                    "label": n.name.as_deref().unwrap_or(&n.unique_id),
+                    "name": n.name,
+                    "resource_type": n.resource_type,
+                    "status": n.status,
+                    "materialized": n.materialized,
+                    "package_name": n.package_name,
+                    "testsPassing": pass,
+                    "testsFailing": fail,
+                }
+            })
+        }).collect();
+
+    let edges_json: Vec<Value> = lineage.edges.iter()
+        .filter(|(s, t)| !test_ids.contains(s.as_str()) && !test_ids.contains(t.as_str()))
+        .map(|(src, tgt)| {
+            serde_json::json!({
+                "id": format!("{src}->{tgt}"),
+                "source": src,
+                "target": tgt,
+            })
+        }).collect();
+
+    let lineage_data = serde_json::json!({
+        "nodes": nodes_json,
+        "edges": edges_json,
+        "currentNodeId": unique_id,
+        "baseUrl": base_url,
+    });
+
+    ModelLineageTemplate {
+        lineage_json: lineage_data.to_string(),
+        depth_options: (1..=5).map(|d| (d, d == depth)).collect(),
+        direction: direction.to_string(),
+        partial_url: format!("{base}/tab"),
+        node_count: nodes_json.len(),
+        project_id: project.project_id.clone(),
+        environment_slug: env.slug.clone(),
+        model_selector: nodes_json.iter()
+            .filter_map(|n| n.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(" "),
+        project_mode: project.mode.clone(),
+    }
+    .render()
+    .map_err(|e| UiError(AppError::Internal(e.to_string())))
+}
+
+fn fmt_duration(seconds: Option<f64>) -> String {
+    match seconds {
+        Some(s) if s >= 60.0 => format!("{:.0}m {:.0}s", s / 60.0, s % 60.0),
+        Some(s) => format!("{:.1}s", s),
+        None => String::new(),
+    }
+}
+
+fn short_hash(s: &str) -> String {
+    if s.len() > 8 { s[..8].to_string() } else { s.to_string() }
+}
+
+async fn render_tests_tab(
+    db: &crate::db::Db,
+    project: &crate::db::ProjectRecord,
+    env: &crate::db::EnvironmentRecord,
+    unique_id: &str,
+    base: &str,
+) -> Result<String, UiError> {
+    let raw_tests = db.get_model_tests(project.id, env.id, unique_id).await?;
+    let tests: Vec<ModelTestView> = raw_tests
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let status = t.status.as_deref().unwrap_or("unknown");
+            ModelTestView {
+                index: i,
+                name: t.name.clone().unwrap_or_else(|| t.unique_id.clone()),
+                test_type: t.test_type.clone().unwrap_or_default(),
+                status: status.to_string(),
+                status_class: model_status_class(status).to_string(),
+                finished_at: fmt_opt_time(t.finished_at),
+                history_url: format!(
+                    "{base}/test-history/{}",
+                    urlencoding::encode(&t.unique_id)
+                ),
+            }
+        })
+        .collect();
+    ModelTestsTemplate { tests }
+        .render()
+        .map_err(|e| UiError(AppError::Internal(e.to_string())))
+}
+
+async fn render_history_tab(
+    db: &crate::db::Db,
+    project: &crate::db::ProjectRecord,
+    env: &crate::db::EnvironmentRecord,
+    unique_id: &str,
+    base: &str,
+) -> Result<String, UiError> {
+    let history = db.get_model_history(project.id, env.id, unique_id).await?;
+    let entries: Vec<ModelHistoryEntryView> = history
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let sha = h.git_commit_sha.as_deref().unwrap_or("");
+            let prev_run_id = if i + 1 < history.len() {
+                Some(history[i + 1].run_id)
+            } else {
+                None
+            };
+            ModelHistoryEntryView {
+                index: i,
+                git_commit_sha: short_hash(sha),
+                git_url: git_commit_url(h.git_repo_url.as_deref(), h.git_commit_sha.as_deref()),
+                started_at: h.started_at.format("%Y-%m-%d %H:%M").to_string(),
+                checksum_short: h.checksum.as_deref().map(short_hash).unwrap_or_default(),
+                prev_checksum: h.prev_checksum.clone().unwrap_or_default(),
+                prev_checksum_short: h.prev_checksum.as_deref().map(short_hash).unwrap_or_default(),
+                diff_url: format!(
+                    "{base}/history-diff?run_id={}&prev_run_id={}",
+                    h.run_id,
+                    prev_run_id.map(|id| id.to_string()).unwrap_or_default()
+                ),
+            }
+        })
+        .collect();
+    ModelHistoryTemplate { entries }
+        .render()
+        .map_err(|e| UiError(AppError::Internal(e.to_string())))
+}
+
+async fn model_test_history(
+    State(state): State<AppState>,
+    Path((project_id, env_slug, _unique_id, test_unique_id)): Path<(String, String, String, String)>,
+) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let project = db.get_project_by_project_id(&project_id).await?;
+    let env = db.get_environment(&project.project_id, &env_slug).await?;
+    let test_uid = urlencoding::decode(&test_unique_id).unwrap_or_default().to_string();
+    let execs = db.get_model_node_executions(project.id, env.id, &test_uid, 20).await?;
+    let executions = execs.iter().map(build_exec_view).collect();
+    render_template(&ModelTestHistoryTemplate { executions })
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryDiffQuery {
+    run_id: Uuid,
+    prev_run_id: Option<Uuid>,
+}
+
+async fn model_history_diff(
+    State(state): State<AppState>,
+    Path((_project_id, _env_slug, unique_id)): Path<(String, String, String)>,
+    Query(query): Query<HistoryDiffQuery>,
+) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    let unique_id = urlencoding::decode(&unique_id).unwrap_or_default().to_string();
+    let new_code = db.get_model_history_raw_code(query.run_id, &unique_id).await?.unwrap_or_default();
+    let old_code = match query.prev_run_id {
+        Some(prev) if prev != Uuid::nil() => {
+            db.get_model_history_raw_code(prev, &unique_id).await?.unwrap_or_default()
+        }
+        _ => String::new(),
+    };
+    let diff_lines = compute_diff(&old_code, &new_code);
+    render_template(&ModelHistoryDiffTemplate { diff_lines })
+}
+
+fn git_commit_url(repo_url: Option<&str>, sha: Option<&str>) -> String {
+    match (repo_url, sha) {
+        (Some(url), Some(sha)) if !url.is_empty() && !sha.is_empty() => {
+            let base = url.trim_end_matches(".git");
+            format!("{base}/commit/{sha}")
+        }
+        _ => String::new(),
+    }
+}
+
+fn extract_str(v: &Value, key: &str) -> String {
+    v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+fn compute_diff(old: &str, new: &str) -> Vec<DiffLineView> {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut result = Vec::new();
+    let max = old_lines.len().max(new_lines.len());
+    let mut oi = 0;
+    let mut ni = 0;
+    while oi < old_lines.len() || ni < new_lines.len() {
+        if oi < old_lines.len() && ni < new_lines.len() && old_lines[oi] == new_lines[ni] {
+            result.push(DiffLineView { kind: "same".into(), text: old_lines[oi].to_string() });
+            oi += 1;
+            ni += 1;
+        } else if oi < old_lines.len()
+            && (ni >= new_lines.len() || (ni + 1 < new_lines.len() && new_lines[ni + 1..].contains(&old_lines[oi])))
+        {
+            // Check if old line appears later in new — if so, new lines were added
+            if ni < new_lines.len() && !old_lines[oi..].contains(&new_lines[ni]) {
+                result.push(DiffLineView { kind: "add".into(), text: new_lines[ni].to_string() });
+                ni += 1;
+            } else {
+                result.push(DiffLineView { kind: "remove".into(), text: old_lines[oi].to_string() });
+                oi += 1;
+            }
+        } else if ni < new_lines.len() {
+            result.push(DiffLineView { kind: "add".into(), text: new_lines[ni].to_string() });
+            ni += 1;
+        } else {
+            result.push(DiffLineView { kind: "remove".into(), text: old_lines[oi].to_string() });
+            oi += 1;
+        }
+        if result.len() > max + 100 { break; } // safety
+    }
+    let _ = max; // suppress unused
+    result
 }
 
 #[cfg(test)]

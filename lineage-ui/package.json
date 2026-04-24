@@ -1,0 +1,18 @@
+{
+  "name": "dbtx-lineage-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@xyflow/svelte": "^1.0.0",
+    "@dagrejs/dagre": "^1.1.4",
+    "svelte": "^5.28.2"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "vite": "^6.3.3"
+  }
+}

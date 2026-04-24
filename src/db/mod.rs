@@ -117,6 +117,7 @@ mod environments;
 mod reconciliation;
 mod invocations;
 mod runs;
+mod models;
 
 
 fn null_if_empty(value: &str) -> Option<&str> {

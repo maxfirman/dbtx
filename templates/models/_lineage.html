@@ -1,0 +1,53 @@
+<div class="space-y-4">
+  <div class="flex items-end justify-between gap-4">
+    <form class="flex items-end gap-4"
+          hx-get="{{ partial_url }}"
+          hx-target="#tab-content"
+          hx-swap="innerHTML"
+          hx-trigger="change delay:100ms">
+      <input type="hidden" name="tab" value="lineage">
+      <div class="text-sm text-slate-600">
+        <span class="mb-1 block">Depth</span>
+        <select name="depth" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
+          {% for d in depth_options %}
+          <option value="{{ d.0 }}" {% if d.1 %}selected{% endif %}>{{ d.0 }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="text-sm text-slate-600">
+        <span class="mb-1 block">Direction</span>
+        <select name="direction" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
+          <option value="both" {% if direction == "both" %}selected{% endif %}>Both</option>
+          <option value="ancestors" {% if direction == "ancestors" %}selected{% endif %}>Ancestors</option>
+          <option value="descendants" {% if direction == "descendants" %}selected{% endif %}>Descendants</option>
+        </select>
+      </div>
+    </form>
+    {% if project_mode == "remote" && node_count > 0 %}
+    <div class="relative" x-data="{ open: false, loading: false }">
+      <div class="flex">
+        <button
+          type="button"
+          class="rounded-l-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+          :disabled="loading"
+          @click="loading=true; fetch('/v1/invocations', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ command:'build', args:['-s','{{ model_selector }}'], project_id:'{{ project_id }}', environment_slug:'{{ environment_slug }}' }) }).then(r=>r.json()).then(d=>{ window.location.href='/ui/invocations/'+d.invocation_id; }).catch(()=>{ loading=false; })"
+          x-text="loading ? 'Starting…' : 'Build All ({{ node_count }})'"
+        >Build All ({{ node_count }})</button>
+        <button type="button" @click="open=!open" class="rounded-r-lg border-l border-slate-700 bg-slate-900 px-2 py-2 text-white hover:bg-slate-700">
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 20 20"><path d="M6 8l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div x-show="open" @click.outside="open=false" x-cloak class="absolute right-0 z-10 mt-1 w-56 rounded-lg border border-slate-200 bg-white py-1 shadow-lg">
+        <button
+          type="button"
+          class="w-full px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+          @click="open=false; loading=true; fetch('/v1/invocations', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ command:'build', args:['--full-refresh','-s','{{ model_selector }}'], project_id:'{{ project_id }}', environment_slug:'{{ environment_slug }}' }) }).then(r=>r.json()).then(d=>{ window.location.href='/ui/invocations/'+d.invocation_id; }).catch(()=>{ loading=false; })"
+        >Build All with --full-refresh</button>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div id="lineage-root" class="rounded-xl border border-slate-200 bg-white shadow-sm" style="height:500px;"></div>
+  <script type="dbtx/lineage-data">{{ lineage_json|safe }}</script>
+</div>

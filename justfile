@@ -10,6 +10,10 @@ default:
 build:
     cargo build
 
+build-lineage:
+    npm --prefix lineage-ui install
+    npm --prefix lineage-ui run build
+
 server:
     DBTX_DATABASE_URL={{database_url}} cargo run --bin dbtx-server -- --listen {{listen}}
 

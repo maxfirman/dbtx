@@ -1,0 +1,36 @@
+{% if executions.is_empty() %}
+<div class="py-12 text-center text-sm text-slate-500">No executions recorded for this model.</div>
+{% else %}
+<div class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+  <table class="min-w-full divide-y divide-slate-200 text-sm">
+    <thead class="bg-slate-50 text-left text-slate-500">
+      <tr>
+        <th class="px-5 py-3 font-medium">Invocation</th>
+        <th class="px-5 py-3 font-medium">Command</th>
+        <th class="px-5 py-3 font-medium">Status</th>
+        <th class="px-5 py-3 font-medium">Started</th>
+        <th class="px-5 py-3 font-medium">Duration</th>
+        <th class="px-5 py-3 font-medium">Commit</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100 bg-white">
+      {% for exec in executions %}
+      <tr>
+        <td class="px-5 py-3">
+          {% if !exec.invocation_url.is_empty() %}
+          <a href="{{ exec.invocation_url }}" class="font-mono text-xs text-slate-700 hover:text-slate-900">{{ exec.invocation_id }}</a>
+          {% else %}
+          <span class="font-mono text-xs text-slate-400">—</span>
+          {% endif %}
+        </td>
+        <td class="px-5 py-3 text-slate-600">{{ exec.command }}</td>
+        <td class="px-5 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ exec.status_class }}">{{ exec.status }}</span></td>
+        <td class="px-5 py-3 text-slate-600">{{ exec.started_at }}</td>
+        <td class="px-5 py-3 text-slate-600">{{ exec.duration }}</td>
+        <td class="px-5 py-3 font-mono text-xs text-slate-600">{{ exec.git_commit_sha }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

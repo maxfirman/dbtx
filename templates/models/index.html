@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-8">
+  <div>
+    <h1 class="text-3xl font-semibold tracking-tight">Models</h1>
+    <p class="mt-2 text-sm text-slate-600">Browse dbt models across projects and environments.</p>
+  </div>
+
+  <section id="models-section" class="rounded-xl border border-slate-200 bg-white shadow-sm">
+    <div class="border-b border-slate-200 px-5 py-4">
+      <form id="model-filters"
+            class="grid gap-4 md:grid-cols-2"
+            hx-get="/ui/models"
+            hx-trigger="change delay:100ms"
+            hx-target="#models-section"
+            hx-select="#models-section"
+            hx-swap="outerHTML"
+            hx-push-url="true">
+        <div class="text-sm text-slate-600">
+          <span class="mb-1 block">Project</span>
+          <select name="project_id" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm">
+            {% for p in filters.projects %}
+            <option value="{{ p.value }}" {% if p.selected %}selected{% endif %}>{{ p.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="text-sm text-slate-600">
+          <span class="mb-1 block">Environment</span>
+          <select name="environment_slug" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm">
+            {% for e in filters.environments %}
+            <option value="{{ e.value }}" {% if e.selected %}selected{% endif %}>{{ e.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </form>
+    </div>
+    {% include "models/_results.html" %}
+  </section>
+</div>
+{% endblock %}

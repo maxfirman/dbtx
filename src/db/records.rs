@@ -624,6 +624,86 @@ pub(crate) struct InvocationListFilters<'a> {
     pub(crate) claimed_bys: &'a [String],
 }
 
+// --- Model UI records ---
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct ModelSummaryRecord {
+    pub(crate) unique_id: String,
+    pub(crate) node_name: Option<String>,
+    pub(crate) node_path: Option<String>,
+    pub(crate) resource_type: Option<String>,
+    pub(crate) status: Option<String>,
+    pub(crate) materialized: Option<String>,
+    pub(crate) relation_schema: Option<String>,
+    pub(crate) relation_database: Option<String>,
+    pub(crate) last_success_at: Option<chrono::DateTime<Utc>>,
+    pub(crate) finished_at: Option<chrono::DateTime<Utc>>,
+    pub(crate) execution_time_seconds: Option<f64>,
+    pub(crate) package_name: Option<String>,
+    pub(crate) group: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct ModelDetailRecord {
+    pub(crate) latest_manifest_node: Option<Value>,
+    pub(crate) promoted_manifest_node: Option<Value>,
+    pub(crate) status: Option<String>,
+    pub(crate) last_success_at: Option<chrono::DateTime<Utc>>,
+    pub(crate) finished_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct ModelNodeExecutionRecord {
+    pub(crate) run_id: Uuid,
+    pub(crate) invocation_id: Option<Uuid>,
+    pub(crate) status: Option<String>,
+    pub(crate) started_at: Option<chrono::DateTime<Utc>>,
+    pub(crate) finished_at: Option<chrono::DateTime<Utc>>,
+    pub(crate) execution_time_seconds: Option<f64>,
+    pub(crate) git_commit_sha: Option<String>,
+    pub(crate) command: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LineageNodeRecord {
+    pub(crate) unique_id: String,
+    pub(crate) name: Option<String>,
+    pub(crate) resource_type: Option<String>,
+    pub(crate) package_name: Option<String>,
+    pub(crate) status: Option<String>,
+    pub(crate) materialized: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelLineageRecord {
+    pub(crate) nodes: Vec<LineageNodeRecord>,
+    pub(crate) edges: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct ModelTestRecord {
+    pub(crate) unique_id: String,
+    pub(crate) name: Option<String>,
+    pub(crate) test_type: Option<String>,
+    pub(crate) status: Option<String>,
+    pub(crate) finished_at: Option<chrono::DateTime<Utc>>,
+    pub(crate) last_success_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelHistoryRecord {
+    pub(crate) run_id: Uuid,
+    pub(crate) checksum: Option<String>,
+    pub(crate) prev_checksum: Option<String>,
+    pub(crate) git_commit_sha: Option<String>,
+    pub(crate) git_repo_url: Option<String>,
+    pub(crate) started_at: chrono::DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

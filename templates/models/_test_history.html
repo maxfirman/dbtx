@@ -1,0 +1,30 @@
+{% if executions.is_empty() %}
+<div class="px-5 py-3 text-xs text-slate-400">No execution history.</div>
+{% else %}
+<div class="bg-slate-50 px-5 py-3">
+  <table class="min-w-full text-xs">
+    <thead class="text-left text-slate-400">
+      <tr>
+        <th class="py-1 pr-4">Invocation</th>
+        <th class="py-1 pr-4">Status</th>
+        <th class="py-1 pr-4">Started</th>
+        <th class="py-1 pr-4">Duration</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for exec in executions %}
+      <tr>
+        <td class="py-1 pr-4">
+          {% if !exec.invocation_url.is_empty() %}
+          <a href="{{ exec.invocation_url }}" class="font-mono text-slate-600 hover:text-slate-900">{{ exec.invocation_id }}</a>
+          {% else %}<span class="text-slate-400">—</span>{% endif %}
+        </td>
+        <td class="py-1 pr-4"><span class="rounded-full px-2 py-0.5 text-xs font-medium {{ exec.status_class }}">{{ exec.status }}</span></td>
+        <td class="py-1 pr-4 text-slate-500">{{ exec.started_at }}</td>
+        <td class="py-1 pr-4 text-slate-500">{{ exec.duration }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

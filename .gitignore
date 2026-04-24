@@ -6,3 +6,5 @@ node_modules/
 test-results/
 playwright-report/
 logs/
+lineage-ui/dist/
+lineage-ui/.npmrc

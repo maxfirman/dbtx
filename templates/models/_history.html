@@ -1,0 +1,35 @@
+{% if entries.is_empty() %}
+<div class="py-12 text-center text-sm text-slate-500">No history recorded for this model.</div>
+{% else %}
+<div class="rounded-xl border border-slate-200 bg-white shadow-sm divide-y divide-slate-100">
+  {% for entry in entries %}
+  <div class="px-5 py-4">
+    <div class="flex items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <span class="font-mono text-xs text-slate-700">
+          {% if !entry.git_url.is_empty() %}
+          <a href="{{ entry.git_url }}" target="_blank" class="hover:text-blue-600">{{ entry.git_commit_sha }}</a>
+          {% else %}
+          {{ entry.git_commit_sha }}
+          {% endif %}
+        </span>
+        <span class="text-sm text-slate-500">{{ entry.started_at }}</span>
+      </div>
+      <div class="flex items-center gap-3">
+        {% if !entry.prev_checksum.is_empty() %}
+        <span class="font-mono text-xs text-slate-400">{{ entry.prev_checksum_short }} → {{ entry.checksum_short }}</span>
+        {% else %}
+        <span class="font-mono text-xs text-slate-400">{{ entry.checksum_short }} (initial)</span>
+        {% endif %}
+        <button
+          hx-get="{{ entry.diff_url }}"
+          hx-target="#diff-{{ entry.index }}"
+          hx-swap="innerHTML"
+          class="text-xs text-slate-600 hover:text-slate-900">Diff ▾</button>
+      </div>
+    </div>
+    <div id="diff-{{ entry.index }}"></div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

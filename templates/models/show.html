@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-6">
+  <nav class="flex items-center gap-2 text-sm text-slate-500">
+    <a href="/ui/models" class="hover:text-slate-900">Models</a>
+    <span>›</span>
+    <a href="/ui/models?project_id={{ project_id }}" class="hover:text-slate-900">{{ project_name }}</a>
+    <span>›</span>
+    <a href="/ui/models?project_id={{ project_id }}&environment_slug={{ environment_slug }}" class="hover:text-slate-900">{{ environment_slug }}</a>
+    <span>›</span>
+    <span class="text-slate-900">{{ model_name }}</span>
+  </nav>
+
+  <div class="flex items-start justify-between gap-4">
+    <div>
+      <h1 class="text-3xl font-semibold tracking-tight">{{ model_name }}</h1>
+      <p class="mt-1 font-mono text-sm text-slate-500">{{ unique_id }}</p>
+    </div>
+    {% if project_mode == "remote" %}
+    <div class="relative" x-data="{ open: false, loading: false }">
+      <div class="flex">
+        <button
+          type="button"
+          class="rounded-l-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+          :disabled="loading"
+          @click="loading=true; fetch('/v1/invocations', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ command:'build', args:['-s','{{ unique_id }}'], project_id:'{{ project_id }}', environment_slug:'{{ environment_slug }}' }) }).then(r=>r.json()).then(d=>{ window.location.href='/ui/invocations/'+d.invocation_id; }).catch(()=>{ loading=false; })"
+          x-text="loading ? 'Starting…' : 'Build'"
+        >Build</button>
+        <button type="button" @click="open=!open" class="rounded-r-lg border-l border-slate-700 bg-slate-900 px-2 py-2 text-white hover:bg-slate-700">
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 20 20"><path d="M6 8l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div x-show="open" @click.outside="open=false" x-cloak class="absolute right-0 z-10 mt-1 w-56 rounded-lg border border-slate-200 bg-white py-1 shadow-lg">
+        <button
+          type="button"
+          class="w-full px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+          @click="open=false; loading=true; fetch('/v1/invocations', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ command:'build', args:['--full-refresh','-s','{{ unique_id }}'], project_id:'{{ project_id }}', environment_slug:'{{ environment_slug }}' }) }).then(r=>r.json()).then(d=>{ window.location.href='/ui/invocations/'+d.invocation_id; }).catch(()=>{ loading=false; })"
+        >Build with --full-refresh</button>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="border-b border-slate-200">
+    <nav id="model-tabs" class="-mb-px flex gap-6 text-sm font-medium">
+      {% for tab in tabs %}
+      <a href="{{ tab.url }}"
+         hx-get="{{ tab.partial_url }}"
+         hx-target="#tab-content"
+         hx-swap="innerHTML"
+         hx-push-url="{{ tab.url }}"
+         data-tab="{{ tab.label }}"
+         class="model-tab border-b-2 px-1 py-3 cursor-pointer {% if tab.active %}border-slate-900 text-slate-900{% else %}border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700{% endif %}">
+        {{ tab.label }}
+      </a>
+      {% endfor %}
+    </nav>
+  </div>
+
+  <div id="tab-content">
+    {{ tab_content_html|safe }}
+  </div>
+</div>
+
+<link rel="stylesheet" href="/ui/assets/lineage.css">
+<script src="/ui/assets/lineage.js"></script>
+<script>
+  function dbtxInitLineage() {
+    var dataEl = document.querySelector('script[type="dbtx/lineage-data"]');
+    if (dataEl && window.__dbtxMountLineage) {
+      try { window.__LINEAGE_DATA__ = JSON.parse(dataEl.textContent); } catch(e) { return; }
+      window.__dbtxMountLineage();
+    }
+  }
+  document.getElementById('model-tabs').addEventListener('click', function(e) {
+    var tab = e.target.closest('.model-tab');
+    if (!tab) return;
+    this.querySelectorAll('.model-tab').forEach(function(t) {
+      t.className = t.className
+        .replace('border-slate-900', 'border-transparent')
+        .replace('text-slate-900', 'text-slate-500');
+      if (!t.className.includes('hover:border-slate-300')) {
+        t.className += ' hover:border-slate-300 hover:text-slate-700';
+      }
+    });
+    tab.className = tab.className
+      .replace('border-transparent', 'border-slate-900')
+      .replace('text-slate-500', 'text-slate-900')
+      .replace(' hover:border-slate-300 hover:text-slate-700', '');
+  });
+  document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target && e.detail.target.id === 'tab-content') {
+      setTimeout(dbtxInitLineage, 0);
+    }
+  });
+  dbtxInitLineage();
+</script>
+{% endblock %}
