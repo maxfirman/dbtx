@@ -1,36 +1,62 @@
 {% if tests.is_empty() %}
 <div class="py-12 text-center text-sm text-slate-500">No tests associated with this model.</div>
 {% else %}
-<div class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-  <table class="min-w-full divide-y divide-slate-200 text-sm">
-    <thead class="bg-slate-50 text-left text-slate-500">
-      <tr>
-        <th class="px-5 py-3 font-medium">Test</th>
-        <th class="px-5 py-3 font-medium">Type</th>
-        <th class="px-5 py-3 font-medium">Status</th>
-        <th class="px-5 py-3 font-medium">Last Run</th>
-        <th class="px-5 py-3 font-medium"></th>
-      </tr>
-    </thead>
-    <tbody class="divide-y divide-slate-100 bg-white">
-      {% for test in tests %}
-      <tr>
-        <td class="px-5 py-3 font-mono text-xs">{{ test.name }}</td>
-        <td class="px-5 py-3 text-slate-600">{{ test.test_type }}</td>
-        <td class="px-5 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ test.status_class }}">{{ test.status }}</span></td>
-        <td class="px-5 py-3 text-slate-600">{{ test.finished_at }}</td>
-        <td class="px-5 py-3 text-right">
-          <button
-            hx-get="{{ test.history_url }}"
-            hx-target="#test-history-{{ test.index }}"
-            hx-swap="innerHTML"
-            hx-on::before-request="var t=document.getElementById('test-history-{{ test.index }}'); if(t.innerHTML.trim()){t.innerHTML='';this.textContent='History ▾';event.preventDefault();return;} this.textContent='History ▴';"
-            class="text-xs text-slate-600 hover:text-slate-900">History ▾</button>
-        </td>
-      </tr>
-      <tr><td colspan="5" id="test-history-{{ test.index }}"></td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="space-y-4">
+  {% if project_mode == "remote" %}
+  <div class="flex justify-end">
+    <button
+      type="button"
+      class="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
+      x-data="{ loading: false }"
+      :disabled="loading"
+      @click="loading=true; fetch('/v1/invocations', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ command:'test', args:['-s','{{ all_test_selector }}'], project_id:'{{ project_id }}', environment_slug:'{{ environment_slug }}' }) }).then(r=>r.json()).then(d=>{ window.location.href='/ui/invocations/'+d.invocation_id; }).catch(()=>{ loading=false; })"
+      x-text="loading ? 'Starting…' : 'Execute All ({{ test_count }})'"
+    >Execute All ({{ test_count }})</button>
+  </div>
+  {% endif %}
+  <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+    <table class="min-w-full divide-y divide-slate-200 text-sm">
+      <thead class="bg-slate-50 text-left text-slate-500">
+        <tr>
+          <th class="px-5 py-3 font-medium">Test</th>
+          <th class="px-5 py-3 font-medium">Type</th>
+          <th class="px-5 py-3 font-medium">Status</th>
+          <th class="px-5 py-3 font-medium">Last Run</th>
+          <th class="px-5 py-3 font-medium"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100 bg-white">
+        {% for test in tests %}
+        <tr>
+          <td class="px-5 py-3 font-mono text-xs">{{ test.name }}</td>
+          <td class="px-5 py-3 text-slate-600">{{ test.test_type }}</td>
+          <td class="px-5 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ test.status_class }}">{{ test.status }}</span></td>
+          <td class="px-5 py-3 text-slate-600">{{ test.finished_at }}</td>
+          <td class="px-5 py-3 text-right">
+            <div class="flex items-center justify-end gap-2">
+              {% if project_mode == "remote" %}
+              <button
+                type="button"
+                x-data="{ loading: false }"
+                :disabled="loading"
+                @click="loading=true; fetch('/v1/invocations', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ command:'test', args:['-s','{{ test.unique_id }}'], project_id:'{{ project_id }}', environment_slug:'{{ environment_slug }}' }) }).then(r=>r.json()).then(d=>{ window.location.href='/ui/invocations/'+d.invocation_id; }).catch(()=>{ loading=false; })"
+                x-text="loading ? '…' : 'Execute'"
+                class="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >Execute</button>
+              {% endif %}
+              <button
+                hx-get="{{ test.history_url }}"
+                hx-target="#test-history-{{ test.index }}"
+                hx-swap="innerHTML"
+                hx-on::before-request="var t=document.getElementById('test-history-{{ test.index }}'); if(t.innerHTML.trim()){t.innerHTML='';this.textContent='History ▾';event.preventDefault();return;} this.textContent='History ▴';"
+                class="text-xs text-slate-600 hover:text-slate-900">History ▾</button>
+            </div>
+          </td>
+        </tr>
+        <tr><td colspan="5" id="test-history-{{ test.index }}"></td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 {% endif %}

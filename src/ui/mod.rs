@@ -2873,6 +2873,7 @@ struct ModelExecView {
 
 struct ModelTestView {
     index: usize,
+    unique_id: String,
     name: String,
     test_type: String,
     status: String,
@@ -2939,6 +2940,7 @@ struct ModelOverviewTemplate {
     raw_code: String,
     promoted_raw_code: String,
     is_stale: bool,
+    poll_url: String,
 }
 
 #[derive(Template)]
@@ -2965,6 +2967,11 @@ struct ModelLineageTemplate {
 #[template(path = "models/_tests.html")]
 struct ModelTestsTemplate {
     tests: Vec<ModelTestView>,
+    project_id: String,
+    environment_slug: String,
+    project_mode: String,
+    all_test_selector: String,
+    test_count: usize,
 }
 
 #[derive(Template)]
@@ -3136,18 +3143,27 @@ async fn model_detail(
 
     let tabs = ["overview", "invocations", "lineage", "tests", "history"]
         .iter()
-        .map(|&t| ModelTabView {
-            label: match t {
-                "overview" => "Overview",
-                "invocations" => "Invocations",
-                "lineage" => "Lineage",
-                "tests" => "Tests",
-                "history" => "History",
-                _ => t,
-            },
-            url: format!("{base}?tab={t}"),
-            partial_url: format!("{base}/tab?tab={t}"),
-            active: t == tab,
+        .map(|&t| {
+            let extra = if t == "lineage" {
+                let d = query.depth.unwrap_or(2);
+                let dir = query.direction.as_deref().unwrap_or("both");
+                format!("&depth={d}&direction={dir}")
+            } else {
+                String::new()
+            };
+            ModelTabView {
+                label: match t {
+                    "overview" => "Overview",
+                    "invocations" => "Invocations",
+                    "lineage" => "Lineage",
+                    "tests" => "Tests",
+                    "history" => "History",
+                    _ => t,
+                },
+                url: format!("{base}?tab={t}{extra}"),
+                partial_url: format!("{base}/tab?tab={t}{extra}"),
+                active: t == tab,
+            }
         })
         .collect();
 
@@ -3190,12 +3206,12 @@ async fn render_tab(
     query: &ModelTabQuery,
 ) -> Result<String, UiError> {
     match tab {
-        "overview" => render_overview_tab(db, project, env, unique_id).await,
+        "overview" => render_overview_tab(db, project, env, unique_id, base).await,
         "invocations" => render_invocations_tab(db, project, env, unique_id).await,
         "lineage" => render_lineage_tab(db, project, env, unique_id, base, query).await,
         "tests" => render_tests_tab(db, project, env, unique_id, base).await,
         "history" => render_history_tab(db, project, env, unique_id, base).await,
-        _ => render_overview_tab(db, project, env, unique_id).await,
+        _ => render_overview_tab(db, project, env, unique_id, base).await,
     }
 }
 
@@ -3213,6 +3229,7 @@ async fn render_overview_tab(
     project: &crate::db::ProjectRecord,
     env: &crate::db::EnvironmentRecord,
     unique_id: &str,
+    base: &str,
 ) -> Result<String, UiError> {
     let detail = db.get_model_detail(project.id, env.id, unique_id).await?;
     let node = detail.latest_manifest_node.as_ref();
@@ -3284,6 +3301,7 @@ async fn render_overview_tab(
         raw_code: n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string(),
         promoted_raw_code,
         is_stale,
+        poll_url: format!("{base}/tab?tab=overview"),
     }
     .render()
     .map_err(|e| UiError(AppError::Internal(e.to_string())))
@@ -3436,6 +3454,7 @@ async fn render_tests_tab(
             let status = t.status.as_deref().unwrap_or("unknown");
             ModelTestView {
                 index: i,
+                unique_id: t.unique_id.clone(),
                 name: t.name.clone().unwrap_or_else(|| t.unique_id.clone()),
                 test_type: t.test_type.clone().unwrap_or_default(),
                 status: status.to_string(),
@@ -3448,7 +3467,20 @@ async fn render_tests_tab(
             }
         })
         .collect();
-    ModelTestsTemplate { tests }
+    let all_test_selector = raw_tests
+        .iter()
+        .map(|t| t.unique_id.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let test_count = tests.len();
+    ModelTestsTemplate {
+        tests,
+        project_id: project.project_id.clone(),
+        environment_slug: env.slug.clone(),
+        project_mode: project.mode.clone(),
+        all_test_selector,
+        test_count,
+    }
         .render()
         .map_err(|e| UiError(AppError::Internal(e.to_string())))
 }
