@@ -16,7 +16,6 @@
     is_terminal: boolean;
   }
 
-  const SELECTED_RESOURCES_MARKER = 'DBTX_SELECTED_RESOURCES::';
   const FINISH_EVENTS = new Set([
     'NodeFinished', 'LogModelResult', 'LogSeedResult',
     'LogSnapshotResult', 'LogTestResult', 'LogFreshnessResult',
@@ -28,6 +27,7 @@
   let invocationStartedAt = $state<string | null>(null);
   let isTerminal = $state(false);
   let loading = $state(true);
+  let resourcesFetched = false;
 
   async function fetchTimeline() {
     if (!config?.apiUrl) return;
@@ -37,6 +37,7 @@
       const data: TimelineData = await resp.json();
       if (data.resources.length > 0) {
         resources = data.resources;
+        resourcesFetched = true;
       }
       invocationStartedAt = data.invocation_started_at;
       isTerminal = data.is_terminal;
@@ -51,20 +52,18 @@
   }
 
   function handleSseEvent(event: MessageEvent) {
-    const raw = event.data;
-
-    // Check the raw SSE data string for the marker before parsing
-    if (raw.includes(SELECTED_RESOURCES_MARKER)) {
-      fetchTimeline();
-      return;
-    }
-
     let payload: any;
-    try { payload = JSON.parse(raw); } catch { return; }
+    try { payload = JSON.parse(event.data); } catch { return; }
 
     const uid = payload.node_unique_id;
     const evName = payload.dbt_event_name;
     if (!uid || !evName) return;
+
+    // First NodeStart means selected_resources are in the DB — fetch them
+    if (!resourcesFetched && evName === 'NodeStart') {
+      fetchTimeline();
+      return;
+    }
 
     if (FINISH_EVENTS.has(evName)) {
       const failed = payload.level === 'error' ||
