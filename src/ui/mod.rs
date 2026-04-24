@@ -78,6 +78,7 @@ pub fn router() -> Router<AppState> {
         .route("/ui/invocations/{id}", get(invocation_detail))
         .route("/ui/invocations/{id}/panel", get(invocation_detail_panel))
         .route("/ui/invocations/{id}/cancel", post(invocation_cancel))
+        .route("/v1/invocations/{id}/timeline", get(invocation_timeline))
         .route("/ui/workers", get(workers_index))
         .route("/ui/workers/table", get(workers_table))
         .route("/ui/queues", get(queues_index))
@@ -125,6 +126,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/ui/assets/lineage.js", get(lineage_js_asset))
         .route("/ui/assets/lineage.css", get(lineage_css_asset))
+        .route("/ui/assets/timeline.js", get(timeline_js_asset))
+        .route("/ui/assets/timeline.css", get(timeline_css_asset))
 }
 
 #[derive(Debug)]
@@ -1021,6 +1024,7 @@ async fn invocation_detail(
         initial_log_sequence,
         sse_url: format!("/v1/invocations/{invocation_id}/events"),
         panel_url: format!("/ui/invocations/{invocation_id}/panel"),
+        timeline_api_url: format!("/v1/invocations/{invocation_id}/timeline"),
     })
 }
 
@@ -1047,6 +1051,115 @@ async fn invocation_cancel(
     let invocation_id = parse_uuid(&id)?;
     db.request_cancel_invocation(invocation_id).await?;
     Ok(Redirect::to(&format!("/ui/invocations/{invocation_id}")))
+}
+
+async fn invocation_timeline(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::Json<crate::api::InvocationTimelineResponse>, UiError> {
+    let db = state.db();
+    let invocation_id = parse_uuid(&id)?;
+    let invocation = db.get_invocation_status(invocation_id).await?;
+    let rows = db.get_invocation_timeline_resources(invocation_id).await?;
+
+    let mut edges = Vec::new();
+    if let Some(p) = db
+        .get_invocation_persistence(invocation_id, None, None)
+        .await
+        .ok()
+        && let Some(run_id) = p.run_id
+        && let Ok(e) = db.load_manifest_edges(run_id).await
+    {
+        edges = e;
+    }
+
+    let unique_ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    let sorted = topo_sort_resources(&unique_ids, &edges);
+
+    let resource_map: std::collections::HashMap<_, _> =
+        rows.iter().map(|r| (r.0.as_str(), r)).collect();
+
+    let resources = sorted
+        .iter()
+        .filter_map(|uid| {
+            let r = resource_map.get(uid.as_str())?;
+            let status = match (&r.3, r.4.as_deref()) {
+                (Some(_), Some("completed")) => "success",
+                (Some(_), _) => "error",
+                (None, _) if r.2.is_some() => "running",
+                _ => "pending",
+            };
+            Some(crate::api::TimelineResource {
+                unique_id: r.0.clone(),
+                resource_type: r.1.clone(),
+                status: status.to_string(),
+                started_at: r.2,
+                finished_at: r.3,
+            })
+        })
+        .collect();
+
+    Ok(axum::Json(crate::api::InvocationTimelineResponse {
+        resources,
+        invocation_started_at: Some(invocation.started_at),
+        is_terminal: !matches!(invocation.status, InvocationLifecycleStatus::Running),
+    }))
+}
+
+fn topo_sort_resources(resource_ids: &[&str], edges: &[(String, String)]) -> Vec<String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let id_set: HashSet<&str> = resource_ids.iter().copied().collect();
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for uid in &id_set {
+        in_degree.entry(uid).or_insert(0);
+    }
+
+    for (parent, child) in edges {
+        if id_set.contains(parent.as_str()) && id_set.contains(child.as_str()) {
+            adj.entry(parent.as_str()).or_default().push(child.as_str());
+            *in_degree.entry(child.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    let mut queue: VecDeque<&str> = in_degree
+        .iter()
+        .filter(|(_, deg)| **deg == 0)
+        .map(|(&id, _)| id)
+        .collect();
+    // Sort the initial queue for deterministic output
+    let mut initial: Vec<&str> = queue.drain(..).collect();
+    initial.sort();
+    queue.extend(initial);
+
+    let mut result = Vec::new();
+    while let Some(node) = queue.pop_front() {
+        result.push(node.to_string());
+        if let Some(children) = adj.get(node) {
+            let mut next = Vec::new();
+            for &child in children {
+                if let Some(deg) = in_degree.get_mut(child) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        next.push(child);
+                    }
+                }
+            }
+            next.sort();
+            queue.extend(next);
+        }
+    }
+
+    // Append any resources not in the edge graph
+    for uid in resource_ids {
+        if !result.iter().any(|r| r == uid) {
+            result.push(uid.to_string());
+        }
+    }
+
+    result
 }
 
 #[derive(Debug, Default, Deserialize, Clone, Copy)]
@@ -2751,6 +2864,7 @@ struct InvocationDetailTemplate {
     initial_log_sequence: u64,
     sse_url: String,
     panel_url: String,
+    timeline_api_url: String,
 }
 
 #[derive(Template)]
@@ -2996,6 +3110,8 @@ struct ModelHistoryDiffTemplate {
 
 const LINEAGE_JS: &str = include_str!("../../lineage-ui/dist/lineage.js");
 const LINEAGE_CSS: &str = include_str!("../../lineage-ui/dist/lineage.css");
+const TIMELINE_JS: &str = include_str!("../../timeline-ui/dist/timeline.js");
+const TIMELINE_CSS: &str = include_str!("../../timeline-ui/dist/timeline.css");
 
 #[derive(Debug, Default, Deserialize)]
 struct ModelListQuery {
@@ -3107,6 +3223,20 @@ async fn lineage_css_asset() -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "text/css")],
         LINEAGE_CSS,
+    )
+}
+
+async fn timeline_js_asset() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        TIMELINE_JS,
+    )
+}
+
+async fn timeline_css_asset() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css")],
+        TIMELINE_CSS,
     )
 }
 
@@ -3798,6 +3928,7 @@ mod tests {
             initial_log_sequence: 7,
             sse_url: "/v1/invocations/00000000-0000-0000-0000-000000000000/events".to_string(),
             panel_url: "/ui/invocations/00000000-0000-0000-0000-000000000000/panel".to_string(),
+            timeline_api_url: "/v1/invocations/00000000-0000-0000-0000-000000000000/timeline".to_string(),
         }
         .render()
         .expect("render invocation detail");
@@ -4255,5 +4386,36 @@ mod tests {
         assert!(rendered.contains("Prepare target manifest for bbbbbbbb"));
         assert!(rendered.contains("Blocking Invocation"));
         assert!(rendered.contains("Overlap 2"));
+    }
+
+    #[test]
+    fn topo_sort_orders_parents_before_children() {
+        let ids = vec!["model.pkg.a", "model.pkg.b", "model.pkg.c"];
+        let edges = vec![
+            ("model.pkg.a".to_string(), "model.pkg.b".to_string()),
+            ("model.pkg.b".to_string(), "model.pkg.c".to_string()),
+        ];
+        let sorted = super::topo_sort_resources(&ids, &edges);
+        assert_eq!(sorted, vec!["model.pkg.a", "model.pkg.b", "model.pkg.c"]);
+    }
+
+    #[test]
+    fn topo_sort_handles_no_edges() {
+        let ids = vec!["model.pkg.b", "model.pkg.a"];
+        let edges: Vec<(String, String)> = vec![];
+        let sorted = super::topo_sort_resources(&ids, &edges);
+        // Alphabetical when no edges
+        assert_eq!(sorted, vec!["model.pkg.a", "model.pkg.b"]);
+    }
+
+    #[test]
+    fn topo_sort_ignores_edges_outside_resource_set() {
+        let ids = vec!["model.pkg.b", "model.pkg.c"];
+        let edges = vec![
+            ("model.pkg.a".to_string(), "model.pkg.b".to_string()),
+            ("model.pkg.b".to_string(), "model.pkg.c".to_string()),
+        ];
+        let sorted = super::topo_sort_resources(&ids, &edges);
+        assert_eq!(sorted, vec!["model.pkg.b", "model.pkg.c"]);
     }
 }

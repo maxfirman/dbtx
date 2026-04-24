@@ -855,4 +855,32 @@ impl Db {
         Ok(persistence.project_id.zip(persistence.environment_id))
     }
 
+    pub(crate) async fn get_invocation_timeline_resources(
+        &self,
+        invocation_id: Uuid,
+    ) -> AppResult<Vec<(String, Option<String>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, Option<String>)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT unique_id, resource_type, node_started_at, finished_at, close_reason
+            FROM invocation_selected_resources
+            WHERE invocation_id = $1
+            "#,
+        )
+        .bind(invocation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get("unique_id"),
+                    row.get("resource_type"),
+                    row.get("node_started_at"),
+                    row.get("finished_at"),
+                    row.get("close_reason"),
+                )
+            })
+            .collect())
+    }
+
 }

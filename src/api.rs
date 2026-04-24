@@ -420,3 +420,19 @@ pub struct InvocationEvent {
 pub struct ApiErrorResponse {
     pub error: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TimelineResource {
+    pub unique_id: String,
+    pub resource_type: Option<String>,
+    pub status: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InvocationTimelineResponse {
+    pub resources: Vec<TimelineResource>,
+    pub invocation_started_at: Option<DateTime<Utc>>,
+    pub is_terminal: bool,
+}
