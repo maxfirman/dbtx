@@ -23,7 +23,13 @@
   let rafId: number | null = null;
   let lastFrame = 0;
 
-  const startTime = $derived(invocationStartedAt ? Date.parse(invocationStartedAt) : now);
+  const startTime = $derived.by(() => {
+    let min = Infinity;
+    for (const r of resources) {
+      if (r.started_at) min = Math.min(min, Date.parse(r.started_at));
+    }
+    return min < Infinity ? min : (invocationStartedAt ? Date.parse(invocationStartedAt) : now);
+  });
   const elapsedMs = $derived(Math.max(now - startTime, 1));
 
   function terminalEndTime(): number {
