@@ -13,10 +13,12 @@
     resources = [],
     invocationStartedAt = null,
     isTerminal = false,
+    modelBaseUrl = null,
   }: {
     resources: Resource[];
     invocationStartedAt: string | null;
     isTerminal: boolean;
+    modelBaseUrl: string | null;
   } = $props();
 
   let now = $state(Date.now());
@@ -94,6 +96,22 @@
     return 'bg-slate-200';
   }
 
+  function resourceUrl(r: Resource): string | null {
+    if (!modelBaseUrl) return null;
+    const rt = r.resource_type;
+    if (rt === 'test') {
+      // Link to parent model's Tests tab: find the model this test belongs to
+      // Test unique_ids don't directly encode the parent, so link to the test's own detail
+      const encoded = encodeURIComponent(r.unique_id);
+      return `${modelBaseUrl}/${encoded}?tab=tests`;
+    }
+    if (rt === 'model' || rt === 'seed' || rt === 'snapshot' || rt === 'source') {
+      const encoded = encodeURIComponent(r.unique_id);
+      return `${modelBaseUrl}/${encoded}?tab=overview`;
+    }
+    return null;
+  }
+
   function formatElapsed(ms: number): string {
     const s = Math.floor(ms / 1000);
     const m = Math.floor(s / 60);
@@ -112,7 +130,11 @@
         {#if r.resource_type}
           <span class="gantt-type-badge">{typeBadge(r.resource_type)}</span>
         {/if}
-        <span class="gantt-name">{shortName(r.unique_id)}</span>
+        {#if resourceUrl(r)}
+          <a class="gantt-name gantt-link" href={resourceUrl(r)}>{shortName(r.unique_id)}</a>
+        {:else}
+          <span class="gantt-name">{shortName(r.unique_id)}</span>
+        {/if}
       </div>
       <div class="gantt-bar-col">
         <div class="gantt-track">
@@ -136,4 +158,6 @@
   .gantt-bar { position: absolute; top: 0; height: 100%; border-radius: 0.25rem; min-width: 3px; transition: left 0.15s linear, width 0.15s linear; }
   .gantt-type-badge { display: inline-flex; align-items: center; justify-content: center; width: 1.125rem; height: 1.125rem; border-radius: 0.25rem; background: #e2e8f0; color: #64748b; font-size: 0.625rem; font-weight: 600; margin-right: 0.375rem; flex-shrink: 0; }
   .gantt-name { overflow: hidden; text-overflow: ellipsis; }
+  .gantt-link { color: #334155; text-decoration: none; }
+  .gantt-link:hover { color: #0f172a; text-decoration: underline; }
 </style>

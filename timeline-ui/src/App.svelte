@@ -28,6 +28,7 @@
   let isTerminal = $state(false);
   let loading = $state(true);
   let resourcesFetched = false;
+  let modelBaseUrl = $state<string | null>(null);
 
   async function fetchTimeline() {
     if (!config?.apiUrl) return;
@@ -41,6 +42,7 @@
       }
       invocationStartedAt = data.invocation_started_at;
       isTerminal = data.is_terminal;
+      modelBaseUrl = data.model_base_url ?? null;
     } catch (_) { /* ignore */ }
     loading = false;
   }
@@ -115,5 +117,5 @@
 {:else if resources.length === 0}
   <div class="px-5 py-6 text-sm text-slate-400">No resources tracked for this invocation.</div>
 {:else}
-  <GanttChart {resources} {invocationStartedAt} {isTerminal} />
+  <GanttChart {resources} {invocationStartedAt} {isTerminal} {modelBaseUrl} />
 {/if}

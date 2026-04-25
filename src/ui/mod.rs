@@ -1063,14 +1063,24 @@ async fn invocation_timeline(
     let rows = db.get_invocation_timeline_resources(invocation_id).await?;
 
     let mut edges = Vec::new();
+    let mut model_base_url: Option<String> = None;
     if let Some(p) = db
         .get_invocation_persistence(invocation_id, None, None)
         .await
         .ok()
-        && let Some(run_id) = p.run_id
-        && let Ok(e) = db.load_manifest_edges(run_id).await
     {
-        edges = e;
+        if let Some(run_id) = p.run_id {
+            if let Ok(e) = db.load_manifest_edges(run_id).await {
+                edges = e;
+            }
+        }
+        if let Some(env_id) = p.environment_id {
+            if let Ok(env) = db.get_environment_by_id(env_id).await {
+                model_base_url = Some(format!(
+                    "/ui/models/{}/{}", env.project_ref, env.slug
+                ));
+            }
+        }
     }
 
     let unique_ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
@@ -1103,6 +1113,7 @@ async fn invocation_timeline(
         resources,
         invocation_started_at: Some(invocation.started_at),
         is_terminal: !matches!(invocation.status, InvocationLifecycleStatus::Running),
+        model_base_url,
     }))
 }
 

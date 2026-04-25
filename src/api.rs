@@ -435,4 +435,5 @@ pub struct InvocationTimelineResponse {
     pub resources: Vec<TimelineResource>,
     pub invocation_started_at: Option<DateTime<Utc>>,
     pub is_terminal: bool,
+    pub model_base_url: Option<String>,
 }
