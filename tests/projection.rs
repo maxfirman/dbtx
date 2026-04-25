@@ -717,6 +717,439 @@ async fn periodic_reconciler_creates_and_admits_source_state_plan() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn source_state_event_with_unmatched_source_key_returns_empty_plan() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let repo = TempProjectRepo::new("proj");
+    let client = db.client().clone();
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[("source.pkg.raw_orders", "model.pkg.orders")],
+    )
+    .await;
+
+    // Post a source event for a key that does NOT exist in the manifest
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.nonexistent".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source state event for unmatched key");
+
+    // Reconcile should fail with empty plan — no downstream nodes to run
+    let err = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect_err("unmatched source key should not create a plan");
+    assert!(
+        err.to_string().contains("no selected resources"),
+        "expected empty plan error, got: {err}"
+    );
+
+    // No plans should have been created
+    let plans = client
+        .environment_plan_list(&project_id, "remote")
+        .await
+        .expect("list plans")
+        .plans;
+    assert!(plans.is_empty(), "no plans should exist for unmatched source key");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn two_source_events_for_different_keys_produce_single_plan() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let repo = TempProjectRepo::new("proj");
+    let client = db.client().clone();
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("source.pkg.raw_customers", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+            ("model.pkg.summary", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("source.pkg.raw_customers", "model.pkg.customers"),
+            ("model.pkg.orders", "model.pkg.summary"),
+            ("model.pkg.customers", "model.pkg.summary"),
+        ],
+    )
+    .await;
+
+    // Post events for two different source keys
+    let event_a = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event for raw_orders")
+        .event;
+
+    let event_b = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_customers".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event for raw_customers")
+        .event;
+
+    let plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create reconciliation plan")
+        .plan;
+
+    assert_eq!(plan.reason, "source_state_change");
+    assert_eq!(plan.selection_spec.as_deref(), Some("source_downstream"));
+
+    // Both source trees should be included — all 5 nodes
+    let mut expected = vec![
+        "model.pkg.customers",
+        "model.pkg.orders",
+        "model.pkg.summary",
+        "source.pkg.raw_customers",
+        "source.pkg.raw_orders",
+    ];
+    expected.sort();
+    let mut actual = plan.selected_resources.clone();
+    actual.sort();
+    assert_eq!(actual, expected, "plan should select downstream of both sources");
+    assert_eq!(plan.resource_count, 5);
+
+    // metadata should contain both source event IDs
+    let source_event_ids = plan
+        .metadata
+        .get("source_event_ids")
+        .and_then(|v| v.as_array())
+        .expect("source_event_ids in metadata");
+    let mut ids: Vec<i64> = source_event_ids
+        .iter()
+        .filter_map(|v| v.as_i64())
+        .collect();
+    ids.sort();
+    let mut expected_ids = vec![event_a.id, event_b.id];
+    expected_ids.sort();
+    assert_eq!(ids, expected_ids, "metadata should reference both source events");
+
+    // Only one plan should exist
+    let plans = client
+        .environment_plan_list(&project_id, "remote")
+        .await
+        .expect("list plans")
+        .plans;
+    assert_eq!(plans.len(), 1, "both source events should produce a single plan");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn simultaneous_code_drift_and_source_state_creates_code_plan_then_source_plan() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let repo = TempProjectRepo::new("proj");
+    let client = db.client().clone();
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(desired_commit),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        baseline_commit,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+    // Seed a target manifest for the desired commit (with a changed checksum on orders)
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "remote",
+        desired_commit,
+        &[
+            ("source.pkg.raw_orders", "source", None),
+            ("model.pkg.orders", "model", Some("new-orders-checksum")),
+            ("model.pkg.customers", "model", Some("same-customers")),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("model.pkg.orders", "model.pkg.customers"),
+        ],
+    )
+    .await;
+
+    // Create a source state event while code drift also exists
+    let source_event = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "manual".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source state event")
+        .event;
+
+    // First reconcile should create a code_change plan (code drift takes priority)
+    let code_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create code_change plan")
+        .plan;
+    assert_eq!(code_plan.reason, "code_change");
+    // metadata should note the pending source events
+    assert_eq!(
+        code_plan.metadata.get("source_event_count").and_then(|v| v.as_i64()),
+        Some(1),
+        "code_change plan metadata should record pending source event count"
+    );
+
+    // Admit and complete the code change plan
+    let admitted = client
+        .environment_plan_admit(code_plan.plan_id)
+        .await
+        .expect("admit code_change plan")
+        .plan;
+    let invocation_id = admitted.admitted_invocation_id.expect("admitted invocation id");
+
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim invocation")
+        .expect("invocation claimed");
+    assert_eq!(claim.invocation_id, invocation_id);
+
+    client
+        .invocation_complete(
+            invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id,
+                lease_token: claim.lease_token,
+                completion: sample_execution_completion(InvocationLifecycleStatus::Succeeded, 0),
+            },
+        )
+        .await
+        .expect("complete code_change invocation");
+
+    // The completed invocation created a new baseline run. Seed manifest nodes for it
+    // so the source downstream lookup can find the source node.
+    let new_actual = client
+        .environment_actual_state(&project_id, "remote")
+        .await
+        .expect("load actual state after code change")
+        .actual_state;
+    let new_run_id = new_actual.last_successful_run_id.expect("new baseline run id");
+    sqlx::query(
+        "INSERT INTO manifest_snapshots (run_id, manifest, manifest_size_bytes, checksum) VALUES ($1, '{}'::jsonb, 2, 'post-code-change')",
+    )
+    .bind(new_run_id)
+    .execute(db.pool())
+    .await
+    .expect("seed manifest snapshot for new baseline");
+    for (unique_id, resource_type) in [
+        ("source.pkg.raw_orders", "source"),
+        ("model.pkg.orders", "model"),
+        ("model.pkg.customers", "model"),
+    ] {
+        let name = unique_id.rsplit('.').next().unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO manifest_nodes (
+                run_id, unique_id, resource_type, name, package_name, original_file_path,
+                tags, fqn, config, checksum, database_name, schema_name, alias, relation_name
+            )
+            VALUES ($1, $2, $3, $4, 'pkg', '', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+                    NULL, NULL, NULL, NULL, NULL)
+            "#,
+        )
+        .bind(new_run_id)
+        .bind(unique_id)
+        .bind(resource_type)
+        .bind(name)
+        .execute(db.pool())
+        .await
+        .expect("seed manifest node for new baseline");
+    }
+    for (parent, child) in [
+        ("source.pkg.raw_orders", "model.pkg.orders"),
+        ("model.pkg.orders", "model.pkg.customers"),
+    ] {
+        sqlx::query(
+            "INSERT INTO manifest_edges (run_id, parent_unique_id, child_unique_id) VALUES ($1, $2, $3)",
+        )
+        .bind(new_run_id)
+        .bind(parent)
+        .bind(child)
+        .execute(db.pool())
+        .await
+        .expect("seed manifest edge for new baseline");
+    }
+
+    // Source event should still be unsatisfied (code_change doesn't mark source satisfaction)
+    // Second reconcile should now create a source_state_change plan
+    let source_plan = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect("create source_state_change plan after code change completes")
+        .plan;
+    assert_eq!(source_plan.reason, "source_state_change");
+    assert_eq!(source_plan.source_event_id, Some(source_event.id));
+    assert_eq!(source_plan.selection_spec.as_deref(), Some("source_downstream"));
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn code_drift_with_empty_diff_returns_empty_plan() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let repo = TempProjectRepo::new("proj");
+    let client = db.client().clone();
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(desired_commit),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        baseline_commit,
+        &[
+            ("model.pkg.orders", "model"),
+            ("model.pkg.customers", "model"),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+    // Seed target manifest with identical checksums — no actual changes
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "remote",
+        desired_commit,
+        &[
+            ("model.pkg.orders", "model", None),
+            ("model.pkg.customers", "model", None),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
+    // Mark current node state as reconciled with matching checksums
+    mark_current_node_state_reconciled(db.pool(), &project_id, "remote", "model.pkg.orders", None).await;
+    mark_current_node_state_reconciled(db.pool(), &project_id, "remote", "model.pkg.customers", None).await;
+
+    // Reconcile should detect code drift but find no changed nodes → empty plan
+    let err = client
+        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .await
+        .expect_err("empty diff should not create a plan");
+    assert!(
+        err.to_string().contains("no selected resources"),
+        "expected empty plan error, got: {err}"
+    );
+
+    // Actual state should be advanced to the desired commit (noop advance)
+    let actual = client
+        .environment_actual_state(&project_id, "remote")
+        .await
+        .expect("load actual state after empty diff")
+        .actual_state;
+    assert_eq!(
+        actual.last_successful_commit_sha.as_deref(),
+        Some(desired_commit),
+        "actual state commit should be advanced for noop code drift"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_creates_and_admits_code_change_plan() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");

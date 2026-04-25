@@ -121,10 +121,14 @@ impl ReconstructedManifest {
 }
 
 fn extract_nodes(raw: &Value) -> Vec<ManifestNode> {
-    raw.get("nodes")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|nodes| nodes.iter())
+    ["nodes", "sources"]
+        .iter()
+        .flat_map(|section| {
+            raw.get(section)
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|nodes| nodes.iter())
+        })
         .map(|(unique_id, node)| ManifestNode {
             unique_id: unique_id.clone(),
             resource_type: node
@@ -407,5 +411,34 @@ mod tests {
             reconstructed["nodes"]["model.pkg.a"]["checksum"]["checksum"],
             "old"
         );
+    }
+
+    #[test]
+    fn extract_nodes_includes_sources() {
+        let raw = json!({
+            "nodes": {
+                "model.pkg.orders": {
+                    "resource_type": "model",
+                    "name": "orders",
+                    "package_name": "pkg"
+                }
+            },
+            "sources": {
+                "source.pkg.raw_orders": {
+                    "resource_type": "source",
+                    "name": "raw_orders",
+                    "package_name": "pkg"
+                }
+            },
+            "parent_map": {
+                "model.pkg.orders": ["source.pkg.raw_orders"]
+            }
+        });
+
+        let snapshot = ManifestSnapshot::from_raw(raw);
+        assert_eq!(snapshot.nodes.len(), 2);
+        let source = snapshot.nodes.iter().find(|n| n.unique_id == "source.pkg.raw_orders");
+        assert!(source.is_some(), "source node should be extracted");
+        assert_eq!(source.unwrap().resource_type.as_deref(), Some("source"));
     }
 }

@@ -573,18 +573,16 @@ impl<'a> EnvironmentService<'a> {
                     )
                 };
 
-            if selected_resources.is_empty()
-                && code_drift
-            {
-                if let Some(ref sha) = environment.git_commit_sha {
-                        self.db
-                            .advance_environment_actual_state_commit(
-                                environment.project_id,
-                                environment.id,
-                                sha,
-                            )
-                            .await?;
-                    }
+            if selected_resources.is_empty() {
+                if code_drift && let Some(sha) = &environment.git_commit_sha {
+                    self.db
+                        .advance_environment_actual_state_commit(
+                            environment.project_id,
+                            environment.id,
+                            sha,
+                        )
+                        .await?;
+                }
                 return Err(AppError::ReconciliationEmptyPlan);
             }
             if let Some(plan) = self
@@ -679,11 +677,18 @@ impl<'a> EnvironmentService<'a> {
 
             let project = self.db.get_project_by_id(plan.project_id).await?;
             let environment = self.db.get_environment_by_id(plan.environment_id).await?;
+            let mut args: Vec<OsString> = Vec::new();
+            if !plan.selected_resources.is_empty() {
+                args.push("--select".into());
+                for resource in &plan.selected_resources {
+                    args.push(resource.into());
+                }
+            }
             let prepared = InvocationService::new(self.db)
                 .prepare_remote_execution(
                     invocation_id,
                     InvocationCommand::Build,
-                    Vec::new(),
+                    args,
                     &project.project_id,
                     &environment.slug,
                 )
