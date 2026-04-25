@@ -26,6 +26,14 @@
   const startTime = $derived(invocationStartedAt ? Date.parse(invocationStartedAt) : now);
   const elapsedMs = $derived(Math.max(now - startTime, 1));
 
+  function terminalEndTime(): number {
+    let max = 0;
+    for (const r of resources) {
+      if (r.finished_at) max = Math.max(max, Date.parse(r.finished_at));
+    }
+    return max || Date.now();
+  }
+
   function tick(ts: number) {
     if (ts - lastFrame > 100) {
       lastFrame = ts;
@@ -37,7 +45,9 @@
   }
 
   onMount(() => {
-    if (!isTerminal) {
+    if (isTerminal) {
+      now = terminalEndTime();
+    } else {
       rafId = requestAnimationFrame(tick);
     }
     return () => { if (rafId != null) cancelAnimationFrame(rafId); };
@@ -47,6 +57,7 @@
     if (isTerminal && rafId != null) {
       cancelAnimationFrame(rafId);
       rafId = null;
+      now = terminalEndTime();
     }
   });
 
