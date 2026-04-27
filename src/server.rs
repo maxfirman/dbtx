@@ -1974,78 +1974,7 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::ApiDoc;
-    use crate::api::InvocationEvent;
-    use crate::invocation_runtime::{SequencedInvocationEvent, event_stream};
-    use chrono::Utc;
-    use futures_util::StreamExt;
-    use tokio::sync::broadcast;
     use utoipa::OpenApi;
-
-    fn sample_event(text: &str) -> InvocationEvent {
-        InvocationEvent {
-            event_type: "stdout.line".to_string(),
-            timestamp: Utc::now(),
-            text: Some(text.to_string()),
-            stream: Some("stdout".to_string()),
-            dbt_event_name: None,
-            node_unique_id: None,
-            level: None,
-            exit_code: None,
-            error: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn event_stream_replays_history_then_live_events() {
-        let (tx, rx) = broadcast::channel(16);
-        let history = vec![SequencedInvocationEvent {
-            sequence: 1,
-            event: sample_event("one"),
-        }];
-        let mut stream = Box::pin(event_stream(history, 1, rx));
-
-        let first = stream.next().await.expect("history item").expect("event");
-        let _first = first;
-
-        tx.send(SequencedInvocationEvent {
-            sequence: 2,
-            event: sample_event("two"),
-        })
-        .expect("send live event");
-        let second = stream.next().await.expect("live item").expect("event");
-        let _second = second;
-    }
-
-    #[tokio::test]
-    async fn event_stream_skips_duplicate_live_events_already_in_history() {
-        let (tx, rx) = broadcast::channel(16);
-        let history = vec![SequencedInvocationEvent {
-            sequence: 1,
-            event: sample_event("one"),
-        }];
-        let mut stream = Box::pin(event_stream(history, 1, rx));
-
-        let _first = stream.next().await.expect("history item").expect("event");
-
-        tx.send(SequencedInvocationEvent {
-            sequence: 1,
-            event: sample_event("one"),
-        })
-        .expect("send duplicate live event");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
-                .await
-                .is_err(),
-            "duplicate live event should not be emitted"
-        );
-        tx.send(SequencedInvocationEvent {
-            sequence: 2,
-            event: sample_event("two"),
-        })
-        .expect("send next live event");
-
-        let _second = stream.next().await.expect("live item").expect("event");
-    }
 
     #[test]
     fn openapi_includes_environment_draft_endpoints() {

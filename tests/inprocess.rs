@@ -1261,3 +1261,73 @@ async fn rebuild_accumulates_state_across_multiple_runs_with_different_nodes() {
     assert_eq!(customers.get::<Option<String>, _>("status").as_deref(), Some("success"));
     assert_eq!(customers.get::<Option<String>, _>("checksum").as_deref(), Some("customers_checksum"));
 }
+
+// ── Malformed input tests ──────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn project_draft_rejects_empty_body() {
+    let (app, _pool) = test_app().await;
+    let (status, _) = post_json(&app, "/v1/project-drafts", json!({})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn project_draft_rejects_missing_repo_url() {
+    let (app, _pool) = test_app().await;
+    let (status, _) = post_json(&app, "/v1/project-drafts", json!({
+        "project_root": "."
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn get_nonexistent_project_returns_404() {
+    let (app, _pool) = test_app().await;
+    let (status, _) = get_json(&app, "/v1/projects/prj_does_not_exist").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn get_nonexistent_invocation_returns_404() {
+    let (app, _pool) = test_app().await;
+    let fake_id = uuid::Uuid::new_v4();
+    let (status, _) = get_json(&app, &format!("/v1/invocations/{fake_id}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn source_state_event_rejects_nonexistent_environment() {
+    let (app, _pool) = test_app().await;
+    let (status, _) = post_json(
+        &app,
+        "/v1/projects/prj_missing/environments/dev/source-state-events",
+        json!({
+            "source_key": "raw.orders",
+            "provider": "test"
+        }),
+    ).await;
+    assert!(
+        status == StatusCode::NOT_FOUND || status == StatusCode::UNPROCESSABLE_ENTITY,
+        "expected 404 or 422, got {status}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn reconcile_nonexistent_environment_returns_error() {
+    let (app, _pool) = test_app().await;
+    let (status, _) = post_json(
+        &app,
+        "/v1/projects/prj_missing/environments/dev/reconcile",
+        json!({}),
+    ).await;
+    assert!(
+        status == StatusCode::NOT_FOUND || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "expected error status, got {status}"
+    );
+}

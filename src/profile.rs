@@ -348,6 +348,16 @@ pub fn validate_resolved_profile(adapter_type: &str, resolved: &Value) -> AppRes
 }
 
 pub fn encrypt_json(value: &Value) -> AppResult<Value> {
+    let key = derive_key()?;
+    encrypt_json_with_key(value, &key)
+}
+
+pub fn decrypt_json(value: &Value) -> AppResult<Value> {
+    let key = derive_key()?;
+    decrypt_json_with_key(value, &key)
+}
+
+fn encrypt_json_with_key(value: &Value, key: &[u8; 32]) -> AppResult<Value> {
     if value.is_null() {
         return Ok(json!({}));
     }
@@ -357,9 +367,8 @@ pub fn encrypt_json(value: &Value) -> AppResult<Value> {
         return Ok(json!({}));
     }
 
-    let key = derive_key()?;
     let cipher =
-        Aes256GcmSiv::new_from_slice(&key).map_err(|err| AppError::Encryption(err.to_string()))?;
+        Aes256GcmSiv::new_from_slice(key).map_err(|err| AppError::Encryption(err.to_string()))?;
     let plaintext = serde_json::to_vec(value)?;
     let mut nonce = [0_u8; NONCE_SIZE];
     OsRng.fill_bytes(&mut nonce);
@@ -372,7 +381,7 @@ pub fn encrypt_json(value: &Value) -> AppResult<Value> {
     }))
 }
 
-pub fn decrypt_json(value: &Value) -> AppResult<Value> {
+fn decrypt_json_with_key(value: &Value, key: &[u8; 32]) -> AppResult<Value> {
     if value.is_null() {
         return Ok(json!({}));
     }
@@ -397,9 +406,8 @@ pub fn decrypt_json(value: &Value) -> AppResult<Value> {
         .decode(ciphertext)
         .map_err(|err| AppError::InvalidEncryptedSecret(err.to_string()))?;
 
-    let key = derive_key()?;
     let cipher =
-        Aes256GcmSiv::new_from_slice(&key).map_err(|err| AppError::Encryption(err.to_string()))?;
+        Aes256GcmSiv::new_from_slice(key).map_err(|err| AppError::Encryption(err.to_string()))?;
     let plaintext = cipher
         .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
         .map_err(|err| AppError::Encryption(err.to_string()))?;
@@ -525,18 +533,26 @@ fn read_dbt_project_yaml(project_dir: &Path) -> AppResult<serde_yaml::Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvironmentProfileRecord, LocalTargetProfile, decrypt_json, encrypt_json,
+        EnvironmentProfileRecord, LocalTargetProfile, decrypt_json_with_key, encrypt_json_with_key,
         resolve_runtime_profile,
     };
     use serde_json::json;
+    use sha2::{Digest, Sha256};
+
+    fn test_key(secret: &str) -> [u8; 32] {
+        let digest = Sha256::digest(secret.as_bytes());
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(&digest);
+        key
+    }
 
     #[test]
     fn encrypt_round_trip() {
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
+        let key = test_key("test-key");
         let value = json!({"password": "secret"});
-        let encrypted = encrypt_json(&value).expect("encrypt");
+        let encrypted = encrypt_json_with_key(&value, &key).expect("encrypt");
         assert_ne!(encrypted, value);
-        let decrypted = decrypt_json(&encrypted).expect("decrypt");
+        let decrypted = decrypt_json_with_key(&encrypted, &key).expect("decrypt");
         assert_eq!(decrypted, value);
     }
 
@@ -562,6 +578,9 @@ mod tests {
 
     #[test]
     fn resolves_profile_with_environment_schema_override() {
+        // This test needs DBTX_SECRET_KEY because resolve_runtime_profile calls
+        // decrypt_json which reads from env. We set it once here; this is safe
+        // because the value is idempotent across tests.
         unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
         let store = LocalTargetProfile {
             profile_name: "jaffle".to_string(),
@@ -580,7 +599,7 @@ mod tests {
                 schema_name: "custom".to_string(),
                 threads: store.threads,
                 profile_config: store.profile_config.clone(),
-                profile_secrets: encrypt_json(&store.profile_secrets_plain).expect("encrypt"),
+                profile_secrets: super::encrypt_json(&store.profile_secrets_plain).expect("encrypt"),
             },
         )
         .expect("resolve");
@@ -590,72 +609,62 @@ mod tests {
 
     #[test]
     fn encrypt_null_returns_empty_object() {
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
-        let encrypted = encrypt_json(&serde_json::Value::Null).expect("encrypt null");
+        let key = test_key("test-key");
+        let encrypted = encrypt_json_with_key(&serde_json::Value::Null, &key).expect("encrypt null");
         assert_eq!(encrypted, json!({}));
     }
 
     #[test]
     fn encrypt_empty_object_returns_empty_object() {
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
-        let encrypted = encrypt_json(&json!({})).expect("encrypt empty");
+        let key = test_key("test-key");
+        let encrypted = encrypt_json_with_key(&json!({}), &key).expect("encrypt empty");
         assert_eq!(encrypted, json!({}));
     }
 
     #[test]
     fn decrypt_null_returns_empty_object() {
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
-        let decrypted = decrypt_json(&serde_json::Value::Null).expect("decrypt null");
+        let key = test_key("test-key");
+        let decrypted = decrypt_json_with_key(&serde_json::Value::Null, &key).expect("decrypt null");
         assert_eq!(decrypted, json!({}));
     }
 
     #[test]
     fn encrypt_round_trip_nested_secrets() {
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
+        let key = test_key("test-key");
         let value = json!({"password": "s3cr3t", "token": "abc123", "nested": {"key": "val"}});
-        let encrypted = encrypt_json(&value).expect("encrypt");
+        let encrypted = encrypt_json_with_key(&value, &key).expect("encrypt");
         assert!(encrypted.get("nonce").is_some());
         assert!(encrypted.get("ciphertext").is_some());
-        let decrypted = decrypt_json(&encrypted).expect("decrypt");
+        let decrypted = decrypt_json_with_key(&encrypted, &key).expect("decrypt");
         assert_eq!(decrypted, value);
     }
 
     #[test]
     fn decrypt_with_wrong_key_fails() {
-        // Encrypt with one key, try to decrypt with another.
-        // We use a unique nonce so even if the key matches another test's key,
-        // the ciphertext won't accidentally decrypt.
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "wrong-key-test-encrypt") };
+        let key_a = test_key("wrong-key-test-encrypt");
+        let key_b = test_key("wrong-key-test-decrypt");
         let value = json!({"password": "secret"});
-        let encrypted = encrypt_json(&value).expect("encrypt");
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "wrong-key-test-decrypt") };
-        let result = decrypt_json(&encrypted);
+        let encrypted = encrypt_json_with_key(&value, &key_a).expect("encrypt");
+        let result = decrypt_json_with_key(&encrypted, &key_b);
         assert!(result.is_err());
-        // Restore a stable key for other tests
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
     }
 
     #[test]
     fn decrypt_missing_nonce_fails() {
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
-        let result = decrypt_json(&json!({"ciphertext": "abc"}));
+        let key = test_key("test-key");
+        let result = decrypt_json_with_key(&json!({"ciphertext": "abc"}), &key);
         assert!(result.is_err());
     }
 
     #[test]
     fn decrypt_missing_ciphertext_fails() {
-        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
-        let result = decrypt_json(&json!({"nonce": "abc"}));
+        let key = test_key("test-key");
+        let result = decrypt_json_with_key(&json!({"nonce": "abc"}), &key);
         assert!(result.is_err());
     }
 
     #[test]
     fn encrypt_requires_secret_key() {
-        // This test verifies the error path when DBTX_SECRET_KEY is missing.
-        // We can't safely remove the env var in parallel tests, so we verify
-        // the derive_key function's dependency on the env var indirectly:
-        // if the key is set, encryption succeeds (covered by other tests).
-        // The error variant exists and is returned by derive_key when unset.
         let err = crate::error::AppError::MissingSecretKey;
         assert!(err.to_string().contains("DBTX_SECRET_KEY"));
     }

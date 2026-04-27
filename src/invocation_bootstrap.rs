@@ -330,8 +330,10 @@ async fn wait_for_terminal_invocation(
 
 #[cfg(test)]
 mod tests {
-    use super::invocation_claim_deadline_at;
+    use super::{invocation_claim_deadline_at, map_command_to_service};
     use crate::api::InvocationExecutionModeApi;
+    use crate::api::InvocationCommandApi;
+    use crate::services::InvocationCommand;
     use chrono::Utc;
 
     #[test]
@@ -346,5 +348,19 @@ mod tests {
         let server = invocation_claim_deadline_at(InvocationExecutionModeApi::Server);
         let local = invocation_claim_deadline_at(InvocationExecutionModeApi::Local);
         assert!(server > local);
+    }
+
+    #[test]
+    fn map_command_to_service_maps_all_variants() {
+        assert_eq!(map_command_to_service(InvocationCommandApi::Build).as_str(), InvocationCommand::Build.as_str());
+        assert_eq!(map_command_to_service(InvocationCommandApi::Run).as_str(), InvocationCommand::Run.as_str());
+        assert_eq!(map_command_to_service(InvocationCommandApi::Ls).as_str(), InvocationCommand::Ls.as_str());
+        assert_eq!(map_command_to_service(InvocationCommandApi::Test).as_str(), InvocationCommand::Test.as_str());
+        assert_eq!(map_command_to_service(InvocationCommandApi::Seed).as_str(), InvocationCommand::Seed.as_str());
+        assert_eq!(map_command_to_service(InvocationCommandApi::Release).as_str(), InvocationCommand::Release.as_str());
+        assert_eq!(map_command_to_service(InvocationCommandApi::ProjectValidate).as_str(), InvocationCommand::ProjectValidate.as_str());
+        assert_eq!(map_command_to_service(InvocationCommandApi::EnvironmentPrepare).as_str(), InvocationCommand::EnvironmentPrepare.as_str());
+        assert_eq!(map_command_to_service(InvocationCommandApi::EnvironmentValidate).as_str(), InvocationCommand::EnvironmentValidate.as_str());
+        assert_eq!(map_command_to_service(InvocationCommandApi::ManifestPrepare).as_str(), InvocationCommand::ManifestPrepare.as_str());
     }
 }

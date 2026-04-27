@@ -510,4 +510,61 @@ mod tests {
         assert!(output.status.success(), "git failed");
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
+
+    #[test]
+    fn map_command_returns_expected_dbt_subcommands() {
+        use super::map_command;
+        use crate::api::InvocationCommandApi;
+        assert_eq!(map_command(InvocationCommandApi::Build), "build");
+        assert_eq!(map_command(InvocationCommandApi::Run), "run");
+        assert_eq!(map_command(InvocationCommandApi::Ls), "ls");
+        assert_eq!(map_command(InvocationCommandApi::Test), "test");
+        assert_eq!(map_command(InvocationCommandApi::Seed), "seed");
+        assert_eq!(map_command(InvocationCommandApi::ManifestPrepare), "parse");
+    }
+
+    #[test]
+    fn persists_state_is_true_for_data_commands() {
+        use super::persists_state;
+        use crate::api::InvocationCommandApi;
+        assert!(persists_state(InvocationCommandApi::Build));
+        assert!(persists_state(InvocationCommandApi::Run));
+        assert!(persists_state(InvocationCommandApi::Test));
+        assert!(persists_state(InvocationCommandApi::Seed));
+        assert!(persists_state(InvocationCommandApi::ManifestPrepare));
+    }
+
+    #[test]
+    fn persists_state_is_false_for_non_data_commands() {
+        use super::persists_state;
+        use crate::api::InvocationCommandApi;
+        assert!(!persists_state(InvocationCommandApi::Ls));
+        assert!(!persists_state(InvocationCommandApi::Release));
+        assert!(!persists_state(InvocationCommandApi::ProjectValidate));
+        assert!(!persists_state(InvocationCommandApi::EnvironmentPrepare));
+        assert!(!persists_state(InvocationCommandApi::EnvironmentValidate));
+    }
+
+    #[test]
+    fn short_hash_is_deterministic() {
+        let a = super::git::short_hash("https://github.com/example/repo.git");
+        let b = super::git::short_hash("https://github.com/example/repo.git");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 20);
+    }
+
+    #[test]
+    fn short_hash_differs_for_different_inputs() {
+        let a = super::git::short_hash("https://github.com/example/repo-a.git");
+        let b = super::git::short_hash("https://github.com/example/repo-b.git");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn git_cache_root_respects_env_override() {
+        unsafe { std::env::set_var("DBTX_GIT_CACHE_DIR", "/tmp/test-git-cache") };
+        let root = super::git::git_cache_root().expect("cache root");
+        assert_eq!(root, std::path::PathBuf::from("/tmp/test-git-cache"));
+        unsafe { std::env::remove_var("DBTX_GIT_CACHE_DIR") };
+    }
 }

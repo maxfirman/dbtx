@@ -653,4 +653,53 @@ mod tests {
         assert!(parse_timestamp(Some("")).is_none());
         assert!(parse_timestamp(None).is_none());
     }
+
+    fn make_result_event(event_name: &str, status: &str) -> LogEvent {
+        let raw = format!(
+            r#"{{"info":{{"name":"{event_name}","msg":" Succeeded [  0.07s] model main.orders (table)"}},"data":{{"status":"{status}","node_info":{{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","materialized":"table","node_relation":{{"schema":"main","alias":"orders"}}}}}}}}"#
+        );
+        LogEvent::parse(&raw).expect("event should parse")
+    }
+
+    #[test]
+    fn render_result_line_error_status() {
+        let event = make_result_event("LogModelResult", "error");
+        let rendered = render_result_line(&event, false);
+        assert!(rendered.contains("Failed"), "expected 'Failed' in: {rendered}");
+    }
+
+    #[test]
+    fn render_result_line_fail_status() {
+        let event = make_result_event("LogTestResult", "fail");
+        let rendered = render_result_line(&event, false);
+        assert!(rendered.contains("Failed"), "expected 'Failed' in: {rendered}");
+    }
+
+    #[test]
+    fn render_result_line_skip_status() {
+        let event = make_result_event("LogModelResult", "skipped");
+        let rendered = render_result_line(&event, false);
+        assert!(rendered.contains("Skipped"), "expected 'Skipped' in: {rendered}");
+    }
+
+    #[test]
+    fn render_result_line_warn_status() {
+        let event = make_result_event("LogTestResult", "warn");
+        let rendered = render_result_line(&event, false);
+        assert!(rendered.contains("Warned"), "expected 'Warned' in: {rendered}");
+    }
+
+    #[test]
+    fn render_result_line_success_status() {
+        let event = make_result_event("LogModelResult", "success");
+        let rendered = render_result_line(&event, false);
+        assert!(rendered.contains("Succeeded"), "expected 'Succeeded' in: {rendered}");
+    }
+
+    #[test]
+    fn render_result_line_pass_status() {
+        let event = make_result_event("LogTestResult", "pass");
+        let rendered = render_result_line(&event, false);
+        assert!(rendered.contains("Succeeded"), "expected 'Succeeded' in: {rendered}");
+    }
 }
