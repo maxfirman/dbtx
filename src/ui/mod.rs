@@ -3233,18 +3233,35 @@ const LINEAGE_CSS: &str = include_str!("../../lineage-ui/dist/lineage.css");
 const TIMELINE_JS: &str = include_str!("../../timeline-ui/dist/timeline.js");
 const TIMELINE_CSS: &str = include_str!("../../timeline-ui/dist/timeline.css");
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default)]
 struct ModelListQuery {
     project_id: Option<String>,
     environment_slug: Option<String>,
-    #[serde(default)]
     resource_type: Vec<String>,
+}
+
+fn parse_catalog_filter_query(raw_query: Option<&str>) -> ModelListQuery {
+    let mut query = ModelListQuery::default();
+    let Some(raw) = raw_query else { return query };
+    let Ok(url) = reqwest::Url::parse(&format!("http://localhost/ui/catalog?{raw}")) else {
+        return query;
+    };
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "project_id" => query.project_id = Some(value.into_owned()),
+            "environment_slug" => query.environment_slug = Some(value.into_owned()),
+            "resource_type" => query.resource_type.push(value.into_owned()),
+            _ => {}
+        }
+    }
+    query
 }
 
 async fn models_index(
     State(state): State<AppState>,
-    Query(query): Query<ModelListQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<impl IntoResponse, UiError> {
+    let query = parse_catalog_filter_query(raw_query.as_deref());
     let db = state.db();
     db.require_current_schema().await?;
     let projects = db.list_projects().await?;
@@ -4742,5 +4759,28 @@ mod tests {
         assert_eq!(super::resource_type_from_unique_id("snapshot.pkg.snap"), "snapshot");
         assert_eq!(super::resource_type_from_unique_id("unknown.pkg.x"), "model");
         assert_eq!(super::resource_type_from_unique_id(""), "model");
+    }
+
+    #[test]
+    fn parse_catalog_filter_query_handles_repeated_resource_type() {
+        let query = super::parse_catalog_filter_query(Some(
+            "project_id=prj1&environment_slug=dev&resource_type=model&resource_type=source",
+        ));
+        assert_eq!(query.project_id.as_deref(), Some("prj1"));
+        assert_eq!(query.environment_slug.as_deref(), Some("dev"));
+        assert_eq!(query.resource_type, vec!["model", "source"]);
+    }
+
+    #[test]
+    fn parse_catalog_filter_query_defaults_empty_when_no_resource_type() {
+        let query = super::parse_catalog_filter_query(Some("project_id=prj1"));
+        assert!(query.resource_type.is_empty());
+    }
+
+    #[test]
+    fn parse_catalog_filter_query_handles_none() {
+        let query = super::parse_catalog_filter_query(None);
+        assert!(query.project_id.is_none());
+        assert!(query.resource_type.is_empty());
     }
 }
