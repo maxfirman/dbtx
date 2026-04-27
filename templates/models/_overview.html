@@ -64,9 +64,24 @@
   </div>
 
   {% if !raw_code.is_empty() %}
-  <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-    <h2 class="font-semibold">Code{% if is_stale %} <span class="ml-2 text-xs font-normal text-amber-600">(latest manifest — not yet materialized)</span>{% endif %}</h2>
-    <pre class="mt-4 overflow-x-auto rounded-lg bg-slate-900 p-4 text-sm text-slate-100"><code>{{ raw_code }}</code></pre>
+  <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm" x-data="{ codeTab: sessionStorage.getItem('dbtx-codeTab') || 'source' }">
+    <div class="flex items-center justify-between">
+      <h2 class="font-semibold">Code{% if is_stale %} <span class="ml-2 text-xs font-normal text-amber-600">(latest manifest — not yet materialized)</span>{% endif %}</h2>
+      <div class="flex gap-1 rounded-lg bg-slate-100 p-1">
+        <button type="button" @click="codeTab = 'source'; sessionStorage.setItem('dbtx-codeTab', 'source')" :class="codeTab === 'source' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'" class="rounded-md px-3 py-1 text-xs font-medium transition-colors">Source</button>
+        <button type="button" @click="codeTab = 'compiled'; sessionStorage.setItem('dbtx-codeTab', 'compiled')" :class="codeTab === 'compiled' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'" class="rounded-md px-3 py-1 text-xs font-medium transition-colors">Compiled</button>
+      </div>
+    </div>
+    <div x-show="codeTab === 'source'" class="mt-4 overflow-x-auto rounded-lg border border-slate-200 bg-white p-4 text-sm leading-relaxed">
+      {{ raw_code_html|safe }}
+    </div>
+    <div x-show="codeTab === 'compiled'" x-cloak class="mt-4 overflow-x-auto rounded-lg border border-slate-200">
+      {% if compiled_code.is_empty() %}
+      <div class="flex items-center justify-center py-12 text-sm text-slate-400">Compiled code not available — model has not been executed yet</div>
+      {% else %}
+      <div class="bg-white p-4 text-sm leading-relaxed">{{ compiled_code_html|safe }}</div>
+      {% endif %}
+    </div>
   </section>
   {% endif %}
 

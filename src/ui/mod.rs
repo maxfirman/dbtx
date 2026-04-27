@@ -3066,6 +3066,9 @@ struct ModelOverviewTemplate {
     status_class: String,
     columns: Vec<ModelColumnView>,
     raw_code: String,
+    compiled_code: String,
+    raw_code_html: String,
+    compiled_code_html: String,
     promoted_raw_code: String,
     is_stale: bool,
     poll_url: String,
@@ -3667,6 +3670,10 @@ async fn render_overview_tab(
                 String::new()
             };
             let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, "model", status).await?;
+            let raw_code = n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string();
+            let compiled_code = n.get("compiled_code").and_then(Value::as_str).unwrap_or("").to_string();
+            let raw_code_html = if raw_code.is_empty() { String::new() } else { highlight_sql(&raw_code) };
+            let compiled_code_html = if compiled_code.is_empty() { String::new() } else { highlight_sql(&compiled_code) };
             ModelOverviewTemplate {
                 description: extract_str(n, "description"),
                 materialized,
@@ -3679,7 +3686,10 @@ async fn render_overview_tab(
                 status: status.to_string(),
                 status_class: model_status_class(status).to_string(),
                 columns,
-                raw_code: n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string(),
+                raw_code,
+                compiled_code,
+                raw_code_html,
+                compiled_code_html,
                 promoted_raw_code,
                 is_stale,
                 poll_url,
@@ -3823,6 +3833,36 @@ fn fmt_duration(seconds: Option<f64>) -> String {
 
 fn short_hash(s: &str) -> String {
     if s.len() > 8 { s[..8].to_string() } else { s.to_string() }
+}
+
+fn highlight_sql(code: &str) -> String {
+    use syntect::highlighting::ThemeSet;
+    use syntect::html::highlighted_html_for_string;
+    use syntect::parsing::SyntaxSet;
+
+    let ss = SyntaxSet::load_defaults_newlines();
+    let ts = ThemeSet::load_defaults();
+    let syntax = ss.find_syntax_by_extension("sql").unwrap_or_else(|| ss.find_syntax_plain_text());
+    let theme = &ts.themes["InspiredGitHub"];
+    let inner = match highlighted_html_for_string(code, &ss, syntax, theme) {
+        Ok(html) => {
+            html.strip_prefix("<pre style=\"").and_then(|s| s.find("\">").map(|i| &s[i + 2..]))
+                .and_then(|s| s.strip_suffix("</pre>\n").or_else(|| s.strip_suffix("</pre>")))
+                .unwrap_or(&html).to_string()
+        }
+        Err(_) => code.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"),
+    };
+    let lines: Vec<&str> = inner.split('\n').collect();
+    let count = if lines.last() == Some(&"") { lines.len() - 1 } else { lines.len() };
+    let mut out = String::from("<table class=\"w-full border-collapse\"><tbody>");
+    for (i, line) in lines.iter().enumerate().take(count) {
+        let num = i + 1;
+        out.push_str(&format!(
+            "<tr><td class=\"select-none pr-4 text-right align-top text-slate-300\" style=\"width:1%;white-space:nowrap;\">{num}</td><td><pre class=\"m-0 p-0\" style=\"background:transparent;\">{line}</pre></td></tr>"
+        ));
+    }
+    out.push_str("</tbody></table>");
+    out
 }
 
 async fn render_tests_tab(
