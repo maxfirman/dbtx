@@ -10,6 +10,8 @@
         edges: Array<{ id: string; source: string; target: string }>;
         currentNodeId: string;
         baseUrl: string;
+        depth: number;
+        direction: string;
       };
     }
   }
@@ -52,10 +54,10 @@
   let nodes = $state.raw<Node[]>(initial.nodes);
   let edges = $state.raw<Edge[]>(initial.edges);
 
-  function onNodeClick(_event: MouseEvent | TouchEvent, node: Node) {
+  function onNodeClick(node: Node) {
     if (raw?.baseUrl && node.id !== raw.currentNodeId) {
       const uid = encodeURIComponent(node.id);
-      window.location.href = `${raw.baseUrl}/${uid}?tab=lineage`;
+      window.location.href = `${raw.baseUrl}/${uid}?tab=lineage&depth=${raw.depth}&direction=${encodeURIComponent(raw.direction)}`;
     }
   }
 </script>
@@ -70,7 +72,7 @@
       nodesDraggable={false}
       nodesConnectable={false}
       elementsSelectable={false}
-      onnodeclick={(_event, node) => onNodeClick(_event, node)}
+      onnodeclick={({ node }) => onNodeClick(node)}
       proOptions={{ hideAttribution: true }}
     >
       <Controls />

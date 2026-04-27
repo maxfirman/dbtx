@@ -10,7 +10,8 @@
     fail: '#ef4444',
     skipped: '#94a3b8',
   };
-  let borderColor = $derived(data.isCurrent ? '#3b82f6' : '#e2e8f0');
+  let hovered = $state(false);
+  let borderColor = $derived(data.isCurrent ? '#3b82f6' : hovered ? '#93c5fd' : '#e2e8f0');
   let borderWidth = $derived(data.isCurrent ? '2px' : '1px');
   let statusDot = $derived(statusColors[(data.status as string) || ''] || '#94a3b8');
   let testsPassing = $derived((data.testsPassing as number) || 0);
@@ -20,6 +21,10 @@
 
 <Handle type="target" position={Position.Left} />
 <div
+  role="button"
+  tabindex="-1"
+  onmouseenter={() => { if (!data.isCurrent) hovered = true; }}
+  onmouseleave={() => { hovered = false; }}
   style="
     background: white;
     border: {borderWidth} solid {borderColor};

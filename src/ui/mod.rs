@@ -3791,6 +3791,8 @@ async fn render_lineage_tab(
         "edges": edges_json,
         "currentNodeId": unique_id,
         "baseUrl": base_url,
+        "depth": depth,
+        "direction": direction,
     });
 
     ModelLineageTemplate {

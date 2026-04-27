@@ -1,5 +1,57 @@
 import { test, expect } from './fixtures';
 
+/** Helper: inject lineage data, load the script, and wait for mount. */
+async function mountLineage(
+  page: import('@playwright/test').Page,
+  baseUrl: string,
+  overrides?: { depth?: number; direction?: string; currentNodeId?: string },
+) {
+  await page.goto(`${baseUrl}/ui/catalog`);
+  await expect(page.getByRole('heading', { name: 'Catalog' })).toBeVisible();
+
+  const depth = overrides?.depth ?? 3;
+  const direction = overrides?.direction ?? 'ancestors';
+  const currentNodeId = overrides?.currentNodeId ?? 'model.pkg.b';
+
+  await page.evaluate(
+    (args) => {
+      const main = document.querySelector('main');
+      if (!main) return;
+      main.innerHTML = '<div id="lineage-root" style="width:800px;height:500px;"></div>';
+      (window as any).__LINEAGE_DATA__ = {
+        nodes: [
+          { id: 'model.pkg.a', data: { label: 'model_a', name: 'model_a', resource_type: 'model', status: 'success', materialized: 'table' } },
+          { id: 'model.pkg.b', data: { label: 'model_b', name: 'model_b', resource_type: 'model', status: 'success', materialized: 'view' } },
+          { id: 'model.pkg.c', data: { label: 'model_c', name: 'model_c', resource_type: 'model', status: null, materialized: 'table' } },
+        ],
+        edges: [
+          { id: 'e1', source: 'model.pkg.a', target: 'model.pkg.b' },
+          { id: 'e2', source: 'model.pkg.b', target: 'model.pkg.c' },
+        ],
+        currentNodeId: args.currentNodeId,
+        baseUrl: '/ui/catalog/test/dev',
+        depth: args.depth,
+        direction: args.direction,
+      };
+      const s = document.createElement('script');
+      s.src = `${args.baseUrl}/ui/assets/lineage.js?t=${Date.now()}`;
+      document.body.appendChild(s);
+    },
+    { baseUrl, depth, direction, currentNodeId },
+  );
+
+  await page.waitForTimeout(2000);
+  await page.evaluate(() => {
+    const mountFn = (window as any).__dbtxMountLineage;
+    if (mountFn) mountFn();
+  });
+
+  const lineageRoot = page.locator('#lineage-root');
+  await expect(lineageRoot.locator('.svelte-flow')).toBeVisible({ timeout: 15_000 });
+  await expect(lineageRoot.locator('.svelte-flow__node')).toHaveCount(3, { timeout: 10_000 });
+  return lineageRoot;
+}
+
 test.describe('catalog UI', () => {
   test('catalog list page loads and filters render', async ({ page, app }) => {
     await page.goto(`${app.baseUrl}/ui/catalog`);
@@ -33,54 +85,7 @@ test.describe('catalog UI', () => {
       if (msg.type() === 'error') consoleErrors.push(msg.text());
     });
 
-    // Navigate to the catalog list page (which loads base.html with all scripts)
-    await page.goto(`${app.baseUrl}/ui/catalog`);
-    await expect(page.getByRole('heading', { name: 'Catalog' })).toBeVisible();
-
-    // Inject a lineage-root div and test data, then load the lineage script
-    await page.evaluate((baseUrl) => {
-      // Create the mount point
-      const main = document.querySelector('main');
-      if (!main) return;
-      main.innerHTML = '<div id="lineage-root" style="width:800px;height:500px;"></div>';
-
-      // Set the data
-      (window as any).__LINEAGE_DATA__ = {
-        nodes: [
-          { id: 'model.pkg.a', data: { label: 'model_a', name: 'model_a', resource_type: 'model', status: 'success', materialized: 'table' } },
-          { id: 'model.pkg.b', data: { label: 'model_b', name: 'model_b', resource_type: 'model', status: 'success', materialized: 'view' } },
-          { id: 'model.pkg.c', data: { label: 'model_c', name: 'model_c', resource_type: 'model', status: null, materialized: 'table' } },
-        ],
-        edges: [
-          { id: 'e1', source: 'model.pkg.a', target: 'model.pkg.b' },
-          { id: 'e2', source: 'model.pkg.b', target: 'model.pkg.c' },
-        ],
-        currentNodeId: 'model.pkg.b',
-        baseUrl: '/ui/catalog/test/dev',
-      };
-
-      // Load the lineage script
-      const s = document.createElement('script');
-      s.src = `${baseUrl}/ui/assets/lineage.js?t=${Date.now()}`;
-      document.body.appendChild(s);
-    }, app.baseUrl);
-
-    // Wait for the svelte-flow container to appear
-    const lineageRoot = page.locator('#lineage-root');
-
-    // Wait for script to load and mount
-    await page.waitForTimeout(2000);
-    await page.evaluate(() => {
-      const mountFn = (window as any).__dbtxMountLineage;
-      if (mountFn) mountFn();
-    });
-
-    const svelteFlow = lineageRoot.locator('.svelte-flow');
-    await expect(svelteFlow).toBeVisible({ timeout: 15_000 });
-
-    // Should have 3 nodes rendered
-    const nodes = lineageRoot.locator('.svelte-flow__node');
-    await expect(nodes).toHaveCount(3, { timeout: 10_000 });
+    const lineageRoot = await mountLineage(page, app.baseUrl);
 
     // Should have edges rendered
     const edges = lineageRoot.locator('.svelte-flow__edge');
@@ -96,5 +101,47 @@ test.describe('catalog UI', () => {
       (e) => !e.includes('favicon') && !e.includes('404') && !e.includes('ERR_CONNECTION') && !e.includes('net::'),
     );
     expect(criticalErrors).toEqual([]);
+  });
+
+  test('clicking a non-current node navigates with depth and direction', async ({ page, app }) => {
+    await mountLineage(page, app.baseUrl, { depth: 4, direction: 'descendants' });
+
+    // Intercept the navigation request triggered by window.location.href assignment
+    let navigatedUrl: string | null = null;
+    await page.route('**/ui/catalog/test/dev/**', (route) => {
+      navigatedUrl = route.request().url();
+      route.abort();
+    });
+
+    // Click model_a (non-current; current is model_b)
+    const nodeA = page.locator('.svelte-flow__node').filter({ hasText: 'model_a' });
+    await nodeA.click();
+
+    // Wait briefly for the navigation request to fire
+    await page.waitForTimeout(1000);
+
+    expect(navigatedUrl).toBeTruthy();
+    expect(navigatedUrl).toContain('/ui/catalog/test/dev/');
+    expect(navigatedUrl).toContain('model.pkg.a');
+    expect(navigatedUrl).toContain('tab=lineage');
+    expect(navigatedUrl).toContain('depth=4');
+    expect(navigatedUrl).toContain('direction=descendants');
+  });
+
+  test('clicking the current node does not navigate', async ({ page, app }) => {
+    await mountLineage(page, app.baseUrl);
+
+    let navigatedUrl: string | null = null;
+    await page.route('**/ui/catalog/test/dev/**', (route) => {
+      navigatedUrl = route.request().url();
+      route.abort();
+    });
+
+    // Click model_b (the current node)
+    const nodeB = page.locator('.svelte-flow__node').filter({ hasText: 'model_b' });
+    await nodeB.click();
+
+    await page.waitForTimeout(1000);
+    expect(navigatedUrl).toBeNull();
   });
 });
