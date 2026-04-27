@@ -77,6 +77,7 @@ pub fn router() -> Router<AppState> {
         .route("/ui/invocations", get(invocations_index))
         .route("/ui/invocations/table", get(invocations_table))
         .route("/ui/invocations/{id}", get(invocation_detail))
+        .route("/ui/invocations/{id}/tab", get(invocation_tab))
         .route("/ui/invocations/{id}/panel", get(invocation_detail_panel))
         .route("/ui/invocations/{id}/cancel", post(invocation_cancel))
         .route("/v1/invocations/{id}/timeline", get(invocation_timeline))
@@ -1003,30 +1004,169 @@ async fn load_invocation_rows(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct InvocationTabQuery {
+    tab: Option<String>,
+}
+
 async fn invocation_detail(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<InvocationTabQuery>,
 ) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
     let invocation_id = parse_uuid(&id)?;
     let invocation = db.get_invocation_status(invocation_id).await?;
-    let events = db.load_invocation_events_since(invocation_id, 0).await?;
-    let initial_log_sequence = events.last().map(|(sequence, _)| *sequence).unwrap_or(0);
-    let lines = events
-        .into_iter()
-        .filter_map(|(_, event)| render_invocation_log_html(&event))
+
+    let tab = query.tab.as_deref().unwrap_or("timeline");
+    let tab = if matches!(tab, "timeline" | "lineage" | "logs") { tab } else { "timeline" };
+    let base = format!("/ui/invocations/{invocation_id}");
+
+    let tab_content_html = render_invocation_tab_content(db, invocation_id, tab).await?;
+
+    let tabs = ["timeline", "lineage", "logs"]
+        .iter()
+        .map(|&t| InvocationTabView {
+            label: match t {
+                "timeline" => "Timeline",
+                "lineage" => "Lineage",
+                "logs" => "Logs",
+                _ => t,
+            },
+            url: format!("{base}?tab={t}"),
+            partial_url: format!("{base}/tab?tab={t}"),
+            active: t == tab,
+        })
         .collect();
 
     render_template(&InvocationDetailTemplate {
         title: "Invocation",
         invocation: invocation_detail_view(&invocation),
-        initial_log_lines: lines,
-        initial_log_sequence,
-        sse_url: format!("/v1/invocations/{invocation_id}/events"),
-        panel_url: format!("/ui/invocations/{invocation_id}/panel"),
-        timeline_api_url: format!("/v1/invocations/{invocation_id}/timeline"),
+        panel_url: format!("{base}/panel"),
+        tabs,
+        tab_content_html,
     })
+}
+
+async fn invocation_tab(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<InvocationTabQuery>,
+) -> Result<Html<String>, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let invocation_id = parse_uuid(&id)?;
+    let tab = query.tab.as_deref().unwrap_or("timeline");
+    let html = render_invocation_tab_content(db, invocation_id, tab).await?;
+    Ok(Html(html))
+}
+
+async fn render_invocation_tab_content(
+    db: &crate::db::Db,
+    invocation_id: Uuid,
+    tab: &str,
+) -> Result<String, UiError> {
+    let sse_url = format!("/v1/invocations/{invocation_id}/events");
+    match tab {
+        "lineage" => {
+            let lineage = db.get_invocation_lineage(invocation_id).await?;
+
+            let mut base_url = String::new();
+            if let Ok(p) = db.get_invocation_persistence(invocation_id, None, None).await
+                && let Some(env_id) = p.environment_id
+                && let Ok(env) = db.get_environment_by_id(env_id).await
+            {
+                base_url = format!("/ui/catalog/{}/{}", env.project_ref, env.slug);
+            }
+
+            let test_ids: HashSet<&str> = lineage
+                .nodes.iter()
+                .filter(|n| n.resource_type.as_deref() == Some("test"))
+                .map(|n| n.unique_id.as_str())
+                .collect();
+            let mut test_counts: HashMap<&str, (u32, u32)> = HashMap::new();
+            for (parent, child) in &lineage.edges {
+                if test_ids.contains(child.as_str())
+                    && let Some(tn) = lineage.nodes.iter().find(|n| n.unique_id == *child)
+                {
+                    let e = test_counts.entry(parent.as_str()).or_insert((0, 0));
+                    match tn.status.as_deref().and_then(NodeExecutionStatus::parse) {
+                        Some(NodeExecutionStatus::Pass | NodeExecutionStatus::Success) => e.0 += 1,
+                        Some(NodeExecutionStatus::Fail | NodeExecutionStatus::Error) => e.1 += 1,
+                        _ => {}
+                    }
+                }
+            }
+
+            let nodes_json: Vec<Value> = lineage.nodes.iter()
+                .filter(|n| !test_ids.contains(n.unique_id.as_str()))
+                .map(|n| {
+                    let (pass, fail) = test_counts.get(n.unique_id.as_str()).copied().unwrap_or((0, 0));
+                    serde_json::json!({
+                        "id": n.unique_id,
+                        "data": {
+                            "label": n.name.as_deref().unwrap_or(&n.unique_id),
+                            "name": n.name,
+                            "resource_type": n.resource_type,
+                            "status": n.status,
+                            "materialized": n.materialized,
+                            "package_name": n.package_name,
+                            "testsPassing": pass,
+                            "testsFailing": fail,
+                        }
+                    })
+                }).collect();
+
+            let edges_json: Vec<Value> = lineage.edges.iter()
+                .filter(|(s, t)| !test_ids.contains(s.as_str()) && !test_ids.contains(t.as_str()))
+                .map(|(src, tgt)| serde_json::json!({
+                    "id": format!("{src}->{tgt}"),
+                    "source": src,
+                    "target": tgt,
+                }))
+                .collect();
+
+            let lineage_data = serde_json::json!({
+                "nodes": nodes_json,
+                "edges": edges_json,
+                "currentNodeId": "",
+                "baseUrl": base_url,
+                "depth": 1,
+                "direction": "both",
+            });
+
+            InvocationLineageTabTemplate {
+                lineage_json: lineage_data.to_string(),
+            }
+            .render()
+            .map_err(|e| UiError(AppError::Internal(e.to_string())))
+        }
+        "logs" => {
+            let events = db.load_invocation_events_since(invocation_id, 0).await?;
+            let initial_log_sequence = events.last().map(|(seq, _)| *seq).unwrap_or(0);
+            let lines = events
+                .into_iter()
+                .filter_map(|(_, event)| render_invocation_log_html(&event))
+                .collect();
+            InvocationLogsTabTemplate {
+                sse_url,
+                initial_log_lines: lines,
+                initial_log_sequence,
+            }
+            .render()
+            .map_err(|e| UiError(AppError::Internal(e.to_string())))
+        }
+        _ => {
+            // timeline (default)
+            InvocationTimelineTabTemplate {
+                sse_url,
+                timeline_api_url: format!("/v1/invocations/{invocation_id}/timeline"),
+            }
+            .render()
+            .map_err(|e| UiError(AppError::Internal(e.to_string())))
+        }
+    }
 }
 
 async fn invocation_detail_panel(
@@ -2866,16 +3006,42 @@ struct InvocationDetailPanelTemplate {
     panel_url: String,
 }
 
+struct InvocationTabView {
+    label: &'static str,
+    url: String,
+    partial_url: String,
+    active: bool,
+}
+
 #[derive(Template)]
 #[template(path = "invocations/show.html")]
 struct InvocationDetailTemplate {
     title: &'static str,
     invocation: InvocationDetailView,
+    panel_url: String,
+    tabs: Vec<InvocationTabView>,
+    tab_content_html: String,
+}
+
+#[derive(Template)]
+#[template(path = "invocations/_tab_timeline.html")]
+struct InvocationTimelineTabTemplate {
+    sse_url: String,
+    timeline_api_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "invocations/_tab_logs.html")]
+struct InvocationLogsTabTemplate {
+    sse_url: String,
     initial_log_lines: Vec<String>,
     initial_log_sequence: u64,
-    sse_url: String,
-    panel_url: String,
-    timeline_api_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "invocations/_lineage.html")]
+struct InvocationLineageTabTemplate {
+    lineage_json: String,
 }
 
 #[derive(Template)]
@@ -4301,32 +4467,13 @@ mod tests {
 
     #[test]
     fn invocation_detail_resumes_stream_after_initial_history() {
-        let rendered = InvocationDetailTemplate {
-            title: "Invocation",
-            invocation: InvocationDetailView {
-                invocation_id: Uuid::nil().to_string(),
-                status: "running".to_string(),
-                status_class: "",
-                is_terminal: false,
-                can_cancel: true,
-                execution_mode: "server".to_string(),
-                worker_queue: "default".to_string(),
-                worker_health: "healthy".to_string(),
-                claimed_by: "worker-1".to_string(),
-                claimed_at: "2026-03-28T12:00:00Z".to_string(),
-                last_heartbeat_at: "2026-03-28T12:00:01Z".to_string(),
-                started_at: "2026-03-28T12:00:00Z".to_string(),
-                completed_at: "".to_string(),
-                error: "".to_string(),
-            },
+        let rendered = InvocationLogsTabTemplate {
+            sse_url: "/v1/invocations/00000000-0000-0000-0000-000000000000/events".to_string(),
             initial_log_lines: vec!["line 1".to_string()],
             initial_log_sequence: 7,
-            sse_url: "/v1/invocations/00000000-0000-0000-0000-000000000000/events".to_string(),
-            panel_url: "/ui/invocations/00000000-0000-0000-0000-000000000000/panel".to_string(),
-            timeline_api_url: "/v1/invocations/00000000-0000-0000-0000-000000000000/timeline".to_string(),
         }
         .render()
-        .expect("render invocation detail");
+        .expect("render invocation logs tab");
 
         assert!(rendered.contains(
             "x-data=\"invocationLogs('/v1/invocations/00000000-0000-0000-0000-000000000000/events', 7)\""

@@ -1,0 +1,10 @@
+<section class="rounded-xl border border-slate-200 bg-white shadow-sm" x-data="invocationLogs('{{ sse_url }}', {{ initial_log_sequence }})">
+    <div class="border-b border-slate-200 px-5 py-4">
+      <h2 class="font-semibold">Logs</h2>
+    </div>
+    <div x-ref="log" class="max-h-[34rem] overflow-auto px-5 py-4 font-mono text-xs leading-6 text-slate-800">
+      {% for line in initial_log_lines %}
+      <div class="whitespace-pre-wrap">{{ line|safe }}</div>
+      {% endfor %}
+    </div>
+</section>

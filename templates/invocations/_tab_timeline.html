@@ -1,0 +1,14 @@
+<link rel="stylesheet" href="/ui/assets/timeline.css">
+<section class="rounded-xl border border-slate-200 bg-white shadow-sm">
+  <div class="border-b border-slate-200 px-5 py-4">
+    <h2 class="font-semibold">Build Timeline</h2>
+  </div>
+  <div id="timeline-root" style="min-height:120px;"></div>
+</section>
+<script>
+  window.__TIMELINE_DATA__ = {
+    sseUrl: '{{ sse_url }}',
+    apiUrl: '{{ timeline_api_url }}'
+  };
+</script>
+<script src="/ui/assets/timeline.js"></script>

@@ -855,6 +855,98 @@ impl Db {
         Ok(persistence.project_id.zip(persistence.environment_id))
     }
 
+    pub(crate) async fn get_invocation_lineage(
+        &self,
+        invocation_id: Uuid,
+    ) -> AppResult<ModelLineageRecord> {
+        let persistence = self.get_invocation_persistence(invocation_id, None, None).await?;
+        let resources = self.get_invocation_timeline_resources(invocation_id).await?;
+        let unique_ids: Vec<String> = resources.iter().map(|r| r.0.clone()).collect();
+
+        if unique_ids.is_empty() {
+            return Ok(ModelLineageRecord { nodes: Vec::new(), edges: Vec::new() });
+        }
+
+        let id_set: std::collections::HashSet<&str> = unique_ids.iter().map(|s| s.as_str()).collect();
+
+        let edges = if let Some(run_id) = persistence.run_id {
+            self.load_manifest_edges(run_id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(s, t)| id_set.contains(s.as_str()) && id_set.contains(t.as_str()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let nodes = if let (Some(run_id), Some(project_id), Some(environment_id)) =
+            (persistence.run_id, persistence.project_id, persistence.environment_id)
+        {
+            let rows = sqlx::query(
+                r#"
+                SELECT
+                    mn.unique_id,
+                    mn.name,
+                    mn.resource_type,
+                    mn.package_name,
+                    mn.config,
+                    cns.status,
+                    cns.materialized
+                FROM manifest_nodes mn
+                LEFT JOIN current_node_state cns
+                    ON cns.unique_id = mn.unique_id
+                    AND cns.project_id = $2
+                    AND cns.environment_id = $3
+                WHERE mn.run_id = $1
+                  AND mn.unique_id = ANY($4)
+                "#,
+            )
+            .bind(run_id)
+            .bind(project_id)
+            .bind(environment_id)
+            .bind(&unique_ids)
+            .fetch_all(&self.pool)
+            .await?;
+
+            rows.into_iter()
+                .map(|row| {
+                    let config: Option<sqlx::types::Json<Value>> = row.get("config");
+                    let materialized_from_config = config
+                        .as_ref()
+                        .and_then(|c| c.get("materialized").and_then(Value::as_str).map(String::from));
+                    LineageNodeRecord {
+                        unique_id: row.get("unique_id"),
+                        name: row.get("name"),
+                        resource_type: row.get("resource_type"),
+                        package_name: row.get("package_name"),
+                        status: row.get("status"),
+                        materialized: row.get::<Option<String>, _>("materialized").or(materialized_from_config),
+                    }
+                })
+                .collect()
+        } else {
+            // No manifest available — build minimal nodes from selected_resources
+            resources
+                .iter()
+                .map(|r| LineageNodeRecord {
+                    unique_id: r.0.clone(),
+                    name: Some(r.0.rsplit('.').next().unwrap_or(&r.0).to_string()),
+                    resource_type: r.1.clone(),
+                    package_name: None,
+                    status: match (&r.3, r.4.as_deref()) {
+                        (Some(_), Some("completed")) => Some("success".to_string()),
+                        (Some(_), _) => Some("error".to_string()),
+                        _ => None,
+                    },
+                    materialized: None,
+                })
+                .collect()
+        };
+
+        Ok(ModelLineageRecord { nodes, edges })
+    }
+
     pub(crate) async fn get_invocation_timeline_resources(
         &self,
         invocation_id: Uuid,

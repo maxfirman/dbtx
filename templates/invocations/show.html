@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="space-y-8">
+<div class="space-y-6">
   <div class="flex items-center justify-between gap-4">
     <div>
       <a href="/ui/invocations" class="text-sm text-slate-500 hover:text-slate-900">← Back to invocations</a>
@@ -11,30 +11,58 @@
 
   {% include "invocations/_detail_panel.html" %}
 
-  <link rel="stylesheet" href="/ui/assets/timeline.css">
-  <section class="rounded-xl border border-slate-200 bg-white shadow-sm">
-    <div class="border-b border-slate-200 px-5 py-4">
-      <h2 class="font-semibold">Build Timeline</h2>
-    </div>
-    <div id="timeline-root" style="min-height:120px;"></div>
-  </section>
-  <script>
-    window.__TIMELINE_DATA__ = {
-      sseUrl: '{{ sse_url }}',
-      apiUrl: '{{ timeline_api_url }}'
-    };
-  </script>
-  <script src="/ui/assets/timeline.js"></script>
+  <div class="border-b border-slate-200">
+    <nav id="invocation-tabs" class="-mb-px flex gap-6 text-sm font-medium">
+      {% for tab in tabs %}
+      <a href="{{ tab.url }}"
+         hx-get="{{ tab.partial_url }}"
+         hx-target="#tab-content"
+         hx-swap="innerHTML"
+         hx-push-url="{{ tab.url }}"
+         data-tab="{{ tab.label }}"
+         class="invocation-tab border-b-2 px-1 py-3 cursor-pointer {% if tab.active %}border-slate-900 text-slate-900{% else %}border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700{% endif %}">
+        {{ tab.label }}
+      </a>
+      {% endfor %}
+    </nav>
+  </div>
 
-  <section class="rounded-xl border border-slate-200 bg-white shadow-sm" x-data="invocationLogs('{{ sse_url }}', {{ initial_log_sequence }})">
-      <div class="border-b border-slate-200 px-5 py-4">
-        <h2 class="font-semibold">Logs</h2>
-      </div>
-      <div x-ref="log" class="max-h-[34rem] overflow-auto px-5 py-4 font-mono text-xs leading-6 text-slate-800">
-        {% for line in initial_log_lines %}
-        <div class="whitespace-pre-wrap">{{ line|safe }}</div>
-        {% endfor %}
-      </div>
-  </section>
+  <div id="tab-content">
+    {{ tab_content_html|safe }}
+  </div>
 </div>
+
+<link rel="stylesheet" href="/ui/assets/lineage.css">
+<script src="/ui/assets/lineage.js"></script>
+<script>
+  function dbtxInitLineage() {
+    var dataEl = document.querySelector('script[type="dbtx/lineage-data"]');
+    if (dataEl && window.__dbtxMountLineage) {
+      try { window.__LINEAGE_DATA__ = JSON.parse(dataEl.textContent); } catch(e) { return; }
+      window.__dbtxMountLineage();
+    }
+  }
+  document.getElementById('invocation-tabs').addEventListener('click', function(e) {
+    var tab = e.target.closest('.invocation-tab');
+    if (!tab) return;
+    this.querySelectorAll('.invocation-tab').forEach(function(t) {
+      t.className = t.className
+        .replace('border-slate-900', 'border-transparent')
+        .replace('text-slate-900', 'text-slate-500');
+      if (!t.className.includes('hover:border-slate-300')) {
+        t.className += ' hover:border-slate-300 hover:text-slate-700';
+      }
+    });
+    tab.className = tab.className
+      .replace('border-transparent', 'border-slate-900')
+      .replace('text-slate-500', 'text-slate-900')
+      .replace(' hover:border-slate-300 hover:text-slate-700', '');
+  });
+  document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target && e.detail.target.id === 'tab-content') {
+      setTimeout(dbtxInitLineage, 0);
+    }
+  });
+  dbtxInitLineage();
+</script>
 {% endblock %}
