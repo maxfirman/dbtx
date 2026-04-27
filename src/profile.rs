@@ -348,11 +348,17 @@ pub fn validate_resolved_profile(adapter_type: &str, resolved: &Value) -> AppRes
 }
 
 pub fn encrypt_json(value: &Value) -> AppResult<Value> {
+    if value.is_null() || value.as_object().is_some_and(|o| o.is_empty()) {
+        return Ok(json!({}));
+    }
     let key = derive_key()?;
     encrypt_json_with_key(value, &key)
 }
 
 pub fn decrypt_json(value: &Value) -> AppResult<Value> {
+    if value.is_null() || value.as_object().is_some_and(|o| o.is_empty()) {
+        return Ok(json!({}));
+    }
     let key = derive_key()?;
     decrypt_json_with_key(value, &key)
 }
