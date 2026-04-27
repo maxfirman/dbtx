@@ -881,39 +881,10 @@ impl Db {
                 self.update_invocation_selected_resource_progress(invocation_id, &node)
                     .await?;
             }
-            let promote_manifest_state = node.status.as_deref().is_some_and(is_promotable_status);
-            let resource_type = node.resource_type.clone();
-            let node_name = node.node_name.clone();
-            let node_path = node.node_path.clone();
-            let materialized = node.materialized.clone();
-            let status = node.status.clone();
-            let relation_database = node.relation_database.clone();
-            let relation_schema = node.relation_schema.clone();
-            let relation_alias = node.relation_alias.clone();
-            let relation_name = node.relation_name.clone();
-            let node_checksum = node.node_checksum.clone();
-            let started_at = node.started_at;
-            let finished_at = node.finished_at;
-            let execution_time_seconds = node.execution_time_seconds;
-            let promoted_materialized = promote_manifest_state
-                .then(|| materialized.clone())
-                .flatten();
-            let promoted_relation_database = promote_manifest_state
-                .then(|| relation_database.clone())
-                .flatten();
-            let promoted_relation_schema = promote_manifest_state
-                .then(|| relation_schema.clone())
-                .flatten();
-            let promoted_relation_alias = promote_manifest_state
-                .then(|| relation_alias.clone())
-                .flatten();
-            let promoted_relation_name = promote_manifest_state
-                .then(|| relation_name.clone())
-                .flatten();
-            let promoted_checksum = promote_manifest_state
-                .then(|| node_checksum.clone())
-                .flatten();
-            let last_success_at = promote_manifest_state.then_some(finished_at).flatten();
+            let promotable = node.status.as_deref().is_some_and(is_promotable_status);
+            let promoted = |field: &Option<String>| -> Option<String> {
+                if promotable { field.clone() } else { None }
+            };
 
             sqlx::query(
                 r#"
@@ -946,19 +917,19 @@ impl Db {
             )
             .bind(run_id)
             .bind(&node.unique_id)
-            .bind(resource_type.clone())
-            .bind(node_name.clone())
-            .bind(node_path.clone())
-            .bind(materialized.clone())
-            .bind(status.clone())
-            .bind(relation_database.clone())
-            .bind(relation_schema.clone())
-            .bind(relation_alias.clone())
-            .bind(relation_name.clone())
-            .bind(node_checksum.clone())
-            .bind(started_at)
-            .bind(finished_at)
-            .bind(execution_time_seconds)
+            .bind(&node.resource_type)
+            .bind(&node.node_name)
+            .bind(&node.node_path)
+            .bind(&node.materialized)
+            .bind(&node.status)
+            .bind(&node.relation_database)
+            .bind(&node.relation_schema)
+            .bind(&node.relation_alias)
+            .bind(&node.relation_name)
+            .bind(&node.node_checksum)
+            .bind(node.started_at)
+            .bind(node.finished_at)
+            .bind(node.execution_time_seconds)
             .execute(&self.pool)
             .await?;
 
@@ -999,20 +970,20 @@ impl Db {
             .bind(environment_id)
             .bind(&node.unique_id)
             .bind(run_id)
-            .bind(status)
-            .bind(resource_type)
-            .bind(node_name)
-            .bind(node_path)
-            .bind(promoted_materialized)
-            .bind(promoted_relation_database)
-            .bind(promoted_relation_schema)
-            .bind(promoted_relation_alias)
-            .bind(promoted_relation_name)
-            .bind(promoted_checksum)
-            .bind(started_at)
-            .bind(finished_at)
-            .bind(execution_time_seconds)
-            .bind(last_success_at)
+            .bind(&node.status)
+            .bind(&node.resource_type)
+            .bind(&node.node_name)
+            .bind(&node.node_path)
+            .bind(promoted(&node.materialized))
+            .bind(promoted(&node.relation_database))
+            .bind(promoted(&node.relation_schema))
+            .bind(promoted(&node.relation_alias))
+            .bind(promoted(&node.relation_name))
+            .bind(promoted(&node.node_checksum))
+            .bind(node.started_at)
+            .bind(node.finished_at)
+            .bind(node.execution_time_seconds)
+            .bind(if promotable { node.finished_at } else { None })
             .execute(&self.pool)
             .await?;
         }
