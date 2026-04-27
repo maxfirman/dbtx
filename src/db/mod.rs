@@ -125,7 +125,7 @@ fn null_if_empty(value: &str) -> Option<&str> {
 }
 
 fn should_promote_manifest(subcommand: &str) -> bool {
-    matches!(subcommand, "run" | "build")
+    matches!(subcommand, "run" | "build" | "seed" | "snapshot")
 }
 
 fn validate_project_mode(mode: &str) -> AppResult<()> {
@@ -850,6 +850,8 @@ mod tests {
         use super::should_promote_manifest;
         assert!(should_promote_manifest("run"));
         assert!(should_promote_manifest("build"));
+        assert!(should_promote_manifest("seed"));
+        assert!(should_promote_manifest("snapshot"));
         assert!(!should_promote_manifest("ls"));
         assert!(!should_promote_manifest("test"));
     }
