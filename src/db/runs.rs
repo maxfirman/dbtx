@@ -881,40 +881,8 @@ impl Db {
                 self.update_invocation_selected_resource_progress(invocation_id, &node)
                     .await?;
             }
-            let promote_manifest_state = node.status.as_deref().is_some_and(is_promotable_status);
-            let resource_type = node.resource_type.clone();
-            let node_name = node.node_name.clone();
-            let node_path = node.node_path.clone();
-            let materialized = node.materialized.clone();
-            let status = node.status.clone();
-            let relation_database = node.relation_database.clone();
-            let relation_schema = node.relation_schema.clone();
-            let relation_alias = node.relation_alias.clone();
-            let relation_name = node.relation_name.clone();
-            let node_checksum = node.node_checksum.clone();
-            let started_at = node.started_at;
-            let finished_at = node.finished_at;
-            let execution_time_seconds = node.execution_time_seconds;
-            let promoted_materialized = promote_manifest_state
-                .then(|| materialized.clone())
-                .flatten();
-            let promoted_relation_database = promote_manifest_state
-                .then(|| relation_database.clone())
-                .flatten();
-            let promoted_relation_schema = promote_manifest_state
-                .then(|| relation_schema.clone())
-                .flatten();
-            let promoted_relation_alias = promote_manifest_state
-                .then(|| relation_alias.clone())
-                .flatten();
-            let promoted_relation_name = promote_manifest_state
-                .then(|| relation_name.clone())
-                .flatten();
-            let promoted_checksum = promote_manifest_state
-                .then(|| node_checksum.clone())
-                .flatten();
-            let last_success_at = promote_manifest_state.then_some(finished_at).flatten();
-
+            // Upsert into node_executions only. current_node_state is rebuilt
+            // authoritatively from node_executions during run finalization.
             sqlx::query(
                 r#"
                 INSERT INTO node_executions (
@@ -946,73 +914,19 @@ impl Db {
             )
             .bind(run_id)
             .bind(&node.unique_id)
-            .bind(resource_type.clone())
-            .bind(node_name.clone())
-            .bind(node_path.clone())
-            .bind(materialized.clone())
-            .bind(status.clone())
-            .bind(relation_database.clone())
-            .bind(relation_schema.clone())
-            .bind(relation_alias.clone())
-            .bind(relation_name.clone())
-            .bind(node_checksum.clone())
-            .bind(started_at)
-            .bind(finished_at)
-            .bind(execution_time_seconds)
-            .execute(&self.pool)
-            .await?;
-
-            sqlx::query(
-                r#"
-                INSERT INTO current_node_state (
-                    project_id, environment_id, unique_id, last_run_id, status, resource_type,
-                    node_name, node_path, materialized, relation_database, relation_schema,
-                    relation_alias, relation_name, checksum, started_at, finished_at,
-                    execution_time_seconds, last_success_at, updated_at
-                )
-                VALUES (
-                    $1, $2, $3, $4, $5, $6,
-                    $7, $8, $9, $10, $11,
-                    $12, $13, $14, $15, $16,
-                    $17, $18, NOW()
-                )
-                ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE SET
-                    last_run_id = EXCLUDED.last_run_id,
-                    status = COALESCE(EXCLUDED.status, current_node_state.status),
-                    resource_type = COALESCE(EXCLUDED.resource_type, current_node_state.resource_type),
-                    node_name = COALESCE(EXCLUDED.node_name, current_node_state.node_name),
-                    node_path = COALESCE(EXCLUDED.node_path, current_node_state.node_path),
-                    materialized = COALESCE(EXCLUDED.materialized, current_node_state.materialized),
-                    relation_database = COALESCE(EXCLUDED.relation_database, current_node_state.relation_database),
-                    relation_schema = COALESCE(EXCLUDED.relation_schema, current_node_state.relation_schema),
-                    relation_alias = COALESCE(EXCLUDED.relation_alias, current_node_state.relation_alias),
-                    relation_name = COALESCE(EXCLUDED.relation_name, current_node_state.relation_name),
-                    checksum = COALESCE(EXCLUDED.checksum, current_node_state.checksum),
-                    started_at = COALESCE(EXCLUDED.started_at, current_node_state.started_at),
-                    finished_at = COALESCE(EXCLUDED.finished_at, current_node_state.finished_at),
-                    execution_time_seconds = COALESCE(EXCLUDED.execution_time_seconds, current_node_state.execution_time_seconds),
-                    last_success_at = COALESCE(EXCLUDED.last_success_at, current_node_state.last_success_at),
-                    updated_at = NOW()
-                "#,
-            )
-            .bind(project_id)
-            .bind(environment_id)
-            .bind(&node.unique_id)
-            .bind(run_id)
-            .bind(status)
-            .bind(resource_type)
-            .bind(node_name)
-            .bind(node_path)
-            .bind(promoted_materialized)
-            .bind(promoted_relation_database)
-            .bind(promoted_relation_schema)
-            .bind(promoted_relation_alias)
-            .bind(promoted_relation_name)
-            .bind(promoted_checksum)
-            .bind(started_at)
-            .bind(finished_at)
-            .bind(execution_time_seconds)
-            .bind(last_success_at)
+            .bind(&node.resource_type)
+            .bind(&node.node_name)
+            .bind(&node.node_path)
+            .bind(&node.materialized)
+            .bind(&node.status)
+            .bind(&node.relation_database)
+            .bind(&node.relation_schema)
+            .bind(&node.relation_alias)
+            .bind(&node.relation_name)
+            .bind(&node.node_checksum)
+            .bind(node.started_at)
+            .bind(node.finished_at)
+            .bind(node.execution_time_seconds)
             .execute(&self.pool)
             .await?;
         }
