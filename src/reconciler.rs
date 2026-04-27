@@ -22,7 +22,9 @@ fn reconcile_interval() -> Duration {
 
 fn blocked_plan_sweep_interval() -> Duration {
     parse_interval_ms(
-        std::env::var("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS").ok().as_deref(),
+        std::env::var("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS")
+            .ok()
+            .as_deref(),
         Duration::from_secs(2),
     )
 }
@@ -169,16 +171,17 @@ async fn automatic_reconcile_backoff_until(
     last_successful_commit_sha: Option<&str>,
     source_events: &[SourceStateEventRecord],
 ) -> AppResult<Option<chrono::DateTime<Utc>>> {
-    let current_code_change_fingerprint = if environment.git_commit_sha.as_deref() != last_successful_commit_sha {
-        environment
-            .git_commit_sha
-            .as_deref()
-            .map(|desired_commit_sha| {
-                code_change_input_fingerprint_for_baseline(desired_commit_sha, baseline_run_id)
-            })
-    } else {
-        None
-    };
+    let current_code_change_fingerprint =
+        if environment.git_commit_sha.as_deref() != last_successful_commit_sha {
+            environment
+                .git_commit_sha
+                .as_deref()
+                .map(|desired_commit_sha| {
+                    code_change_input_fingerprint_for_baseline(desired_commit_sha, baseline_run_id)
+                })
+        } else {
+            None
+        };
     if let Some(preparation) = state
         .db()
         .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
@@ -205,14 +208,21 @@ async fn automatic_reconcile_backoff_until(
     let should_apply = match plan.reason.as_str() {
         "code_change" => plan.input_fingerprint == current_code_change_fingerprint,
         "source_state_change" => {
-            let current_event_ids = source_events.iter().map(|event| event.id).collect::<Vec<_>>();
+            let current_event_ids = source_events
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>();
             !current_event_ids.is_empty()
                 && plan.input_fingerprint
                     == Some(source_state_change_input_fingerprint(&current_event_ids))
         }
         _ => false,
     };
-    Ok(if should_apply { plan.next_attempt_at } else { None })
+    Ok(if should_apply {
+        plan.next_attempt_at
+    } else {
+        None
+    })
 }
 
 async fn ensure_target_manifest_for_reconcile_async(
@@ -227,14 +237,16 @@ async fn ensure_target_manifest_for_reconcile_async(
         .get_environment_actual_state(&environment.project_ref, &environment.slug)
         .await?
         .last_successful_run_id;
-    let input_fingerprint =
-        target_manifest_input_fingerprint(&code_change_input_fingerprint_for_baseline(
-            &desired_commit_sha,
-            baseline_run_id,
-        ));
+    let input_fingerprint = target_manifest_input_fingerprint(
+        &code_change_input_fingerprint_for_baseline(&desired_commit_sha, baseline_run_id),
+    );
     if state
         .db()
-        .latest_manifest_run_id_for_commit(environment.project_id, environment.id, &desired_commit_sha)
+        .latest_manifest_run_id_for_commit(
+            environment.project_id,
+            environment.id,
+            &desired_commit_sha,
+        )
         .await?
         .is_some()
     {
@@ -271,11 +283,7 @@ async fn ensure_target_manifest_for_reconcile_async(
 
     let invocation_id = Uuid::new_v4();
     let prepared = InvocationService::new(state.db())
-        .prepare_remote_manifest_capture(
-            invocation_id,
-            &environment.project_ref,
-            &environment.slug,
-        )
+        .prepare_remote_manifest_capture(invocation_id, &environment.project_ref, &environment.slug)
         .await?;
     start_prepared_invocation(
         state,
@@ -302,8 +310,8 @@ pub async fn sweep_blocked_plans_once(state: &AppState) -> AppResult<usize> {
     let scopes = state.db().list_blocked_environment_scopes().await?;
     let mut admitted = 0usize;
     for (project_id, environment_id) in scopes {
-        admitted += auto_admit_blocked_plans_for_environment(state, project_id, environment_id)
-            .await?;
+        admitted +=
+            auto_admit_blocked_plans_for_environment(state, project_id, environment_id).await?;
     }
     Ok(admitted)
 }

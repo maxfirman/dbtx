@@ -189,9 +189,7 @@ impl Db {
         .bind(invocation_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| {
-            AppError::InvocationNotFound(invocation_id.to_string())
-        })?;
+        .ok_or_else(|| AppError::InvocationNotFound(invocation_id.to_string()))?;
         Ok(invocation_status_from_row(&row))
     }
 
@@ -239,7 +237,10 @@ impl Db {
 
         let mut grouped: BTreeMap<String, Vec<WorkerRegistryReadModel>> = BTreeMap::new();
         for worker in registry {
-            grouped.entry(worker.worker_id.clone()).or_default().push(worker);
+            grouped
+                .entry(worker.worker_id.clone())
+                .or_default()
+                .push(worker);
         }
 
         Ok(grouped
@@ -721,9 +722,7 @@ impl Db {
         .bind(invocation_id)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| {
-            AppError::InvocationNotFound(invocation_id.to_string())
-        })?;
+        .ok_or_else(|| AppError::InvocationNotFound(invocation_id.to_string()))?;
         let sequence_no: i64 = row.get("next_event_sequence");
         sqlx::query(
             r#"
@@ -887,7 +886,9 @@ impl Db {
         invocation_id: Uuid,
         completion: &crate::execution::ExecutionCompletion,
     ) -> AppResult<Option<(i64, i64)>> {
-        let persistence = self.get_invocation_persistence(invocation_id, None, None).await?;
+        let persistence = self
+            .get_invocation_persistence(invocation_id, None, None)
+            .await?;
         let mut tx = self.pool.begin().await?;
 
         self.apply_invocation_completion_side_effects_in_tx(
@@ -924,15 +925,23 @@ impl Db {
         &self,
         invocation_id: Uuid,
     ) -> AppResult<ModelLineageRecord> {
-        let persistence = self.get_invocation_persistence(invocation_id, None, None).await?;
-        let resources = self.get_invocation_timeline_resources(invocation_id).await?;
+        let persistence = self
+            .get_invocation_persistence(invocation_id, None, None)
+            .await?;
+        let resources = self
+            .get_invocation_timeline_resources(invocation_id)
+            .await?;
         let unique_ids: Vec<String> = resources.iter().map(|r| r.0.clone()).collect();
 
         if unique_ids.is_empty() {
-            return Ok(ModelLineageRecord { nodes: Vec::new(), edges: Vec::new() });
+            return Ok(ModelLineageRecord {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            });
         }
 
-        let id_set: std::collections::HashSet<&str> = unique_ids.iter().map(|s| s.as_str()).collect();
+        let id_set: std::collections::HashSet<&str> =
+            unique_ids.iter().map(|s| s.as_str()).collect();
 
         let edges = if let Some(run_id) = persistence.run_id {
             self.load_manifest_edges(run_id)
@@ -945,9 +954,11 @@ impl Db {
             Vec::new()
         };
 
-        let nodes = if let (Some(run_id), Some(project_id), Some(environment_id)) =
-            (persistence.run_id, persistence.project_id, persistence.environment_id)
-        {
+        let nodes = if let (Some(run_id), Some(project_id), Some(environment_id)) = (
+            persistence.run_id,
+            persistence.project_id,
+            persistence.environment_id,
+        ) {
             let rows = sqlx::query(
                 r#"
                 SELECT
@@ -977,16 +988,20 @@ impl Db {
             rows.into_iter()
                 .map(|row| {
                     let config: Option<sqlx::types::Json<Value>> = row.get("config");
-                    let materialized_from_config = config
-                        .as_ref()
-                        .and_then(|c| c.get("materialized").and_then(Value::as_str).map(String::from));
+                    let materialized_from_config = config.as_ref().and_then(|c| {
+                        c.get("materialized")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    });
                     LineageNodeRecord {
                         unique_id: row.get("unique_id"),
                         name: row.get("name"),
                         resource_type: row.get("resource_type"),
                         package_name: row.get("package_name"),
                         status: row.get("status"),
-                        materialized: row.get::<Option<String>, _>("materialized").or(materialized_from_config),
+                        materialized: row
+                            .get::<Option<String>, _>("materialized")
+                            .or(materialized_from_config),
                     }
                 })
                 .collect()
@@ -1015,7 +1030,15 @@ impl Db {
     pub(crate) async fn get_invocation_timeline_resources(
         &self,
         invocation_id: Uuid,
-    ) -> AppResult<Vec<(String, Option<String>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, Option<String>)>> {
+    ) -> AppResult<
+        Vec<(
+            String,
+            Option<String>,
+            Option<chrono::DateTime<Utc>>,
+            Option<chrono::DateTime<Utc>>,
+            Option<String>,
+        )>,
+    > {
         let rows = sqlx::query(
             r#"
             SELECT unique_id, resource_type, node_started_at, finished_at, close_reason
@@ -1039,5 +1062,4 @@ impl Db {
             })
             .collect())
     }
-
 }

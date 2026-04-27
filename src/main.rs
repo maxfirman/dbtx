@@ -1,9 +1,7 @@
 use clap::Parser;
+use dbtx::cli::{Cli, Command, StateCommand};
 use dbtx::cli_entry::{
     execute_state_migrate, handle_passthrough_command, handle_persisting_command,
-};
-use dbtx::cli::{
-    Cli, Command, StateCommand,
 };
 use dbtx::cli_runtime::{
     handle_environment_command, handle_invocation_command, handle_project_command,

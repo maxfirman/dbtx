@@ -183,9 +183,7 @@ impl Db {
         .map_err(Into::into)
     }
 
-    pub(crate) async fn list_blocked_environment_scopes(
-        &self,
-    ) -> AppResult<Vec<(i64, i64)>> {
+    pub(crate) async fn list_blocked_environment_scopes(&self) -> AppResult<Vec<(i64, i64)>> {
         let rows = sqlx::query(
             r#"
             SELECT DISTINCT project_id, environment_id

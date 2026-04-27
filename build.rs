@@ -14,10 +14,16 @@ fn main() {
 }
 
 fn build_ui_bundle(package_dir: &str) {
-    if !std::path::Path::new(package_dir).join("package.json").exists() {
+    if !std::path::Path::new(package_dir)
+        .join("package.json")
+        .exists()
+    {
         return;
     }
-    if !std::path::Path::new(package_dir).join("node_modules").exists() {
+    if !std::path::Path::new(package_dir)
+        .join("node_modules")
+        .exists()
+    {
         run_npm(package_dir, &["install"]);
     }
     run_npm(package_dir, &["run", "build"]);

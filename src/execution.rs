@@ -66,19 +66,29 @@ mod tests {
 
     #[test]
     fn local_claim_timeout_is_shorter_than_server() {
-        assert!(claim_startup_timeout(InvocationExecutionModeApi::Local)
-            < claim_startup_timeout(InvocationExecutionModeApi::Server));
+        assert!(
+            claim_startup_timeout(InvocationExecutionModeApi::Local)
+                < claim_startup_timeout(InvocationExecutionModeApi::Server)
+        );
     }
 
     #[test]
     fn local_heartbeat_timeout_is_shorter_than_server() {
-        assert!(heartbeat_stale_timeout(InvocationExecutionModeApi::Local)
-            < heartbeat_stale_timeout(InvocationExecutionModeApi::Server));
+        assert!(
+            heartbeat_stale_timeout(InvocationExecutionModeApi::Local)
+                < heartbeat_stale_timeout(InvocationExecutionModeApi::Server)
+        );
     }
 
     #[test]
     fn claim_timeout_values_are_reasonable() {
-        assert_eq!(claim_startup_timeout(InvocationExecutionModeApi::Local), Duration::from_secs(10));
-        assert_eq!(claim_startup_timeout(InvocationExecutionModeApi::Server), Duration::from_secs(60));
+        assert_eq!(
+            claim_startup_timeout(InvocationExecutionModeApi::Local),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            claim_startup_timeout(InvocationExecutionModeApi::Server),
+            Duration::from_secs(60)
+        );
     }
 }

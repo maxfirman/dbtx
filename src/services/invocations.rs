@@ -20,10 +20,7 @@ pub fn code_change_input_fingerprint_for_baseline(
     }
 }
 
-pub fn code_change_input_fingerprint(
-    desired_commit_sha: &str,
-    baseline_run_id: Uuid,
-) -> String {
+pub fn code_change_input_fingerprint(desired_commit_sha: &str, baseline_run_id: Uuid) -> String {
     format!("code_change:{desired_commit_sha}:{baseline_run_id}")
 }
 
@@ -337,8 +334,9 @@ impl<'a> InvocationService<'a> {
                 environment_slug,
             )
             .await?;
-        prepared.worker_queue =
-            validation_worker_queue_from_env(std::env::var("DBTX_VALIDATION_QUEUE").ok().as_deref());
+        prepared.worker_queue = validation_worker_queue_from_env(
+            std::env::var("DBTX_VALIDATION_QUEUE").ok().as_deref(),
+        );
         if let Some(persistence) = prepared.persistence.as_mut() {
             persistence.subcommand = InvocationCommand::ManifestPrepare.as_str().to_string();
             persistence.promote_base_manifest = false;
@@ -497,16 +495,20 @@ impl<'a> InvocationService<'a> {
             })
             .await?;
 
-        let mut dbt_child =
-            match crate::dbt_runner::DbtChild::spawn(&config.dbt_path, subcommand, &dbt_args, &ctx.project_dir) {
-                Ok(child) => child,
-                Err(err) => {
-                    self.db
-                        .mark_run_finished(run_id, None, 1, "wrapper_failed")
-                        .await?;
-                    return Err(err);
-                }
-            };
+        let mut dbt_child = match crate::dbt_runner::DbtChild::spawn(
+            &config.dbt_path,
+            subcommand,
+            &dbt_args,
+            &ctx.project_dir,
+        ) {
+            Ok(child) => child,
+            Err(err) => {
+                self.db
+                    .mark_run_finished(run_id, None, 1, "wrapper_failed")
+                    .await?;
+                return Err(err);
+            }
+        };
 
         let mut sequence_no: i64 = 0;
         let mut dbt_version: Option<String> = None;

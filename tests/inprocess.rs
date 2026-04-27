@@ -7,9 +7,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use dbtx::config::RuntimeConfig;
 use dbtx::db::Db;
-use dbtx::server::{router, AppState};
+use dbtx::server::{AppState, router};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use testcontainers_modules::{
     postgres::Postgres,
@@ -29,8 +29,14 @@ async fn shared_pg() -> &'static SharedPg {
     SHARED_PG
         .get_or_init(|| async {
             if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
-                let admin_url = url.rsplit_once('/').map(|(b, _)| format!("{b}/postgres")).unwrap_or(url);
-                return SharedPg { admin_url, _container: None };
+                let admin_url = url
+                    .rsplit_once('/')
+                    .map(|(b, _)| format!("{b}/postgres"))
+                    .unwrap_or(url);
+                return SharedPg {
+                    admin_url,
+                    _container: None,
+                };
             }
             let container = Postgres::default()
                 .with_db_name("dbtx_inproc_template")
@@ -48,7 +54,10 @@ async fn shared_pg() -> &'static SharedPg {
             let db = Db::connect(&template_url).await.expect("connect template");
             db.migrate().await.expect("migrate template");
 
-            SharedPg { admin_url, _container: Some(container) }
+            SharedPg {
+                admin_url,
+                _container: Some(container),
+            }
         })
         .await
 }
@@ -58,11 +67,17 @@ async fn test_app() -> (axum::Router, PgPool) {
     let pg = shared_pg().await;
     let db_name = format!("inproc_{}", uuid::Uuid::new_v4().simple());
     let admin_pool = PgPool::connect(&pg.admin_url).await.expect("admin connect");
-    sqlx::query(&format!("CREATE DATABASE {db_name} TEMPLATE dbtx_inproc_template"))
-        .execute(&admin_pool)
-        .await
-        .expect("create test db");
-    let test_url = pg.admin_url.rsplit_once('/').map(|(b, _)| format!("{b}/{db_name}")).unwrap();
+    sqlx::query(&format!(
+        "CREATE DATABASE {db_name} TEMPLATE dbtx_inproc_template"
+    ))
+    .execute(&admin_pool)
+    .await
+    .expect("create test db");
+    let test_url = pg
+        .admin_url
+        .rsplit_once('/')
+        .map(|(b, _)| format!("{b}/{db_name}"))
+        .unwrap();
     let pool = PgPool::connect(&test_url).await.expect("connect test db");
     let db = Db::connect(&test_url).await.expect("connect app db");
     let config = RuntimeConfig::from_database_url(test_url);
@@ -93,11 +108,7 @@ async fn post_json(app: &axum::Router, path: &str, body: Value) -> (StatusCode, 
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()
-        .oneshot(
-            Request::get(path)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = response.status();
@@ -132,10 +143,14 @@ async fn project_draft_lifecycle() {
     let (app, _pool) = test_app().await;
 
     // Create a project draft
-    let (status, body) = post_json(&app, "/v1/project-drafts", json!({
-        "git_repo_url": "https://github.com/example/repo.git",
-        "project_root": "."
-    }))
+    let (status, body) = post_json(
+        &app,
+        "/v1/project-drafts",
+        json!({
+            "git_repo_url": "https://github.com/example/repo.git",
+            "project_root": "."
+        }),
+    )
     .await;
     assert_eq!(status, StatusCode::OK);
     let draft_id = body["draft"]["id"].as_str().expect("draft id");
@@ -143,7 +158,10 @@ async fn project_draft_lifecycle() {
     // Get the draft
     let (status, body) = get_json(&app, &format!("/v1/project-drafts/{draft_id}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["draft"]["git_repo_url"], "https://github.com/example/repo.git");
+    assert_eq!(
+        body["draft"]["git_repo_url"],
+        "https://github.com/example/repo.git"
+    );
     assert_eq!(body["draft"]["project_root"], ".");
 }
 
@@ -174,9 +192,13 @@ async fn project_crud() {
     assert_eq!(body["project"]["project_name"], "test_project");
 
     // Update project
-    let (_status, _body) = post_json(&app, "/v1/projects/prj_test_1", json!({
-        "git_repo_url": "https://example.com/new-repo.git"
-    }))
+    let (_status, _body) = post_json(
+        &app,
+        "/v1/projects/prj_test_1",
+        json!({
+            "git_repo_url": "https://example.com/new-repo.git"
+        }),
+    )
     .await;
     // PATCH not POST - need to use the right method
     let response = app
@@ -186,7 +208,12 @@ async fn project_crud() {
                 .method("PATCH")
                 .uri("/v1/projects/prj_test_1")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&json!({"git_repo_url": "https://example.com/new-repo.git"})).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(
+                        &json!({"git_repo_url": "https://example.com/new-repo.git"}),
+                    )
+                    .unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -196,7 +223,11 @@ async fn project_crud() {
     // Delete project
     let response = app
         .clone()
-        .oneshot(Request::delete("/v1/projects/prj_test_1").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::delete("/v1/projects/prj_test_1")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -221,17 +252,25 @@ async fn invocation_lifecycle_in_process() {
 
     // Create a temp dbt project
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: demo\nprofile: demo\n",
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: warehouse.duckdb\n      schema: main\n").unwrap();
 
     // Create invocation
-    let (status, body) = post_json(&app, "/v1/invocations", json!({
-        "command": "ls",
-        "args": [],
-        "current_dir": tmp.path().to_str().unwrap(),
-        "project_id": null,
-        "environment_slug": "dev"
-    }))
+    let (status, body) = post_json(
+        &app,
+        "/v1/invocations",
+        json!({
+            "command": "ls",
+            "args": [],
+            "current_dir": tmp.path().to_str().unwrap(),
+            "project_id": null,
+            "environment_slug": "dev"
+        }),
+    )
     .await;
     assert_eq!(status, StatusCode::OK, "create invocation failed: {body}");
     let invocation_id = body["invocation_id"].as_str().expect("invocation_id");
@@ -277,18 +316,27 @@ async fn sweep_tick_endpoint_works() {
 // --- HTML helpers ---
 
 async fn get_html(app: &axum::Router, path: &str) -> (StatusCode, String) {
-    let response = app.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8_lossy(&bytes).to_string())
 }
 
 async fn post_form(app: &axum::Router, path: &str, form: &str) -> (StatusCode, String) {
-    let response = app.clone().oneshot(
-        Request::post(path)
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from(form.to_string())).unwrap()
-    ).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8_lossy(&bytes).to_string())
@@ -311,7 +359,10 @@ async fn ui_dashboard_renders() {
     seed_ui_test_data(&pool).await;
     let (status, html) = get_html(&app, "/").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("dbtx"), "dashboard should contain dbtx branding");
+    assert!(
+        html.contains("dbtx"),
+        "dashboard should contain dbtx branding"
+    );
 }
 
 #[tokio::test]
@@ -440,7 +491,8 @@ async fn ui_environment_not_found_returns_error() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn ui_invocation_detail_not_found() {
     let (app, _pool) = test_app().await;
-    let (status, _html) = get_html(&app, "/ui/invocations/00000000-0000-0000-0000-000000000000").await;
+    let (status, _html) =
+        get_html(&app, "/ui/invocations/00000000-0000-0000-0000-000000000000").await;
     assert!(status == StatusCode::NOT_FOUND || status == StatusCode::INTERNAL_SERVER_ERROR);
 }
 
@@ -497,9 +549,14 @@ async fn environment_release_and_history() {
     seed_ui_test_data(&pool).await;
 
     // Release to a new commit
-    let (status, _body) = post_json(&app, "/v1/projects/prj_ui/environments/prod/release", json!({
-        "git_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    })).await;
+    let (status, _body) = post_json(
+        &app,
+        "/v1/projects/prj_ui/environments/prod/release",
+        json!({
+            "git_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     // Check history
@@ -513,7 +570,8 @@ async fn environment_release_and_history() {
 async fn environment_actual_state_returns_default() {
     let (app, pool) = test_app().await;
     seed_ui_test_data(&pool).await;
-    let (status, _body) = get_json(&app, "/v1/projects/prj_ui/environments/prod/actual-state").await;
+    let (status, _body) =
+        get_json(&app, "/v1/projects/prj_ui/environments/prod/actual-state").await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -522,7 +580,11 @@ async fn environment_actual_state_returns_default() {
 async fn environment_active_resources_empty() {
     let (app, pool) = test_app().await;
     seed_ui_test_data(&pool).await;
-    let (status, body) = get_json(&app, "/v1/projects/prj_ui/environments/prod/active-resources").await;
+    let (status, body) = get_json(
+        &app,
+        "/v1/projects/prj_ui/environments/prod/active-resources",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["resources"].as_array().unwrap().len(), 0);
 }
@@ -553,10 +615,15 @@ async fn worker_and_queue_list_empty() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_claim_returns_none_when_empty() {
     let (app, _pool) = test_app().await;
-    let (status, _body) = post_json(&app, "/v1/invocations/claim-next", json!({
-        "worker_id": "w1",
-        "worker_queues": ["generic"]
-    })).await;
+    let (status, _body) = post_json(
+        &app,
+        "/v1/invocations/claim-next",
+        json!({
+            "worker_id": "w1",
+            "worker_queues": ["generic"]
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
@@ -567,67 +634,96 @@ async fn invocation_full_lifecycle() {
 
     // Seed project + environment
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: demo\nprofile: demo\n",
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
 
     // Create invocation via API
-    let (status, body) = post_json(&app, "/v1/invocations", json!({
-        "command": "ls",
-        "args": [],
-        "current_dir": tmp.path().to_str().unwrap(),
-        "project_id": null,
-        "environment_slug": null
-    })).await;
+    let (status, body) = post_json(
+        &app,
+        "/v1/invocations",
+        json!({
+            "command": "ls",
+            "args": [],
+            "current_dir": tmp.path().to_str().unwrap(),
+            "project_id": null,
+            "environment_slug": null
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "create: {body}");
     let inv_id = body["invocation_id"].as_str().unwrap();
 
     // Claim
-    let (status, body) = post_json(&app, "/v1/invocations/claim-next", json!({
-        "execution_mode": "local",
-        "worker_id": "w1",
-        "worker_queues": [body["worker_queue"].as_str().unwrap()]
-    })).await;
+    let (status, body) = post_json(
+        &app,
+        "/v1/invocations/claim-next",
+        json!({
+            "execution_mode": "local",
+            "worker_id": "w1",
+            "worker_queues": [body["worker_queue"].as_str().unwrap()]
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let worker_id = body["worker_id"].as_str().unwrap().to_string();
     let lease_token = body["lease_token"].as_str().unwrap().to_string();
 
     // Heartbeat
-    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/heartbeat"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/heartbeat"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     // Append events
-    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/events"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "events": [{
-            "kind": "StdoutLine",
-            "occurred_at": "2026-01-01T00:00:00Z",
-            "text": "hello",
-            "raw_line": "hello",
-            "dbt_event_name": null,
-            "node_unique_id": null,
-            "level": null,
-            "error": null
-        }]
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/events"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "events": [{
+                "kind": "StdoutLine",
+                "occurred_at": "2026-01-01T00:00:00Z",
+                "text": "hello",
+                "raw_line": "hello",
+                "dbt_event_name": null,
+                "node_unique_id": null,
+                "level": null,
+                "error": null
+            }]
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Complete
-    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "completion": {
-            "status": "succeeded",
-            "exit_code": 0,
-            "error": null,
-            "dbt_version": "1.0.0",
-            "manifest": null,
-            "result": null
-        }
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/complete"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "completion": {
+                "status": "succeeded",
+                "exit_code": 0,
+                "error": null,
+                "dbt_version": "1.0.0",
+                "manifest": null,
+                "result": null
+            }
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Verify final status
@@ -642,16 +738,25 @@ async fn invocation_cancel_unclaimed() {
     let (app, _pool) = test_app().await;
 
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: demo\nprofile: demo\n",
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
 
-    let (_, body) = post_json(&app, "/v1/invocations", json!({
-        "command": "ls",
-        "args": [],
-        "current_dir": tmp.path().to_str().unwrap(),
-        "project_id": null,
-        "environment_slug": null
-    })).await;
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations",
+        json!({
+            "command": "ls",
+            "args": [],
+            "current_dir": tmp.path().to_str().unwrap(),
+            "project_id": null,
+            "environment_slug": null
+        }),
+    )
+    .await;
     let inv_id = body["invocation_id"].as_str().unwrap();
 
     // Cancel unclaimed
@@ -668,13 +773,18 @@ async fn source_state_event_create() {
     let (app, pool) = test_app().await;
     seed_ui_test_data(&pool).await;
 
-    let (status, body) = post_json(&app, "/v1/projects/prj_ui/environments/prod/source-state-events", json!({
-        "source_key": "source.raw_orders",
-        "provider": "manual",
-        "state_version": "v1",
-        "observed_at": "2026-01-01T00:00:00Z",
-        "payload": {"reason": "test"}
-    })).await;
+    let (status, body) = post_json(
+        &app,
+        "/v1/projects/prj_ui/environments/prod/source-state-events",
+        json!({
+            "source_key": "source.raw_orders",
+            "provider": "manual",
+            "state_version": "v1",
+            "observed_at": "2026-01-01T00:00:00Z",
+            "payload": {"reason": "test"}
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["event"]["id"].is_number());
 }
@@ -685,7 +795,12 @@ async fn environment_reconcile_requires_baseline() {
     let (app, pool) = test_app().await;
     seed_ui_test_data(&pool).await;
 
-    let (status, body) = post_json(&app, "/v1/projects/prj_ui/environments/prod/reconcile", json!({})).await;
+    let (status, body) = post_json(
+        &app,
+        "/v1/projects/prj_ui/environments/prod/reconcile",
+        json!({}),
+    )
+    .await;
     // Should fail — no baseline run exists
     assert_ne!(status, StatusCode::OK, "expected error: {body}");
 }
@@ -696,10 +811,17 @@ async fn ui_environment_release_post() {
     let (app, pool) = test_app().await;
     seed_ui_test_data(&pool).await;
 
-    let (status, _html) = post_form(&app, "/ui/projects/prj_ui/environments/prod/release",
-        "git_commit_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").await;
+    let (status, _html) = post_form(
+        &app,
+        "/ui/projects/prj_ui/environments/prod/release",
+        "git_commit_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .await;
     // Should redirect (302/303) or return HTML
-    assert!(status.is_success() || status.is_redirection(), "release status: {status}");
+    assert!(
+        status.is_success() || status.is_redirection(),
+        "release status: {status}"
+    );
 }
 
 #[tokio::test]
@@ -710,7 +832,10 @@ async fn ui_project_delete_post() {
 
     let (status, _html) = post_form(&app, "/ui/projects/prj_ui/delete", "").await;
     // Should redirect or succeed
-    assert!(status.is_success() || status.is_redirection(), "delete status: {status}");
+    assert!(
+        status.is_success() || status.is_redirection(),
+        "delete status: {status}"
+    );
 }
 
 #[tokio::test]
@@ -719,25 +844,39 @@ async fn invocation_complete_with_manifest_persists_state() {
     let (app, pool) = test_app().await;
 
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: demo\nprofile: demo\n",
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
 
     // Create a build invocation (persists state)
-    let (_, body) = post_json(&app, "/v1/invocations", json!({
-        "command": "build",
-        "args": [],
-        "current_dir": tmp.path().to_str().unwrap(),
-        "project_id": null,
-        "environment_slug": null
-    })).await;
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations",
+        json!({
+            "command": "build",
+            "args": [],
+            "current_dir": tmp.path().to_str().unwrap(),
+            "project_id": null,
+            "environment_slug": null
+        }),
+    )
+    .await;
     let inv_id = body["invocation_id"].as_str().unwrap().to_string();
     let wq = body["worker_queue"].as_str().unwrap().to_string();
 
-    let (_, body) = post_json(&app, "/v1/invocations/claim-next", json!({
-        "execution_mode": "local",
-        "worker_id": "w1",
-        "worker_queues": [wq]
-    })).await;
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations/claim-next",
+        json!({
+            "execution_mode": "local",
+            "worker_id": "w1",
+            "worker_queues": [wq]
+        }),
+    )
+    .await;
     let worker_id = body["worker_id"].as_str().unwrap().to_string();
     let lease_token = body["lease_token"].as_str().unwrap().to_string();
 
@@ -764,23 +903,30 @@ async fn invocation_complete_with_manifest_persists_state() {
         "child_map": {"model.demo.orders": []}
     });
 
-    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "completion": {
-            "status": "succeeded",
-            "exit_code": 0,
-            "error": null,
-            "dbt_version": "1.0.0",
-            "manifest": manifest,
-            "result": null
-        }
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/complete"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "completion": {
+                "status": "succeeded",
+                "exit_code": 0,
+                "error": null,
+                "dbt_version": "1.0.0",
+                "manifest": manifest,
+                "result": null
+            }
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Verify manifest was persisted
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM manifest_nodes")
-        .fetch_one(&pool).await.unwrap();
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert!(count > 0, "manifest nodes should be persisted");
 }
 
@@ -790,59 +936,83 @@ async fn invocation_with_dbt_log_events() {
     let (app, _pool) = test_app().await;
 
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: demo\nprofile: demo\n",
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
 
-    let (_, body) = post_json(&app, "/v1/invocations", json!({
-        "command": "build",
-        "args": [],
-        "current_dir": tmp.path().to_str().unwrap(),
-        "project_id": null,
-        "environment_slug": null
-    })).await;
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations",
+        json!({
+            "command": "build",
+            "args": [],
+            "current_dir": tmp.path().to_str().unwrap(),
+            "project_id": null,
+            "environment_slug": null
+        }),
+    )
+    .await;
     let inv_id = body["invocation_id"].as_str().unwrap().to_string();
     let wq = body["worker_queue"].as_str().unwrap().to_string();
 
-    let (_, body) = post_json(&app, "/v1/invocations/claim-next", json!({
-        "execution_mode": "local",
-        "worker_id": "w1",
-        "worker_queues": [wq]
-    })).await;
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations/claim-next",
+        json!({
+            "execution_mode": "local",
+            "worker_id": "w1",
+            "worker_queues": [wq]
+        }),
+    )
+    .await;
     let worker_id = body["worker_id"].as_str().unwrap().to_string();
     let lease_token = body["lease_token"].as_str().unwrap().to_string();
 
     // Send dbt log events
     let dbt_log = r#"{"info":{"name":"LogModelResult","code":"Q012","invocation_id":"abc","level":"info","msg":"Succeeded [table] model.demo.orders"},"data":{"node_info":{"unique_id":"model.demo.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"success","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"2026-01-01T00:00:01Z","node_relation":{"database":"db","schema":"main","alias":"orders","relation_name":"db.main.orders"},"node_checksum":"abc123"},"run_result":{"status":"success","execution_time":1.0}}}"#;
 
-    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/events"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "events": [{
-            "kind": "DbtLog",
-            "occurred_at": "2026-01-01T00:00:01Z",
-            "text": "Succeeded [table] model.demo.orders",
-            "raw_line": dbt_log,
-            "dbt_event_name": "LogModelResult",
-            "node_unique_id": "model.demo.orders",
-            "level": "info",
-            "error": null
-        }]
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/events"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "events": [{
+                "kind": "DbtLog",
+                "occurred_at": "2026-01-01T00:00:01Z",
+                "text": "Succeeded [table] model.demo.orders",
+                "raw_line": dbt_log,
+                "dbt_event_name": "LogModelResult",
+                "node_unique_id": "model.demo.orders",
+                "level": "info",
+                "error": null
+            }]
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Complete
-    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "completion": {
-            "status": "succeeded",
-            "exit_code": 0,
-            "error": null,
-            "dbt_version": "1.0.0",
-            "manifest": null,
-            "result": null
-        }
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/complete"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "completion": {
+                "status": "succeeded",
+                "exit_code": 0,
+                "error": null,
+                "dbt_version": "1.0.0",
+                "manifest": null,
+                "result": null
+            }
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
@@ -852,39 +1022,58 @@ async fn invocation_complete_failed_records_error() {
     let (app, _pool) = test_app().await;
 
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: demo\nprofile: demo\n",
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
 
-    let (_, body) = post_json(&app, "/v1/invocations", json!({
-        "command": "build",
-        "args": [],
-        "current_dir": tmp.path().to_str().unwrap(),
-        "project_id": null,
-        "environment_slug": null
-    })).await;
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations",
+        json!({
+            "command": "build",
+            "args": [],
+            "current_dir": tmp.path().to_str().unwrap(),
+            "project_id": null,
+            "environment_slug": null
+        }),
+    )
+    .await;
     let inv_id = body["invocation_id"].as_str().unwrap().to_string();
     let wq = body["worker_queue"].as_str().unwrap().to_string();
 
-    let (_, body) = post_json(&app, "/v1/invocations/claim-next", json!({
-        "execution_mode": "local",
-        "worker_id": "w1",
-        "worker_queues": [wq]
-    })).await;
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations/claim-next",
+        json!({
+            "execution_mode": "local",
+            "worker_id": "w1",
+            "worker_queues": [wq]
+        }),
+    )
+    .await;
     let worker_id = body["worker_id"].as_str().unwrap().to_string();
     let lease_token = body["lease_token"].as_str().unwrap().to_string();
 
-    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "completion": {
-            "status": "failed",
-            "exit_code": 1,
-            "error": "compilation error",
-            "dbt_version": null,
-            "manifest": null,
-            "result": null
-        }
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/complete"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "completion": {
+                "status": "failed",
+                "exit_code": 1,
+                "error": "compilation error",
+                "dbt_version": null,
+                "manifest": null,
+                "result": null
+            }
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (_, body) = get_json(&app, &format!("/v1/invocations/{inv_id}")).await;
@@ -900,8 +1089,14 @@ async fn ui_catalog_renders_with_resource_type_filter() {
     let (status, html) = get_html(&app, "/ui/catalog").await;
     assert_eq!(status, StatusCode::OK);
     assert!(html.contains("Catalog"), "page should have Catalog heading");
-    assert!(html.contains("Resource Type"), "page should have resource type filter");
-    assert!(html.contains("resource_type"), "page should have resource_type checkboxes");
+    assert!(
+        html.contains("Resource Type"),
+        "page should have resource type filter"
+    );
+    assert!(
+        html.contains("resource_type"),
+        "page should have resource_type checkboxes"
+    );
 }
 
 #[tokio::test]
@@ -910,45 +1105,64 @@ async fn manifest_backfill_populates_sources_in_current_node_state() {
     let (app, pool) = test_app().await;
 
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: demo\nprofile: demo\n",
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
 
     // Create invocation
-    let (_, body) = post_json(&app, "/v1/invocations", json!({
-        "command": "build",
-        "args": [],
-        "current_dir": tmp.path().to_str().unwrap(),
-        "project_id": null,
-        "environment_slug": null
-    })).await;
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations",
+        json!({
+            "command": "build",
+            "args": [],
+            "current_dir": tmp.path().to_str().unwrap(),
+            "project_id": null,
+            "environment_slug": null
+        }),
+    )
+    .await;
     let inv_id = body["invocation_id"].as_str().unwrap().to_string();
     let wq = body["worker_queue"].as_str().unwrap().to_string();
 
     // Claim
-    let (_, body) = post_json(&app, "/v1/invocations/claim-next", json!({
-        "execution_mode": "local",
-        "worker_id": "w1",
-        "worker_queues": [wq]
-    })).await;
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations/claim-next",
+        json!({
+            "execution_mode": "local",
+            "worker_id": "w1",
+            "worker_queues": [wq]
+        }),
+    )
+    .await;
     let worker_id = body["worker_id"].as_str().unwrap().to_string();
     let lease_token = body["lease_token"].as_str().unwrap().to_string();
 
     // Send node execution event for the model only (not the source)
     let dbt_log = r#"{"info":{"name":"LogModelResult","code":"Q012","invocation_id":"abc","level":"info","msg":"OK model.demo.orders"},"data":{"node_info":{"unique_id":"model.demo.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"success","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"2026-01-01T00:00:01Z","node_relation":{"database":"db","schema":"main","alias":"orders","relation_name":"db.main.orders"},"node_checksum":"abc123"},"run_result":{"status":"success","execution_time":1.0}}}"#;
-    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/events"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "events": [{
-            "kind": "DbtLog",
-            "occurred_at": "2026-01-01T00:00:01Z",
-            "text": "OK model.demo.orders",
-            "raw_line": dbt_log,
-            "dbt_event_name": "LogModelResult",
-            "node_unique_id": "model.demo.orders",
-            "level": "info",
-            "error": null
-        }]
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/events"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "events": [{
+                "kind": "DbtLog",
+                "occurred_at": "2026-01-01T00:00:01Z",
+                "text": "OK model.demo.orders",
+                "raw_line": dbt_log,
+                "dbt_event_name": "LogModelResult",
+                "node_unique_id": "model.demo.orders",
+                "level": "info",
+                "error": null
+            }]
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Complete with manifest that includes both a model and a source
@@ -997,55 +1211,88 @@ async fn manifest_backfill_populates_sources_in_current_node_state() {
         }
     });
 
-    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "completion": {
-            "status": "succeeded",
-            "exit_code": 0,
-            "error": null,
-            "dbt_version": "1.0.0",
-            "manifest": manifest,
-            "result": null
-        }
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/complete"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "completion": {
+                "status": "succeeded",
+                "exit_code": 0,
+                "error": null,
+                "dbt_version": "1.0.0",
+                "manifest": manifest,
+                "result": null
+            }
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Verify the model is in current_node_state (from node execution)
     let model_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM current_node_state WHERE unique_id = 'model.demo.orders'"
-    ).fetch_one(&pool).await.unwrap();
-    assert_eq!(model_count, 1, "model should be in current_node_state from execution");
+        "SELECT COUNT(*) FROM current_node_state WHERE unique_id = 'model.demo.orders'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        model_count, 1,
+        "model should be in current_node_state from execution"
+    );
 
     // Verify the source is ALSO in current_node_state (from manifest backfill)
     let source_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM current_node_state WHERE unique_id = 'source.demo.raw_orders'"
-    ).fetch_one(&pool).await.unwrap();
-    assert_eq!(source_count, 1, "source should be in current_node_state from manifest backfill");
+        "SELECT COUNT(*) FROM current_node_state WHERE unique_id = 'source.demo.raw_orders'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        source_count, 1,
+        "source should be in current_node_state from manifest backfill"
+    );
 
     // Verify the source has the correct resource_type
     let source_rt: Option<String> = sqlx::query_scalar(
-        "SELECT resource_type FROM current_node_state WHERE unique_id = 'source.demo.raw_orders'"
-    ).fetch_one(&pool).await.unwrap();
+        "SELECT resource_type FROM current_node_state WHERE unique_id = 'source.demo.raw_orders'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(source_rt.as_deref(), Some("source"));
 }
 
 /// Helper: create a local invocation, claim it, return (invocation_id, worker_id, lease_token, worker_queue).
-async fn create_and_claim(app: &axum::Router, project_dir: &std::path::Path) -> (String, String, String, String) {
-    let (_, body) = post_json(app, "/v1/invocations", json!({
-        "command": "build",
-        "args": [],
-        "current_dir": project_dir.to_str().unwrap(),
-        "project_id": null,
-        "environment_slug": null
-    })).await;
+async fn create_and_claim(
+    app: &axum::Router,
+    project_dir: &std::path::Path,
+) -> (String, String, String, String) {
+    let (_, body) = post_json(
+        app,
+        "/v1/invocations",
+        json!({
+            "command": "build",
+            "args": [],
+            "current_dir": project_dir.to_str().unwrap(),
+            "project_id": null,
+            "environment_slug": null
+        }),
+    )
+    .await;
     let inv_id = body["invocation_id"].as_str().unwrap().to_string();
     let wq = body["worker_queue"].as_str().unwrap().to_string();
-    let (_, body) = post_json(app, "/v1/invocations/claim-next", json!({
-        "execution_mode": "local",
-        "worker_id": "w1",
-        "worker_queues": [wq]
-    })).await;
+    let (_, body) = post_json(
+        app,
+        "/v1/invocations/claim-next",
+        json!({
+            "execution_mode": "local",
+            "worker_id": "w1",
+            "worker_queues": [wq]
+        }),
+    )
+    .await;
     let worker_id = body["worker_id"].as_str().unwrap().to_string();
     let lease_token = body["lease_token"].as_str().unwrap().to_string();
     (inv_id, worker_id, lease_token, wq)
@@ -1088,20 +1335,25 @@ async fn send_node_event(
             "run_result": {"status": status, "execution_time": 1.0}
         }
     })).unwrap();
-    let (s, _) = post_json(app, &format!("/v1/invocations/{inv_id}/events"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "events": [{
-            "kind": "DbtLog",
-            "occurred_at": "2026-01-01T00:00:01Z",
-            "text": "",
-            "raw_line": dbt_log,
-            "dbt_event_name": "LogModelResult",
-            "node_unique_id": unique_id,
-            "level": "info",
-            "error": null
-        }]
-    })).await;
+    let (s, _) = post_json(
+        app,
+        &format!("/v1/invocations/{inv_id}/events"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "events": [{
+                "kind": "DbtLog",
+                "occurred_at": "2026-01-01T00:00:01Z",
+                "text": "",
+                "raw_line": dbt_log,
+                "dbt_event_name": "LogModelResult",
+                "node_unique_id": unique_id,
+                "level": "info",
+                "error": null
+            }]
+        }),
+    )
+    .await;
     assert_eq!(s, StatusCode::NO_CONTENT);
 }
 
@@ -1115,25 +1367,34 @@ async fn complete_invocation(
     exit_code: i32,
     manifest: Option<Value>,
 ) {
-    let (s, _) = post_json(app, &format!("/v1/invocations/{inv_id}/complete"), json!({
-        "worker_id": worker_id,
-        "lease_token": lease_token,
-        "completion": {
-            "status": status,
-            "exit_code": exit_code,
-            "error": null,
-            "dbt_version": "1.0.0",
-            "manifest": manifest,
-            "result": null
-        }
-    })).await;
+    let (s, _) = post_json(
+        app,
+        &format!("/v1/invocations/{inv_id}/complete"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "completion": {
+                "status": status,
+                "exit_code": exit_code,
+                "error": null,
+                "dbt_version": "1.0.0",
+                "manifest": manifest,
+                "result": null
+            }
+        }),
+    )
+    .await;
     assert_eq!(s, StatusCode::NO_CONTENT);
 }
 
 /// Helper: create a temp dir with minimal dbt project files.
 fn temp_dbt_project() -> tempfile::TempDir {
     let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: demo\nprofile: demo\n",
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
     tmp
 }
@@ -1146,29 +1407,73 @@ async fn rebuild_populates_correct_field_values_after_successful_run() {
     let (inv_id, worker_id, lease_token, _) = create_and_claim(&app, tmp.path()).await;
 
     send_node_event(
-        &app, &inv_id, &worker_id, &lease_token,
-        "model.demo.orders", "success", "checksum_abc",
-        "my_db", "my_schema", "my_db.my_schema.orders",
-    ).await;
+        &app,
+        &inv_id,
+        &worker_id,
+        &lease_token,
+        "model.demo.orders",
+        "success",
+        "checksum_abc",
+        "my_db",
+        "my_schema",
+        "my_db.my_schema.orders",
+    )
+    .await;
 
-    complete_invocation(&app, &inv_id, &worker_id, &lease_token, "succeeded", 0, None).await;
+    complete_invocation(
+        &app,
+        &inv_id,
+        &worker_id,
+        &lease_token,
+        "succeeded",
+        0,
+        None,
+    )
+    .await;
 
     let row = sqlx::query(
         "SELECT status, checksum, relation_database, relation_schema, relation_name, \
          materialized, last_success_at, resource_type \
-         FROM current_node_state WHERE unique_id = 'model.demo.orders'"
-    ).fetch_one(&pool).await.unwrap();
+         FROM current_node_state WHERE unique_id = 'model.demo.orders'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     use sqlx::Row;
-    assert_eq!(row.get::<Option<String>, _>("status").as_deref(), Some("success"));
-    assert_eq!(row.get::<Option<String>, _>("checksum").as_deref(), Some("checksum_abc"));
-    assert_eq!(row.get::<Option<String>, _>("relation_database").as_deref(), Some("my_db"));
-    assert_eq!(row.get::<Option<String>, _>("relation_schema").as_deref(), Some("my_schema"));
-    assert_eq!(row.get::<Option<String>, _>("relation_name").as_deref(), Some("my_db.my_schema.orders"));
-    assert_eq!(row.get::<Option<String>, _>("materialized").as_deref(), Some("table"));
-    assert_eq!(row.get::<Option<String>, _>("resource_type").as_deref(), Some("model"));
-    assert!(row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_success_at").is_some(),
-        "last_success_at should be set for a successful run");
+    assert_eq!(
+        row.get::<Option<String>, _>("status").as_deref(),
+        Some("success")
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("checksum").as_deref(),
+        Some("checksum_abc")
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("relation_database").as_deref(),
+        Some("my_db")
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("relation_schema").as_deref(),
+        Some("my_schema")
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("relation_name").as_deref(),
+        Some("my_db.my_schema.orders")
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("materialized").as_deref(),
+        Some("table")
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("resource_type").as_deref(),
+        Some("model")
+    );
+    assert!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_success_at")
+            .is_some(),
+        "last_success_at should be set for a successful run"
+    );
 }
 
 #[tokio::test]
@@ -1180,43 +1485,80 @@ async fn rebuild_preserves_prior_success_state_after_failed_run() {
     // --- Run 1: successful ---
     let (inv1, w1, lt1, _) = create_and_claim(&app, tmp.path()).await;
     send_node_event(
-        &app, &inv1, &w1, &lt1,
-        "model.demo.orders", "success", "good_checksum",
-        "prod_db", "prod_schema", "prod_db.prod_schema.orders",
-    ).await;
+        &app,
+        &inv1,
+        &w1,
+        &lt1,
+        "model.demo.orders",
+        "success",
+        "good_checksum",
+        "prod_db",
+        "prod_schema",
+        "prod_db.prod_schema.orders",
+    )
+    .await;
     complete_invocation(&app, &inv1, &w1, &lt1, "succeeded", 0, None).await;
 
     let row = sqlx::query(
         "SELECT checksum, relation_database, last_success_at \
-         FROM current_node_state WHERE unique_id = 'model.demo.orders'"
-    ).fetch_one(&pool).await.unwrap();
+         FROM current_node_state WHERE unique_id = 'model.demo.orders'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     use sqlx::Row;
     let success_at: Option<chrono::DateTime<chrono::Utc>> = row.get("last_success_at");
-    assert_eq!(row.get::<Option<String>, _>("checksum").as_deref(), Some("good_checksum"));
+    assert_eq!(
+        row.get::<Option<String>, _>("checksum").as_deref(),
+        Some("good_checksum")
+    );
     assert!(success_at.is_some());
 
     // --- Run 2: failed on the same node ---
     let (inv2, w2, lt2, _) = create_and_claim(&app, tmp.path()).await;
     send_node_event(
-        &app, &inv2, &w2, &lt2,
-        "model.demo.orders", "error", "bad_checksum",
-        "other_db", "other_schema", "other_db.other_schema.orders",
-    ).await;
+        &app,
+        &inv2,
+        &w2,
+        &lt2,
+        "model.demo.orders",
+        "error",
+        "bad_checksum",
+        "other_db",
+        "other_schema",
+        "other_db.other_schema.orders",
+    )
+    .await;
     complete_invocation(&app, &inv2, &w2, &lt2, "failed", 1, None).await;
 
     let row = sqlx::query(
         "SELECT status, checksum, relation_database, last_success_at \
-         FROM current_node_state WHERE unique_id = 'model.demo.orders'"
-    ).fetch_one(&pool).await.unwrap();
+         FROM current_node_state WHERE unique_id = 'model.demo.orders'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
-    assert_eq!(row.get::<Option<String>, _>("status").as_deref(), Some("error"),
-        "status should reflect the latest (failed) execution");
-    assert_eq!(row.get::<Option<String>, _>("checksum").as_deref(), Some("good_checksum"),
-        "checksum should be preserved from the prior successful run");
-    assert_eq!(row.get::<Option<String>, _>("relation_database").as_deref(), Some("prod_db"),
-        "relation_database should be preserved from the prior successful run");
-    assert_eq!(row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_success_at"), success_at,
-        "last_success_at should be preserved from the prior successful run");
+    assert_eq!(
+        row.get::<Option<String>, _>("status").as_deref(),
+        Some("error"),
+        "status should reflect the latest (failed) execution"
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("checksum").as_deref(),
+        Some("good_checksum"),
+        "checksum should be preserved from the prior successful run"
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("relation_database").as_deref(),
+        Some("prod_db"),
+        "relation_database should be preserved from the prior successful run"
+    );
+    assert_eq!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_success_at"),
+        success_at,
+        "last_success_at should be preserved from the prior successful run"
+    );
 }
 
 #[tokio::test]
@@ -1228,38 +1570,76 @@ async fn rebuild_accumulates_state_across_multiple_runs_with_different_nodes() {
     // --- Run 1: build orders ---
     let (inv1, w1, lt1, _) = create_and_claim(&app, tmp.path()).await;
     send_node_event(
-        &app, &inv1, &w1, &lt1,
-        "model.demo.orders", "success", "orders_checksum",
-        "db", "main", "db.main.orders",
-    ).await;
+        &app,
+        &inv1,
+        &w1,
+        &lt1,
+        "model.demo.orders",
+        "success",
+        "orders_checksum",
+        "db",
+        "main",
+        "db.main.orders",
+    )
+    .await;
     complete_invocation(&app, &inv1, &w1, &lt1, "succeeded", 0, None).await;
 
     // --- Run 2: build customers (different node) ---
     let (inv2, w2, lt2, _) = create_and_claim(&app, tmp.path()).await;
     send_node_event(
-        &app, &inv2, &w2, &lt2,
-        "model.demo.customers", "success", "customers_checksum",
-        "db", "main", "db.main.customers",
-    ).await;
+        &app,
+        &inv2,
+        &w2,
+        &lt2,
+        "model.demo.customers",
+        "success",
+        "customers_checksum",
+        "db",
+        "main",
+        "db.main.customers",
+    )
+    .await;
     complete_invocation(&app, &inv2, &w2, &lt2, "succeeded", 0, None).await;
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM current_node_state"
-    ).fetch_one(&pool).await.unwrap();
-    assert_eq!(count, 2, "both nodes from separate runs should be in current_node_state");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM current_node_state")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 2,
+        "both nodes from separate runs should be in current_node_state"
+    );
 
     use sqlx::Row;
     let orders = sqlx::query(
-        "SELECT status, checksum FROM current_node_state WHERE unique_id = 'model.demo.orders'"
-    ).fetch_one(&pool).await.unwrap();
-    assert_eq!(orders.get::<Option<String>, _>("status").as_deref(), Some("success"));
-    assert_eq!(orders.get::<Option<String>, _>("checksum").as_deref(), Some("orders_checksum"));
+        "SELECT status, checksum FROM current_node_state WHERE unique_id = 'model.demo.orders'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        orders.get::<Option<String>, _>("status").as_deref(),
+        Some("success")
+    );
+    assert_eq!(
+        orders.get::<Option<String>, _>("checksum").as_deref(),
+        Some("orders_checksum")
+    );
 
     let customers = sqlx::query(
-        "SELECT status, checksum FROM current_node_state WHERE unique_id = 'model.demo.customers'"
-    ).fetch_one(&pool).await.unwrap();
-    assert_eq!(customers.get::<Option<String>, _>("status").as_deref(), Some("success"));
-    assert_eq!(customers.get::<Option<String>, _>("checksum").as_deref(), Some("customers_checksum"));
+        "SELECT status, checksum FROM current_node_state WHERE unique_id = 'model.demo.customers'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        customers.get::<Option<String>, _>("status").as_deref(),
+        Some("success")
+    );
+    assert_eq!(
+        customers.get::<Option<String>, _>("checksum").as_deref(),
+        Some("customers_checksum")
+    );
 }
 
 // ── Malformed input tests ──────────────────────────────────────────────
@@ -1276,9 +1656,14 @@ async fn project_draft_rejects_empty_body() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn project_draft_rejects_missing_repo_url() {
     let (app, _pool) = test_app().await;
-    let (status, _) = post_json(&app, "/v1/project-drafts", json!({
-        "project_root": "."
-    })).await;
+    let (status, _) = post_json(
+        &app,
+        "/v1/project-drafts",
+        json!({
+            "project_root": "."
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
@@ -1310,7 +1695,8 @@ async fn source_state_event_rejects_nonexistent_environment() {
             "source_key": "raw.orders",
             "provider": "test"
         }),
-    ).await;
+    )
+    .await;
     assert!(
         status == StatusCode::NOT_FOUND || status == StatusCode::UNPROCESSABLE_ENTITY,
         "expected 404 or 422, got {status}"
@@ -1325,7 +1711,8 @@ async fn reconcile_nonexistent_environment_returns_error() {
         &app,
         "/v1/projects/prj_missing/environments/dev/reconcile",
         json!({}),
-    ).await;
+    )
+    .await;
     assert!(
         status == StatusCode::NOT_FOUND || status == StatusCode::INTERNAL_SERVER_ERROR,
         "expected error status, got {status}"

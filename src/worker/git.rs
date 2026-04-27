@@ -72,7 +72,14 @@ pub(crate) async fn list_recent_branch_commits(
     let format = "%H%x1f%h%x1f%s%x1f%cI";
     let output = run_git_capture_with_git_dir(
         &mirror_dir,
-        ["log", "--max-count", &limit.to_string(), "--format", format, &reference],
+        [
+            "log",
+            "--max-count",
+            &limit.to_string(),
+            "--format",
+            format,
+            &reference,
+        ],
     )
     .await?;
     Ok(String::from_utf8_lossy(&output.stdout)
@@ -204,7 +211,12 @@ async fn ensure_git_mirror(repo_url: &str, mirror_dir: &Path) -> AppResult<()> {
         info!(repo_url = %repo_url, mirror = %mirror_dir.display(), "creating git mirror cache");
         run_git(
             None,
-            ["clone", "--mirror", repo_url, mirror_dir.to_string_lossy().as_ref()],
+            [
+                "clone",
+                "--mirror",
+                repo_url,
+                mirror_dir.to_string_lossy().as_ref(),
+            ],
         )
         .await?;
     } else {

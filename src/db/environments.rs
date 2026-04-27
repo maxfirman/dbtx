@@ -100,7 +100,9 @@ impl Db {
         };
         let git_branch = input.git_branch.or(existing.git_branch.clone());
         let git_commit_sha = input.git_commit_sha.or(existing.git_commit_sha.clone());
-        let use_latest_commit = input.use_latest_commit.unwrap_or(existing.use_latest_commit);
+        let use_latest_commit = input
+            .use_latest_commit
+            .unwrap_or(existing.use_latest_commit);
         let auto_deploy = input.auto_deploy.unwrap_or(existing.auto_deploy);
         let immutable = input.immutable.unwrap_or(existing.immutable);
         validate_environment_git_metadata(&project, &existing.slug, git_commit_sha.as_deref())?;
@@ -250,9 +252,9 @@ impl Db {
         let project = self.get_project_by_project_id(project).await?;
         let query = environment_query("WHERE e.project_id = $1 ORDER BY e.slug");
         let rows = sqlx::query(&query)
-        .bind(project.id)
-        .fetch_all(&self.pool)
-        .await?;
+            .bind(project.id)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.iter().map(environment_record_from_row).collect())
     }
 
@@ -260,11 +262,9 @@ impl Db {
         &self,
     ) -> AppResult<Vec<EnvironmentRecord>> {
         let query = environment_query(
-            "WHERE p.mode = 'remote' AND e.auto_deploy = TRUE AND e.status = 'active' ORDER BY p.project_id ASC, e.slug ASC"
+            "WHERE p.mode = 'remote' AND e.auto_deploy = TRUE AND e.status = 'active' ORDER BY p.project_id ASC, e.slug ASC",
         );
-        let rows = sqlx::query(&query)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(environment_record_from_row).collect())
     }
 
@@ -398,7 +398,9 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(active_environment_resource_from_row).collect())
+        Ok(rows
+            .iter()
+            .map(active_environment_resource_from_row)
+            .collect())
     }
-
 }

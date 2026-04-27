@@ -437,7 +437,10 @@ mod tests {
 
         let snapshot = ManifestSnapshot::from_raw(raw);
         assert_eq!(snapshot.nodes.len(), 2);
-        let source = snapshot.nodes.iter().find(|n| n.unique_id == "source.pkg.raw_orders");
+        let source = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.unique_id == "source.pkg.raw_orders");
         assert!(source.is_some(), "source node should be extracted");
         assert_eq!(source.unwrap().resource_type.as_deref(), Some("source"));
     }

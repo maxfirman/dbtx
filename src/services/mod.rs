@@ -2,12 +2,11 @@
 use crate::config::{InvocationContext, RuntimeConfig};
 use crate::db::{
     CreateEnvironmentDraftInput, CreateEnvironmentRunPlanInput, CreateProjectDraftInput,
-    CreateProjectInput, CurrentNodeStatePlanningRecord, Db, EquivalentPlanLookup,
-    EnvironmentActualStateRecord, EnvironmentDraftRecord, EnvironmentRecord,
-    EnvironmentReleaseInput, EnvironmentRunPlanRecord, EnvironmentVersionRecord, GitState,
-    LocalEnvironmentUpsertInput, PlanStatus, PlanningManifestNodeRecord, ProjectDraftRecord,
-    ProjectRecord, SourceStateEventCreateInput, SourceStateEventRecord, RunFinalization, RunStart,
-    UpdateEnvironmentDraftInput,
+    CreateProjectInput, CurrentNodeStatePlanningRecord, Db, EnvironmentActualStateRecord,
+    EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput, EnvironmentRunPlanRecord,
+    EnvironmentVersionRecord, EquivalentPlanLookup, GitState, LocalEnvironmentUpsertInput,
+    PlanStatus, PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord, RunFinalization,
+    RunStart, SourceStateEventCreateInput, SourceStateEventRecord, UpdateEnvironmentDraftInput,
 };
 use crate::dbt_utils::{
     append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
@@ -17,7 +16,10 @@ use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
 use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
-use crate::profile::{EnvironmentProfileRecord, LocalTargetProfile, resolve_runtime_profile, validate_environment_profile};
+use crate::profile::{
+    EnvironmentProfileRecord, LocalTargetProfile, resolve_runtime_profile,
+    validate_environment_profile,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -274,19 +276,17 @@ pub struct InferredProjectInput {
     pub project_root: Option<String>,
 }
 
-
-mod projects;
 mod environments;
 mod invocations;
+mod projects;
 
-pub use projects::ProjectService;
-pub use environments::{EnvironmentService, EnvironmentPlanAdmitPrepared};
+pub use environments::{EnvironmentPlanAdmitPrepared, EnvironmentService};
 pub use invocations::InvocationService;
 pub use invocations::{
     code_change_input_fingerprint, code_change_input_fingerprint_for_baseline,
-    source_state_change_input_fingerprint,
-    target_manifest_input_fingerprint,
+    source_state_change_input_fingerprint, target_manifest_input_fingerprint,
 };
+pub use projects::ProjectService;
 
 pub fn infer_local_project_defaults(
     current_dir: &Path,
@@ -331,8 +331,8 @@ pub fn infer_remote_project_defaults(
         .map(ToString::to_string)
         .or(git_state.repo_url)
         .ok_or(AppError::RemoteProjectRequiresGitRepo)?;
-    let repo_root = git_repo_root(current_dir)
-        .map_err(|_| AppError::RemoteProjectRequiresGitRepo)?;
+    let repo_root =
+        git_repo_root(current_dir).map_err(|_| AppError::RemoteProjectRequiresGitRepo)?;
     let inferred_project_root = project_root
         .map(ToString::to_string)
         .unwrap_or_else(|| relative_project_root(&repo_root, &canonical_project_dir));
@@ -483,7 +483,9 @@ fn local_machine_scope() -> AppResult<String> {
         }
     }
 
-    Err(AppError::Internal("failed to determine local machine scope".to_string()))
+    Err(AppError::Internal(
+        "failed to determine local machine scope".to_string(),
+    ))
 }
 
 fn validation_worker_queue() -> String {
@@ -520,13 +522,7 @@ fn plan_code_change_selected_resources(
     let directly_modified = target_nodes
         .iter()
         .filter(|node| is_build_plannable_resource_type(node.resource_type.as_deref()))
-        .filter(|node| {
-            baseline_checksums
-                .get(&node.unique_id)
-                .cloned()
-                .flatten()
-                != node.checksum
-        })
+        .filter(|node| baseline_checksums.get(&node.unique_id).cloned().flatten() != node.checksum)
         .map(|node| node.unique_id.clone())
         .collect::<BTreeSet<_>>();
 
@@ -577,9 +573,13 @@ fn plan_code_change_selected_resources(
             let matches_target = current_checksum == target.checksum;
             let is_stale = !matches_target
                 || requirement.has_unreconciled_ancestor
-                || requirement.latest_reconciled_ancestor_success_at.is_some_and(|ancestor_time| {
-                    current_success_at.map(|node_time| node_time < ancestor_time).unwrap_or(true)
-                });
+                || requirement
+                    .latest_reconciled_ancestor_success_at
+                    .is_some_and(|ancestor_time| {
+                        current_success_at
+                            .map(|node_time| node_time < ancestor_time)
+                            .unwrap_or(true)
+                    });
             is_stale.then(|| unique_id.clone())
         })
         .collect::<Vec<_>>();
@@ -636,16 +636,15 @@ fn compute_ancestor_requirement(
             memo,
         );
         requirement.has_unreconciled_ancestor |= parent_requirement.has_unreconciled_ancestor;
-        requirement.latest_reconciled_ancestor_success_at =
-            match (
-                requirement.latest_reconciled_ancestor_success_at,
-                parent_requirement.latest_reconciled_ancestor_success_at,
-            ) {
-                (Some(left), Some(right)) => Some(left.max(right)),
-                (Some(left), None) => Some(left),
-                (None, Some(right)) => Some(right),
-                (None, None) => None,
-            };
+        requirement.latest_reconciled_ancestor_success_at = match (
+            requirement.latest_reconciled_ancestor_success_at,
+            parent_requirement.latest_reconciled_ancestor_success_at,
+        ) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        };
     }
 
     memo.insert(unique_id.to_string(), requirement);
@@ -667,7 +666,9 @@ fn plan_source_event_ids(source_event_id: Option<i64>, metadata: &Value) -> Vec<
         .flatten()
         .filter_map(|value| value.as_i64())
         .collect::<Vec<_>>();
-    if event_ids.is_empty() && let Some(source_event_id) = source_event_id {
+    if event_ids.is_empty()
+        && let Some(source_event_id) = source_event_id
+    {
         event_ids.push(source_event_id);
     }
     event_ids.sort_unstable();
@@ -692,10 +693,12 @@ fn short_hash(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        plan_code_change_selected_resources, plan_source_event_ids,
-        parse_release_target_args, validation_worker_queue_from_env,
+        parse_release_target_args, plan_code_change_selected_resources, plan_source_event_ids,
+        validation_worker_queue_from_env,
     };
-    use crate::db::{is_valid_git_commit_sha, CurrentNodeStatePlanningRecord, PlanningManifestNodeRecord};
+    use crate::db::{
+        CurrentNodeStatePlanningRecord, PlanningManifestNodeRecord, is_valid_git_commit_sha,
+    };
     use std::ffi::OsString;
 
     #[test]
@@ -841,8 +844,14 @@ mod tests {
             },
         ];
         let edges = vec![
-            ("model.pkg.stg_orders".to_string(), "model.pkg.orders".to_string()),
-            ("model.pkg.orders".to_string(), "model.pkg.revenue".to_string()),
+            (
+                "model.pkg.stg_orders".to_string(),
+                "model.pkg.orders".to_string(),
+            ),
+            (
+                "model.pkg.orders".to_string(),
+                "model.pkg.revenue".to_string(),
+            ),
         ];
         let current = vec![]; // No current state = never run
 
@@ -947,7 +956,7 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
-    use super::{plan_code_change_selected_resources, is_build_plannable_resource_type};
+    use super::{is_build_plannable_resource_type, plan_code_change_selected_resources};
     use crate::db::{CurrentNodeStatePlanningRecord, PlanningManifestNodeRecord};
     use proptest::prelude::*;
     use std::collections::BTreeSet;
@@ -958,30 +967,34 @@ mod proptests {
 
     /// Generate a random DAG with n nodes and random edges (parent -> child, no cycles).
     /// Nodes are numbered 0..n, edges only go from lower to higher index (acyclic).
-    fn arb_dag(max_nodes: usize) -> impl Strategy<Value = (Vec<PlanningManifestNodeRecord>, Vec<(String, String)>)> {
-        (1..=max_nodes).prop_flat_map(|n| {
-            let checksums = proptest::collection::vec(proptest::option::of("[a-f0-9]{8}"), n);
-            // For edges: each node i can have edges to nodes j > i
-            let edge_bits = proptest::collection::vec(proptest::bool::ANY, n * n);
-            (Just(n), checksums, edge_bits)
-        }).prop_map(|(n, checksums, edge_bits)| {
-            let nodes: Vec<PlanningManifestNodeRecord> = (0..n)
-                .map(|i| PlanningManifestNodeRecord {
-                    unique_id: node_id(i),
-                    resource_type: Some("model".to_string()),
-                    checksum: checksums[i].clone(),
-                })
-                .collect();
-            let mut edges = Vec::new();
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    if edge_bits[i * n + j] {
-                        edges.push((node_id(i), node_id(j)));
+    fn arb_dag(
+        max_nodes: usize,
+    ) -> impl Strategy<Value = (Vec<PlanningManifestNodeRecord>, Vec<(String, String)>)> {
+        (1..=max_nodes)
+            .prop_flat_map(|n| {
+                let checksums = proptest::collection::vec(proptest::option::of("[a-f0-9]{8}"), n);
+                // For edges: each node i can have edges to nodes j > i
+                let edge_bits = proptest::collection::vec(proptest::bool::ANY, n * n);
+                (Just(n), checksums, edge_bits)
+            })
+            .prop_map(|(n, checksums, edge_bits)| {
+                let nodes: Vec<PlanningManifestNodeRecord> = (0..n)
+                    .map(|i| PlanningManifestNodeRecord {
+                        unique_id: node_id(i),
+                        resource_type: Some("model".to_string()),
+                        checksum: checksums[i].clone(),
+                    })
+                    .collect();
+                let mut edges = Vec::new();
+                for i in 0..n {
+                    for j in (i + 1)..n {
+                        if edge_bits[i * n + j] {
+                            edges.push((node_id(i), node_id(j)));
+                        }
                     }
                 }
-            }
-            (nodes, edges)
-        })
+                (nodes, edges)
+            })
     }
 
     proptest! {

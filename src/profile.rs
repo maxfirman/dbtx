@@ -605,7 +605,8 @@ mod tests {
                 schema_name: "custom".to_string(),
                 threads: store.threads,
                 profile_config: store.profile_config.clone(),
-                profile_secrets: super::encrypt_json(&store.profile_secrets_plain).expect("encrypt"),
+                profile_secrets: super::encrypt_json(&store.profile_secrets_plain)
+                    .expect("encrypt"),
             },
         )
         .expect("resolve");
@@ -616,7 +617,8 @@ mod tests {
     #[test]
     fn encrypt_null_returns_empty_object() {
         let key = test_key("test-key");
-        let encrypted = encrypt_json_with_key(&serde_json::Value::Null, &key).expect("encrypt null");
+        let encrypted =
+            encrypt_json_with_key(&serde_json::Value::Null, &key).expect("encrypt null");
         assert_eq!(encrypted, json!({}));
     }
 
@@ -630,7 +632,8 @@ mod tests {
     #[test]
     fn decrypt_null_returns_empty_object() {
         let key = test_key("test-key");
-        let decrypted = decrypt_json_with_key(&serde_json::Value::Null, &key).expect("decrypt null");
+        let decrypted =
+            decrypt_json_with_key(&serde_json::Value::Null, &key).expect("decrypt null");
         assert_eq!(decrypted, json!({}));
     }
 

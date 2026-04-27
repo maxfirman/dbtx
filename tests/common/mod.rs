@@ -1,14 +1,14 @@
 //! In-process test client that wraps an axum Router with the same API as DaemonClient.
 #![allow(dead_code)]
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::Router;
 use dbtx::api::*;
 use dbtx::error::{AppError, AppResult};
 use http_body_util::BodyExt;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -23,58 +23,101 @@ impl InProcessClient {
     }
 
     async fn request(&self, req: Request<Body>) -> AppResult<(StatusCode, Vec<u8>)> {
-        let resp = self.app.clone().oneshot(req).await
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req)
+            .await
             .map_err(|e| AppError::Internal(format!("request failed: {e}")))?;
         let status = resp.status();
-        let bytes = resp.into_body().collect().await
-            .map_err(|e| AppError::Internal(format!("body read: {e}")))?.to_bytes();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| AppError::Internal(format!("body read: {e}")))?
+            .to_bytes();
         Ok((status, bytes.to_vec()))
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> AppResult<T> {
-        let (s, b) = self.request(Request::get(path).body(Body::empty()).unwrap()).await?;
+        let (s, b) = self
+            .request(Request::get(path).body(Body::empty()).unwrap())
+            .await?;
         parse(s, &b)
     }
 
     async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> AppResult<T> {
-        let (s, b) = self.request(Request::post(path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(body)?)).unwrap()).await?;
+        let (s, b) = self
+            .request(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(body)?))
+                    .unwrap(),
+            )
+            .await?;
         parse(s, &b)
     }
 
     async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> AppResult<T> {
-        let (s, b) = self.request(Request::post(path)
-            .header("content-type", "application/json")
-            .body(Body::empty()).unwrap()).await?;
+        let (s, b) = self
+            .request(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await?;
         parse(s, &b)
     }
 
     async fn post_no_content<B: Serialize>(&self, path: &str, body: &B) -> AppResult<()> {
-        let (s, b) = self.request(Request::post(path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(body)?)).unwrap()).await?;
+        let (s, b) = self
+            .request(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(body)?))
+                    .unwrap(),
+            )
+            .await?;
         ensure_ok(s, &b)
     }
 
-    async fn post_optional<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> AppResult<Option<T>> {
-        let (s, b) = self.request(Request::post(path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(body)?)).unwrap()).await?;
-        if s == StatusCode::NO_CONTENT { return Ok(None); }
+    async fn post_optional<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> AppResult<Option<T>> {
+        let (s, b) = self
+            .request(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(body)?))
+                    .unwrap(),
+            )
+            .await?;
+        if s == StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
         ensure_ok(s, &b)?;
         Ok(Some(serde_json::from_slice(&b)?))
     }
 
     async fn patch<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> AppResult<T> {
-        let (s, b) = self.request(Request::patch(path)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(body)?)).unwrap()).await?;
+        let (s, b) = self
+            .request(
+                Request::patch(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(body)?))
+                    .unwrap(),
+            )
+            .await?;
         parse(s, &b)
     }
 
     async fn delete<T: DeserializeOwned>(&self, path: &str) -> AppResult<T> {
-        let (s, b) = self.request(Request::delete(path).body(Body::empty()).unwrap()).await?;
+        let (s, b) = self
+            .request(Request::delete(path).body(Body::empty()).unwrap())
+            .await?;
         parse(s, &b)
     }
 
@@ -88,7 +131,11 @@ impl InProcessClient {
         self.get(&format!("/v1/projects/{id}")).await
     }
 
-    pub async fn project_update(&self, id: &str, req: ProjectUpdateApiRequest) -> AppResult<ProjectResponse> {
+    pub async fn project_update(
+        &self,
+        id: &str,
+        req: ProjectUpdateApiRequest,
+    ) -> AppResult<ProjectResponse> {
         self.patch(&format!("/v1/projects/{id}"), &req).await
     }
 
@@ -96,7 +143,10 @@ impl InProcessClient {
         self.delete(&format!("/v1/projects/{id}")).await
     }
 
-    pub async fn project_draft_create(&self, req: ProjectDraftCreateApiRequest) -> AppResult<ProjectDraftResponse> {
+    pub async fn project_draft_create(
+        &self,
+        req: ProjectDraftCreateApiRequest,
+    ) -> AppResult<ProjectDraftResponse> {
         self.post("/v1/project-drafts", &req).await
     }
 
@@ -104,49 +154,91 @@ impl InProcessClient {
         self.get(&format!("/v1/project-drafts/{id}")).await
     }
 
-    pub async fn project_draft_validate(&self, id: Uuid) -> AppResult<ProjectDraftValidateResponse> {
-        self.post_empty(&format!("/v1/project-drafts/{id}/validate")).await
+    pub async fn project_draft_validate(
+        &self,
+        id: Uuid,
+    ) -> AppResult<ProjectDraftValidateResponse> {
+        self.post_empty(&format!("/v1/project-drafts/{id}/validate"))
+            .await
     }
 
     pub async fn project_draft_confirm(&self, id: Uuid) -> AppResult<ProjectResponse> {
-        self.post_empty(&format!("/v1/project-drafts/{id}/confirm")).await
+        self.post_empty(&format!("/v1/project-drafts/{id}/confirm"))
+            .await
     }
 
     // --- Environments ---
 
     pub async fn environment_list(&self, project: &str) -> AppResult<EnvironmentsResponse> {
-        self.get(&format!("/v1/projects/{project}/environments")).await
+        self.get(&format!("/v1/projects/{project}/environments"))
+            .await
     }
 
-    pub async fn environment_draft_create(&self, project: &str) -> AppResult<EnvironmentDraftStartResponse> {
-        self.post_empty(&format!("/v1/projects/{project}/environment-drafts")).await
+    pub async fn environment_draft_create(
+        &self,
+        project: &str,
+    ) -> AppResult<EnvironmentDraftStartResponse> {
+        self.post_empty(&format!("/v1/projects/{project}/environment-drafts"))
+            .await
     }
 
     pub async fn environment_draft_get(&self, id: Uuid) -> AppResult<EnvironmentDraftResponse> {
         self.get(&format!("/v1/environment-drafts/{id}")).await
     }
 
-    pub async fn environment_draft_refresh_branch(&self, id: Uuid, req: EnvironmentDraftUpdateApiRequest) -> AppResult<EnvironmentDraftStartResponse> {
-        self.post(&format!("/v1/environment-drafts/{id}/branch"), &req).await
+    pub async fn environment_draft_refresh_branch(
+        &self,
+        id: Uuid,
+        req: EnvironmentDraftUpdateApiRequest,
+    ) -> AppResult<EnvironmentDraftStartResponse> {
+        self.post(&format!("/v1/environment-drafts/{id}/branch"), &req)
+            .await
     }
 
-    pub async fn environment_draft_validate(&self, id: Uuid, req: EnvironmentDraftUpdateApiRequest) -> AppResult<EnvironmentDraftStartResponse> {
-        self.post(&format!("/v1/environment-drafts/{id}/validate"), &req).await
+    pub async fn environment_draft_validate(
+        &self,
+        id: Uuid,
+        req: EnvironmentDraftUpdateApiRequest,
+    ) -> AppResult<EnvironmentDraftStartResponse> {
+        self.post(&format!("/v1/environment-drafts/{id}/validate"), &req)
+            .await
     }
 
     pub async fn environment_draft_confirm(&self, id: Uuid) -> AppResult<EnvironmentResponse> {
-        self.post_empty(&format!("/v1/environment-drafts/{id}/confirm")).await
+        self.post_empty(&format!("/v1/environment-drafts/{id}/confirm"))
+            .await
     }
 
-    pub async fn environment_release(&self, project: &str, slug: &str, req: EnvironmentReleaseApiRequest) -> AppResult<EnvironmentResponse> {
-        self.post(&format!("/v1/projects/{project}/environments/{slug}/release"), &req).await
+    pub async fn environment_release(
+        &self,
+        project: &str,
+        slug: &str,
+        req: EnvironmentReleaseApiRequest,
+    ) -> AppResult<EnvironmentResponse> {
+        self.post(
+            &format!("/v1/projects/{project}/environments/{slug}/release"),
+            &req,
+        )
+        .await
     }
 
-    pub async fn environment_history(&self, project: &str, slug: &str) -> AppResult<EnvironmentVersionsResponse> {
-        self.get(&format!("/v1/projects/{project}/environments/{slug}/history")).await
+    pub async fn environment_history(
+        &self,
+        project: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentVersionsResponse> {
+        self.get(&format!(
+            "/v1/projects/{project}/environments/{slug}/history"
+        ))
+        .await
     }
 
-    pub async fn environment_active_resources(&self, project: &str, slug: &str, req: EnvironmentActiveResourcesApiRequest) -> AppResult<EnvironmentActiveResourcesResponse> {
+    pub async fn environment_active_resources(
+        &self,
+        project: &str,
+        slug: &str,
+        req: EnvironmentActiveResourcesApiRequest,
+    ) -> AppResult<EnvironmentActiveResourcesResponse> {
         // GET with query params - encode manually
         let qs = serde_urlencoded::to_string(&req).unwrap_or_default();
         let path = if qs.is_empty() {
@@ -157,37 +249,85 @@ impl InProcessClient {
         self.get(&path).await
     }
 
-    pub async fn environment_actual_state(&self, project: &str, slug: &str) -> AppResult<EnvironmentActualStateResponse> {
-        self.get(&format!("/v1/projects/{project}/environments/{slug}/actual-state")).await
+    pub async fn environment_actual_state(
+        &self,
+        project: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentActualStateResponse> {
+        self.get(&format!(
+            "/v1/projects/{project}/environments/{slug}/actual-state"
+        ))
+        .await
     }
 
-    pub async fn environment_source_state_event_create(&self, project: &str, slug: &str, req: SourceStateEventCreateApiRequest) -> AppResult<SourceStateEventResponse> {
-        self.post(&format!("/v1/projects/{project}/environments/{slug}/source-state-events"), &req).await
+    pub async fn environment_source_state_event_create(
+        &self,
+        project: &str,
+        slug: &str,
+        req: SourceStateEventCreateApiRequest,
+    ) -> AppResult<SourceStateEventResponse> {
+        self.post(
+            &format!("/v1/projects/{project}/environments/{slug}/source-state-events"),
+            &req,
+        )
+        .await
     }
 
-    pub async fn environment_plan_list(&self, project: &str, slug: &str) -> AppResult<EnvironmentRunPlansResponse> {
-        self.get(&format!("/v1/projects/{project}/environments/{slug}/plans")).await
+    pub async fn environment_plan_list(
+        &self,
+        project: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentRunPlansResponse> {
+        self.get(&format!("/v1/projects/{project}/environments/{slug}/plans"))
+            .await
     }
 
-    pub async fn environment_reconcile(&self, project: &str, slug: &str, req: EnvironmentReconcileApiRequest) -> AppResult<EnvironmentRunPlanResponse> {
-        self.post(&format!("/v1/projects/{project}/environments/{slug}/reconcile"), &req).await
+    pub async fn environment_reconcile(
+        &self,
+        project: &str,
+        slug: &str,
+        req: EnvironmentReconcileApiRequest,
+    ) -> AppResult<EnvironmentRunPlanResponse> {
+        self.post(
+            &format!("/v1/projects/{project}/environments/{slug}/reconcile"),
+            &req,
+        )
+        .await
     }
 
-    pub async fn environment_plan_get(&self, plan_id: Uuid) -> AppResult<EnvironmentRunPlanResponse> {
+    pub async fn environment_plan_get(
+        &self,
+        plan_id: Uuid,
+    ) -> AppResult<EnvironmentRunPlanResponse> {
         self.get(&format!("/v1/plans/{plan_id}")).await
     }
 
-    pub async fn environment_plan_admit(&self, plan_id: Uuid) -> AppResult<EnvironmentRunPlanResponse> {
+    pub async fn environment_plan_admit(
+        &self,
+        plan_id: Uuid,
+    ) -> AppResult<EnvironmentRunPlanResponse> {
         self.post_empty(&format!("/v1/plans/{plan_id}/admit")).await
     }
 
-    pub async fn environment_rollback(&self, project: &str, slug: &str, req: EnvironmentRollbackApiRequest) -> AppResult<EnvironmentResponse> {
-        self.post(&format!("/v1/projects/{project}/environments/{slug}/rollback"), &req).await
+    pub async fn environment_rollback(
+        &self,
+        project: &str,
+        slug: &str,
+        req: EnvironmentRollbackApiRequest,
+    ) -> AppResult<EnvironmentResponse> {
+        self.post(
+            &format!("/v1/projects/{project}/environments/{slug}/rollback"),
+            &req,
+        )
+        .await
     }
 
     // --- Invocations ---
 
-    pub async fn invocation_create(&self, req: InvocationCreateApiRequest) -> AppResult<InvocationCreateResponse> {
+    pub async fn invocation_create(
+        &self,
+        req: InvocationCreateApiRequest,
+    ) -> AppResult<InvocationCreateResponse> {
         self.post("/v1/invocations", &req).await
     }
 
@@ -195,30 +335,60 @@ impl InProcessClient {
         self.get(&format!("/v1/invocations/{id}")).await
     }
 
-    pub async fn invocation_list(&self, req: InvocationListApiRequest) -> AppResult<InvocationsResponse> {
+    pub async fn invocation_list(
+        &self,
+        req: InvocationListApiRequest,
+    ) -> AppResult<InvocationsResponse> {
         let qs = serde_urlencoded::to_string(&req).unwrap_or_default();
-        let path = if qs.is_empty() { "/v1/invocations".to_string() } else { format!("/v1/invocations?{qs}") };
+        let path = if qs.is_empty() {
+            "/v1/invocations".to_string()
+        } else {
+            format!("/v1/invocations?{qs}")
+        };
         self.get(&path).await
     }
 
-    pub async fn invocation_claim_next(&self, req: InvocationClaimNextApiRequest) -> AppResult<Option<InvocationClaimResponse>> {
+    pub async fn invocation_claim_next(
+        &self,
+        req: InvocationClaimNextApiRequest,
+    ) -> AppResult<Option<InvocationClaimResponse>> {
         self.post_optional("/v1/invocations/claim-next", &req).await
     }
 
-    pub async fn invocation_append_events(&self, id: Uuid, req: InvocationEventBatchApiRequest) -> AppResult<()> {
-        self.post_no_content(&format!("/v1/invocations/{id}/events"), &req).await
+    pub async fn invocation_append_events(
+        &self,
+        id: Uuid,
+        req: InvocationEventBatchApiRequest,
+    ) -> AppResult<()> {
+        self.post_no_content(&format!("/v1/invocations/{id}/events"), &req)
+            .await
     }
 
-    pub async fn invocation_complete(&self, id: Uuid, req: InvocationCompleteApiRequest) -> AppResult<()> {
-        self.post_no_content(&format!("/v1/invocations/{id}/complete"), &req).await
+    pub async fn invocation_complete(
+        &self,
+        id: Uuid,
+        req: InvocationCompleteApiRequest,
+    ) -> AppResult<()> {
+        self.post_no_content(&format!("/v1/invocations/{id}/complete"), &req)
+            .await
     }
 
-    pub async fn invocation_heartbeat(&self, id: Uuid, req: InvocationHeartbeatApiRequest) -> AppResult<InvocationHeartbeatResponse> {
-        self.post(&format!("/v1/invocations/{id}/heartbeat"), &req).await
+    pub async fn invocation_heartbeat(
+        &self,
+        id: Uuid,
+        req: InvocationHeartbeatApiRequest,
+    ) -> AppResult<InvocationHeartbeatResponse> {
+        self.post(&format!("/v1/invocations/{id}/heartbeat"), &req)
+            .await
     }
 
-    pub async fn invocation_cancel(&self, id: Uuid, req: InvocationCancelApiRequest) -> AppResult<()> {
-        self.post_no_content(&format!("/v1/invocations/{id}/cancel"), &req).await
+    pub async fn invocation_cancel(
+        &self,
+        id: Uuid,
+        req: InvocationCancelApiRequest,
+    ) -> AppResult<()> {
+        self.post_no_content(&format!("/v1/invocations/{id}/cancel"), &req)
+            .await
     }
 
     // --- Operators ---
@@ -246,9 +416,16 @@ fn parse<T: DeserializeOwned>(status: StatusCode, bytes: &[u8]) -> AppResult<T> 
 }
 
 fn ensure_ok(status: StatusCode, bytes: &[u8]) -> AppResult<()> {
-    if status.is_success() { return Ok(()); }
-    let msg = serde_json::from_slice::<serde_json::Value>(bytes).ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(ToString::to_string))
+    if status.is_success() {
+        return Ok(());
+    }
+    let msg = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .map(ToString::to_string)
+        })
         .unwrap_or_else(|| String::from_utf8_lossy(bytes).to_string());
     Err(match status {
         StatusCode::PRECONDITION_FAILED => AppError::SchemaOutOfDate,

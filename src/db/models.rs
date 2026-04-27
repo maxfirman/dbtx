@@ -333,16 +333,20 @@ impl Db {
             rows.into_iter()
                 .map(|row| {
                     let config: Option<sqlx::types::Json<Value>> = row.get("config");
-                    let materialized_from_config = config
-                        .as_ref()
-                        .and_then(|c| c.get("materialized").and_then(Value::as_str).map(String::from));
+                    let materialized_from_config = config.as_ref().and_then(|c| {
+                        c.get("materialized")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    });
                     LineageNodeRecord {
                         unique_id: row.get("unique_id"),
                         name: row.get("name"),
                         resource_type: row.get("resource_type"),
                         package_name: row.get("package_name"),
                         status: row.get("status"),
-                        materialized: row.get::<Option<String>, _>("materialized").or(materialized_from_config),
+                        materialized: row
+                            .get::<Option<String>, _>("materialized")
+                            .or(materialized_from_config),
                     }
                 })
                 .collect()
@@ -410,8 +414,17 @@ impl Db {
                 let config: Option<sqlx::types::Json<Value>> = row.get("config");
                 let test_type = config
                     .as_ref()
-                    .and_then(|c| c.get("test_metadata").and_then(|tm| tm.get("name")).and_then(Value::as_str).map(String::from))
-                    .or_else(|| config.as_ref().and_then(|c| c.get("severity").and_then(Value::as_str).map(String::from)));
+                    .and_then(|c| {
+                        c.get("test_metadata")
+                            .and_then(|tm| tm.get("name"))
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })
+                    .or_else(|| {
+                        config.as_ref().and_then(|c| {
+                            c.get("severity").and_then(Value::as_str).map(String::from)
+                        })
+                    });
                 ModelTestRecord {
                     unique_id: row.get("unique_id"),
                     name: row.get("name"),
@@ -494,5 +507,4 @@ impl Db {
 
         Ok(raw.and_then(|v| v.as_str().map(String::from)))
     }
-
 }

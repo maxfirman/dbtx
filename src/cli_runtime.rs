@@ -10,9 +10,9 @@ use crate::cli::{
 };
 use crate::cli_output::{
     print_environment, print_environment_version, print_invocation, print_project,
-    print_project_create_start, print_queue, print_release_already_released,
-    print_release_failure, print_release_start, print_release_success, print_worker,
-    render_invocation_event, render_project_validation_event, render_release_event,
+    print_project_create_start, print_queue, print_release_already_released, print_release_failure,
+    print_release_start, print_release_success, print_worker, render_invocation_event,
+    render_project_validation_event, render_release_event,
 };
 use crate::client;
 use crate::config::{self, resolve_service_url};
@@ -232,9 +232,8 @@ pub async fn handle_invocation_command(
             }
         }
         InvocationCliCommand::Show { invocation_id } => {
-            let invocation_id = uuid::Uuid::parse_str(&invocation_id).map_err(|err| {
-                AppError::InvalidInput(format!("invalid invocation id: {err}"))
-            })?;
+            let invocation_id = uuid::Uuid::parse_str(&invocation_id)
+                .map_err(|err| AppError::InvalidInput(format!("invalid invocation id: {err}")))?;
             let invocation = client.invocation_status(invocation_id).await?;
             print_invocation(&invocation);
         }
@@ -242,9 +241,8 @@ pub async fn handle_invocation_command(
             invocation_id,
             wait,
         } => {
-            let invocation_id = uuid::Uuid::parse_str(&invocation_id).map_err(|err| {
-                AppError::InvalidInput(format!("invalid invocation id: {err}"))
-            })?;
+            let invocation_id = uuid::Uuid::parse_str(&invocation_id)
+                .map_err(|err| AppError::InvalidInput(format!("invalid invocation id: {err}")))?;
             client
                 .invocation_cancel(invocation_id, api::InvocationCancelApiRequest::default())
                 .await?;
@@ -423,8 +421,12 @@ async fn create_invocation(
                 InvocationCommand::Seed => api::InvocationCommandApi::Seed,
                 InvocationCommand::Release => api::InvocationCommandApi::Release,
                 InvocationCommand::ProjectValidate => api::InvocationCommandApi::ProjectValidate,
-                InvocationCommand::EnvironmentPrepare => api::InvocationCommandApi::EnvironmentPrepare,
-                InvocationCommand::EnvironmentValidate => api::InvocationCommandApi::EnvironmentValidate,
+                InvocationCommand::EnvironmentPrepare => {
+                    api::InvocationCommandApi::EnvironmentPrepare
+                }
+                InvocationCommand::EnvironmentValidate => {
+                    api::InvocationCommandApi::EnvironmentValidate
+                }
                 InvocationCommand::ManifestPrepare => api::InvocationCommandApi::ManifestPrepare,
             },
             args: args
@@ -468,9 +470,9 @@ fn parse_invocation_status_filter(
         Some("succeeded") => Ok(Some(InvocationLifecycleStatus::Succeeded)),
         Some("failed") => Ok(Some(InvocationLifecycleStatus::Failed)),
         Some("canceled") => Ok(Some(InvocationLifecycleStatus::Canceled)),
-        Some(other) => Err(AppError::InvalidInput(
-            format!("invalid invocation status filter: {other}"),
-        )),
+        Some(other) => Err(AppError::InvalidInput(format!(
+            "invalid invocation status filter: {other}"
+        ))),
     }
 }
 
@@ -481,9 +483,9 @@ fn parse_execution_mode_filter(
         None => Ok(None),
         Some("server") => Ok(Some(InvocationExecutionModeApi::Server)),
         Some("local") => Ok(Some(InvocationExecutionModeApi::Local)),
-        Some(other) => Err(AppError::InvalidInput(
-            format!("invalid execution mode filter: {other}"),
-        )),
+        Some(other) => Err(AppError::InvalidInput(format!(
+            "invalid execution mode filter: {other}"
+        ))),
     }
 }
 
@@ -493,9 +495,9 @@ fn parse_cancel_state_filter(value: Option<&str>) -> AppResult<Option<Invocation
         Some("none") => Ok(Some(InvocationCancelStateApi::None)),
         Some("requested") => Ok(Some(InvocationCancelStateApi::Requested)),
         Some("completed") => Ok(Some(InvocationCancelStateApi::Completed)),
-        Some(other) => Err(AppError::InvalidInput(
-            format!("invalid cancel state filter: {other}"),
-        )),
+        Some(other) => Err(AppError::InvalidInput(format!(
+            "invalid cancel state filter: {other}"
+        ))),
     }
 }
 
@@ -505,8 +507,11 @@ mod tests {
 
     #[test]
     fn release_validation_args_support_git_ref_resolution() {
-        let args =
-            build_release_validation_args(Some("main".to_string()), None, Some("preview".to_string()));
+        let args = build_release_validation_args(
+            Some("main".to_string()),
+            None,
+            Some("preview".to_string()),
+        );
         assert_eq!(args, vec!["--git-branch", "main", "--git-ref", "preview"]);
     }
 

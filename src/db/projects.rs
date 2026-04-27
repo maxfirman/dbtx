@@ -174,9 +174,7 @@ impl Db {
         .bind(draft_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| {
-            AppError::ProjectDraftNotFound(draft_id.to_string())
-        })?;
+        .ok_or_else(|| AppError::ProjectDraftNotFound(draft_id.to_string()))?;
         Ok(project_draft_record_from_row(&row))
     }
 
@@ -218,9 +216,7 @@ impl Db {
         .bind(draft_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| {
-            AppError::EnvironmentDraftNotFound(draft_id.to_string())
-        })?;
+        .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
         Ok(environment_draft_record_from_row(&row))
     }
 
@@ -267,9 +263,7 @@ impl Db {
         .bind(&encrypted_secrets)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| {
-            AppError::EnvironmentDraftNotFound(draft_id.to_string())
-        })?;
+        .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
         Ok(environment_draft_record_from_row(&row))
     }
 
@@ -290,7 +284,7 @@ impl Db {
                 auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
                 profile_secrets, branch_options, commit_options, status, validation_error,
                 validation_invocation_id, created_at, updated_at, validated_at
-            "#
+            "#,
         )
         .bind(draft_id)
         .fetch_optional(&self.pool)
@@ -316,7 +310,7 @@ impl Db {
                 auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
                 profile_secrets, branch_options, commit_options, status, validation_error,
                 validation_invocation_id, created_at, updated_at, validated_at
-            "#
+            "#,
         )
         .bind(draft_id)
         .fetch_optional(&self.pool)
@@ -362,22 +356,17 @@ impl Db {
                 auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
                 profile_secrets, branch_options, commit_options, status, validation_error,
                 validation_invocation_id, created_at, updated_at, validated_at
-            "#
+            "#,
         )
         .bind(draft_id)
         .bind(error)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| {
-            AppError::EnvironmentDraftNotFound(draft_id.to_string())
-        })?;
+        .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
         Ok(environment_draft_record_from_row(&row))
     }
 
-    pub async fn confirm_environment_draft(
-        &self,
-        draft_id: Uuid,
-    ) -> AppResult<EnvironmentRecord> {
+    pub async fn confirm_environment_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentRecord> {
         let draft = self.get_environment_draft(draft_id).await?;
         if draft.status != DraftStatus::Validated {
             return Err(AppError::InvalidInput(
@@ -401,13 +390,16 @@ impl Db {
             immutable: draft.immutable,
             pr_number: None,
             status: "active".to_string(),
-            adapter_type: draft.adapter_type.clone().ok_or_else(|| AppError::InvalidProfileConfig("adapter type is required".to_string()))?,
+            adapter_type: draft.adapter_type.clone().ok_or_else(|| {
+                AppError::InvalidProfileConfig("adapter type is required".to_string())
+            })?,
             worker_queue: None,
             schema_name: draft.schema_name.clone(),
             threads: draft.threads,
             profile_config: draft.profile_config.clone(),
             profile_secrets: crate::profile::decrypt_json(&draft.profile_secrets)?,
-        }).await
+        })
+        .await
     }
 
     pub async fn mark_project_draft_validating(
@@ -432,9 +424,7 @@ impl Db {
         .bind(draft_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| {
-            AppError::ProjectDraftNotFound(draft_id.to_string())
-        })?;
+        .ok_or_else(|| AppError::ProjectDraftNotFound(draft_id.to_string()))?;
         Ok(project_draft_record_from_row(&row))
     }
 
@@ -524,5 +514,4 @@ impl Db {
             Err(err) => Err(AppError::Sqlx(err)),
         }
     }
-
 }

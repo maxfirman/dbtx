@@ -91,8 +91,8 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_captures_stdout() {
-        let mut child = DbtChild::spawn("echo", "hello world", &[], Path::new("."))
-            .expect("spawn echo");
+        let mut child =
+            DbtChild::spawn("echo", "hello world", &[], Path::new(".")).expect("spawn echo");
         let line = child.stdout_lines.next_line().await.unwrap();
         assert_eq!(line.as_deref(), Some("hello world"));
         let result = child.wait().await.unwrap();
@@ -132,13 +132,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_kill_terminates_process() {
-        let mut child = DbtChild::spawn(
-            "sleep",
-            "60",
-            &[],
-            Path::new("."),
-        )
-        .expect("spawn sleep");
+        let mut child = DbtChild::spawn("sleep", "60", &[], Path::new(".")).expect("spawn sleep");
         child.start_kill();
         // After kill, stdout closes and wait completes
         while child.stdout_lines.next_line().await.unwrap().is_some() {}

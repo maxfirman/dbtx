@@ -1,7 +1,5 @@
 //! Invocation lifecycle bootstrapping: creation, claim deadlines, and prepared invocation startup.
-use crate::api::{
-    InvocationCommandApi, InvocationExecutionModeApi, InvocationExecutionSpecApi,
-};
+use crate::api::{InvocationCommandApi, InvocationExecutionModeApi, InvocationExecutionSpecApi};
 use crate::db::{CreateInvocationInput, PreparationStatus};
 use crate::error::{AppError, AppResult};
 use crate::server::AppState;
@@ -10,7 +8,7 @@ use crate::services::{
     target_manifest_input_fingerprint,
 };
 use chrono::{Duration, Utc};
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
 pub fn invocation_claim_deadline_at(
@@ -54,7 +52,9 @@ pub async fn start_project_draft_validation_invocation(
         .db()
         .attach_project_draft_invocation(prepared.draft.id, invocation_id)
         .await?;
-    state.bootstrap_invocation_started(invocation_id, None).await?;
+    state
+        .bootstrap_invocation_started(invocation_id, None)
+        .await?;
     Ok(invocation_id)
 }
 
@@ -91,7 +91,9 @@ pub async fn start_environment_draft_prepare_invocation(
         .db()
         .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
         .await?;
-    state.bootstrap_invocation_started(invocation_id, None).await?;
+    state
+        .bootstrap_invocation_started(invocation_id, None)
+        .await?;
     Ok(invocation_id)
 }
 
@@ -131,7 +133,9 @@ pub async fn start_environment_draft_validation_invocation(
         .db()
         .attach_environment_draft_invocation(prepared.draft.id, invocation_id)
         .await?;
-    state.bootstrap_invocation_started(invocation_id, None).await?;
+    state
+        .bootstrap_invocation_started(invocation_id, None)
+        .await?;
     Ok(invocation_id)
 }
 
@@ -154,19 +158,21 @@ pub async fn start_prepared_invocation(
             profiles_yml: spec.profiles_yml,
             state_manifest: spec.state_manifest,
         },
-        crate::services::PreparedExecutionSpec::Remote(spec) => InvocationExecutionSpecApi::Remote {
-            command,
-            args: spec
-                .args
-                .into_iter()
-                .map(|value| value.to_string_lossy().into_owned())
-                .collect(),
-            repo_url: spec.repo_url,
-            commit_sha: spec.commit_sha,
-            project_root: spec.project_root,
-            profiles_yml: spec.profiles_yml,
-            state_manifest: spec.state_manifest,
-        },
+        crate::services::PreparedExecutionSpec::Remote(spec) => {
+            InvocationExecutionSpecApi::Remote {
+                command,
+                args: spec
+                    .args
+                    .into_iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect(),
+                repo_url: spec.repo_url,
+                commit_sha: spec.commit_sha,
+                project_root: spec.project_root,
+                profiles_yml: spec.profiles_yml,
+                state_manifest: spec.state_manifest,
+            }
+        }
         crate::services::PreparedExecutionSpec::ReleaseValidation(spec) => {
             InvocationExecutionSpecApi::ReleaseValidation {
                 repo_url: spec.repo_url,
@@ -201,13 +207,16 @@ pub async fn start_prepared_invocation(
         InvocationExecutionSpecApi::Local { .. } => InvocationExecutionModeApi::Local,
         _ => InvocationExecutionModeApi::Server,
     };
-    let persistence = prepared.persistence.map(|p| crate::invocation_runtime::InvocationPersistence {
-        run_id: p.run_id,
-        project_id: p.project_id,
-        environment_id: p.environment_id,
-        promote_base_manifest: p.promote_base_manifest,
-        updates_actual_state: p.updates_actual_state,
-    });
+    let persistence =
+        prepared
+            .persistence
+            .map(|p| crate::invocation_runtime::InvocationPersistence {
+                run_id: p.run_id,
+                project_id: p.project_id,
+                environment_id: p.environment_id,
+                promote_base_manifest: p.promote_base_manifest,
+                updates_actual_state: p.updates_actual_state,
+            });
     state
         .db()
         .create_invocation(CreateInvocationInput {
@@ -233,7 +242,9 @@ pub async fn start_prepared_invocation(
             claim_deadline_at: Some(invocation_claim_deadline_at(execution_mode)),
         })
         .await?;
-    state.bootstrap_invocation_started(invocation_id, persistence).await?;
+    state
+        .bootstrap_invocation_started(invocation_id, persistence)
+        .await?;
     Ok(invocation_id)
 }
 
@@ -257,7 +268,10 @@ pub async fn ensure_target_manifest_for_reconcile(
     project_id: &str,
     environment_slug: &str,
 ) -> AppResult<()> {
-    let environment = state.db().get_environment(project_id, environment_slug).await?;
+    let environment = state
+        .db()
+        .get_environment(project_id, environment_slug)
+        .await?;
     let desired_commit_sha = environment
         .git_commit_sha
         .clone()
@@ -272,7 +286,11 @@ pub async fn ensure_target_manifest_for_reconcile(
     );
     if state
         .db()
-        .latest_manifest_run_id_for_commit(environment.project_id, environment.id, &desired_commit_sha)
+        .latest_manifest_run_id_for_commit(
+            environment.project_id,
+            environment.id,
+            &desired_commit_sha,
+        )
         .await?
         .is_some()
     {
@@ -335,24 +353,30 @@ pub async fn ensure_target_manifest_for_reconcile(
         crate::api::InvocationLifecycleStatus::Succeeded => {}
         crate::api::InvocationLifecycleStatus::Failed
         | crate::api::InvocationLifecycleStatus::Canceled => {
-            return Err(AppError::Internal(
-                status
-                    .error
-                    .unwrap_or_else(|| "manifest prepare invocation failed".to_string()),
-            ));
+            return Err(AppError::Internal(status.error.unwrap_or_else(|| {
+                "manifest prepare invocation failed".to_string()
+            })));
         }
         crate::api::InvocationLifecycleStatus::Running => {
-            return Err(AppError::Internal("manifest prepare invocation did not reach a terminal state".to_string()));
+            return Err(AppError::Internal(
+                "manifest prepare invocation did not reach a terminal state".to_string(),
+            ));
         }
     }
 
     if state
         .db()
-        .latest_manifest_run_id_for_commit(environment.project_id, environment.id, &desired_commit_sha)
+        .latest_manifest_run_id_for_commit(
+            environment.project_id,
+            environment.id,
+            &desired_commit_sha,
+        )
         .await?
         .is_none()
     {
-        return Err(AppError::Internal("manifest prepare finished without persisting a manifest snapshot".to_string()));
+        return Err(AppError::Internal(
+            "manifest prepare finished without persisting a manifest snapshot".to_string(),
+        ));
     }
 
     Ok(())
@@ -366,13 +390,16 @@ async fn wait_for_terminal_invocation(
     let deadline = Instant::now() + timeout;
     loop {
         let status = state.db().get_invocation_status(invocation_id).await?;
-        if !matches!(status.status, crate::api::InvocationLifecycleStatus::Running) {
+        if !matches!(
+            status.status,
+            crate::api::InvocationLifecycleStatus::Running
+        ) {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(AppError::TimedOut(
-                format!("timed out waiting for invocation {invocation_id}"),
-            ));
+            return Err(AppError::TimedOut(format!(
+                "timed out waiting for invocation {invocation_id}"
+            )));
         }
         sleep(std::time::Duration::from_millis(250)).await;
     }
@@ -381,8 +408,8 @@ async fn wait_for_terminal_invocation(
 #[cfg(test)]
 mod tests {
     use super::{invocation_claim_deadline_at, map_command_to_service};
-    use crate::api::InvocationExecutionModeApi;
     use crate::api::InvocationCommandApi;
+    use crate::api::InvocationExecutionModeApi;
     use crate::services::InvocationCommand;
     use chrono::Utc;
 
@@ -402,15 +429,45 @@ mod tests {
 
     #[test]
     fn map_command_to_service_maps_all_variants() {
-        assert_eq!(map_command_to_service(InvocationCommandApi::Build).as_str(), InvocationCommand::Build.as_str());
-        assert_eq!(map_command_to_service(InvocationCommandApi::Run).as_str(), InvocationCommand::Run.as_str());
-        assert_eq!(map_command_to_service(InvocationCommandApi::Ls).as_str(), InvocationCommand::Ls.as_str());
-        assert_eq!(map_command_to_service(InvocationCommandApi::Test).as_str(), InvocationCommand::Test.as_str());
-        assert_eq!(map_command_to_service(InvocationCommandApi::Seed).as_str(), InvocationCommand::Seed.as_str());
-        assert_eq!(map_command_to_service(InvocationCommandApi::Release).as_str(), InvocationCommand::Release.as_str());
-        assert_eq!(map_command_to_service(InvocationCommandApi::ProjectValidate).as_str(), InvocationCommand::ProjectValidate.as_str());
-        assert_eq!(map_command_to_service(InvocationCommandApi::EnvironmentPrepare).as_str(), InvocationCommand::EnvironmentPrepare.as_str());
-        assert_eq!(map_command_to_service(InvocationCommandApi::EnvironmentValidate).as_str(), InvocationCommand::EnvironmentValidate.as_str());
-        assert_eq!(map_command_to_service(InvocationCommandApi::ManifestPrepare).as_str(), InvocationCommand::ManifestPrepare.as_str());
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::Build).as_str(),
+            InvocationCommand::Build.as_str()
+        );
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::Run).as_str(),
+            InvocationCommand::Run.as_str()
+        );
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::Ls).as_str(),
+            InvocationCommand::Ls.as_str()
+        );
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::Test).as_str(),
+            InvocationCommand::Test.as_str()
+        );
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::Seed).as_str(),
+            InvocationCommand::Seed.as_str()
+        );
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::Release).as_str(),
+            InvocationCommand::Release.as_str()
+        );
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::ProjectValidate).as_str(),
+            InvocationCommand::ProjectValidate.as_str()
+        );
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::EnvironmentPrepare).as_str(),
+            InvocationCommand::EnvironmentPrepare.as_str()
+        );
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::EnvironmentValidate).as_str(),
+            InvocationCommand::EnvironmentValidate.as_str()
+        );
+        assert_eq!(
+            map_command_to_service(InvocationCommandApi::ManifestPrepare).as_str(),
+            InvocationCommand::ManifestPrepare.as_str()
+        );
     }
 }

@@ -2,18 +2,17 @@ mod common;
 
 use common::InProcessClient;
 use dbtx::api::{
-    EnvironmentActiveResourcesApiRequest, EnvironmentReconcileApiRequest,
-    EnvironmentDraftUpdateApiRequest, SourceStateEventCreateApiRequest,
-    EnvironmentReleaseApiRequest, EnvironmentRollbackApiRequest, InvocationCancelStateApi,
-    InvocationClaimNextApiRequest, InvocationCommandApi, InvocationCompleteApiRequest,
-    InvocationCreateApiRequest, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
-    InvocationHeartbeatApiRequest, InvocationLifecycleStatus, InvocationListApiRequest,
-    ProjectDraftCreateApiRequest,
+    EnvironmentActiveResourcesApiRequest, EnvironmentDraftUpdateApiRequest,
+    EnvironmentReconcileApiRequest, EnvironmentReleaseApiRequest, EnvironmentRollbackApiRequest,
+    InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationCommandApi,
+    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationEventBatchApiRequest,
+    InvocationExecutionModeApi, InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
+    InvocationListApiRequest, ProjectDraftCreateApiRequest, SourceStateEventCreateApiRequest,
 };
 use dbtx::config::RuntimeConfig;
 use dbtx::db::{Db, DraftStatus, PlanStatus};
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
-use dbtx::server::{router, AppState};
+use dbtx::server::{AppState, router};
 use dbtx::services::{
     code_change_input_fingerprint, infer_local_project_defaults, infer_remote_project_defaults,
     source_state_change_input_fingerprint, target_manifest_input_fingerprint,
@@ -326,7 +325,11 @@ async fn selected_resources_are_tracked_until_node_finish_or_invocation_completi
         rows[0].get::<Option<String>, _>("close_reason").as_deref(),
         Some("completed")
     );
-    assert!(rows[0].get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at").is_some());
+    assert!(
+        rows[0]
+            .get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
+            .is_some()
+    );
     assert_eq!(rows[1].get::<String, _>("unique_id"), "seed.pkg.customers");
     assert_eq!(
         rows[1].get::<Option<String>, _>("resource_type").as_deref(),
@@ -336,7 +339,11 @@ async fn selected_resources_are_tracked_until_node_finish_or_invocation_completi
         rows[1].get::<Option<String>, _>("close_reason").as_deref(),
         Some("invocation_failed")
     );
-    assert!(rows[1].get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at").is_some());
+    assert!(
+        rows[1]
+            .get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -378,7 +385,10 @@ async fn source_state_reconcile_creates_and_admits_plan() {
         .await
         .expect("environment actual state");
     assert_eq!(
-        actual_state.actual_state.last_successful_commit_sha.as_deref(),
+        actual_state
+            .actual_state
+            .last_successful_commit_sha
+            .as_deref(),
         Some(commit_sha)
     );
 
@@ -400,7 +410,11 @@ async fn source_state_reconcile_creates_and_admits_plan() {
         .expect("create source state event");
 
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create reconciliation plan")
         .plan;
@@ -432,15 +446,21 @@ async fn source_state_reconcile_creates_and_admits_plan() {
         .expect("reload admitted plan")
         .plan;
     assert_eq!(reloaded.status, PlanStatus::Admitted);
-    assert_eq!(reloaded.admitted_invocation_id, admitted.admitted_invocation_id);
+    assert_eq!(
+        reloaded.admitted_invocation_id,
+        admitted.admitted_invocation_id
+    );
 
-    let linked_plan_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT plan_id FROM invocations WHERE invocation_id = $1",
-    )
-    .bind(admitted.admitted_invocation_id.expect("admitted invocation id"))
-    .fetch_one(db.pool())
-    .await
-    .expect("load linked invocation plan id");
+    let linked_plan_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT plan_id FROM invocations WHERE invocation_id = $1")
+            .bind(
+                admitted
+                    .admitted_invocation_id
+                    .expect("admitted invocation id"),
+            )
+            .fetch_one(db.pool())
+            .await
+            .expect("load linked invocation plan id");
     assert_eq!(linked_plan_id, Some(plan.plan_id));
 }
 
@@ -491,7 +511,11 @@ async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconc
         .event;
 
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create reconciliation plan")
         .plan;
@@ -550,7 +574,11 @@ async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconc
     assert_eq!(satisfied_event_id, source_event.id);
 
     let err = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect_err("already satisfied source state should not create a new plan");
     assert!(
@@ -633,7 +661,11 @@ async fn newer_source_state_event_after_satisfaction_creates_a_new_plan() {
         .event;
 
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create new reconciliation plan")
         .plan;
@@ -763,7 +795,11 @@ async fn source_state_event_with_unmatched_source_key_returns_empty_plan() {
 
     // Reconcile should fail with empty plan — no downstream nodes to run
     let err = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect_err("unmatched source key should not create a plan");
     assert!(
@@ -777,7 +813,10 @@ async fn source_state_event_with_unmatched_source_key_returns_empty_plan() {
         .await
         .expect("list plans")
         .plans;
-    assert!(plans.is_empty(), "no plans should exist for unmatched source key");
+    assert!(
+        plans.is_empty(),
+        "no plans should exist for unmatched source key"
+    );
 }
 
 #[tokio::test]
@@ -852,7 +891,11 @@ async fn two_source_events_for_different_keys_produce_single_plan() {
         .event;
 
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create reconciliation plan")
         .plan;
@@ -871,7 +914,10 @@ async fn two_source_events_for_different_keys_produce_single_plan() {
     expected.sort();
     let mut actual = plan.selected_resources.clone();
     actual.sort();
-    assert_eq!(actual, expected, "plan should select downstream of both sources");
+    assert_eq!(
+        actual, expected,
+        "plan should select downstream of both sources"
+    );
     assert_eq!(plan.resource_count, 5);
 
     // metadata should contain both source event IDs
@@ -880,14 +926,14 @@ async fn two_source_events_for_different_keys_produce_single_plan() {
         .get("source_event_ids")
         .and_then(|v| v.as_array())
         .expect("source_event_ids in metadata");
-    let mut ids: Vec<i64> = source_event_ids
-        .iter()
-        .filter_map(|v| v.as_i64())
-        .collect();
+    let mut ids: Vec<i64> = source_event_ids.iter().filter_map(|v| v.as_i64()).collect();
     ids.sort();
     let mut expected_ids = vec![event_a.id, event_b.id];
     expected_ids.sort();
-    assert_eq!(ids, expected_ids, "metadata should reference both source events");
+    assert_eq!(
+        ids, expected_ids,
+        "metadata should reference both source events"
+    );
 
     // Only one plan should exist
     let plans = client
@@ -895,7 +941,11 @@ async fn two_source_events_for_different_keys_produce_single_plan() {
         .await
         .expect("list plans")
         .plans;
-    assert_eq!(plans.len(), 1, "both source events should produce a single plan");
+    assert_eq!(
+        plans.len(),
+        1,
+        "both source events should produce a single plan"
+    );
 }
 
 #[tokio::test]
@@ -969,14 +1019,21 @@ async fn simultaneous_code_drift_and_source_state_creates_code_plan_then_source_
 
     // First reconcile should create a code_change plan (code drift takes priority)
     let code_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create code_change plan")
         .plan;
     assert_eq!(code_plan.reason, "code_change");
     // metadata should note the pending source events
     assert_eq!(
-        code_plan.metadata.get("source_event_count").and_then(|v| v.as_i64()),
+        code_plan
+            .metadata
+            .get("source_event_count")
+            .and_then(|v| v.as_i64()),
         Some(1),
         "code_change plan metadata should record pending source event count"
     );
@@ -987,7 +1044,9 @@ async fn simultaneous_code_drift_and_source_state_creates_code_plan_then_source_
         .await
         .expect("admit code_change plan")
         .plan;
-    let invocation_id = admitted.admitted_invocation_id.expect("admitted invocation id");
+    let invocation_id = admitted
+        .admitted_invocation_id
+        .expect("admitted invocation id");
 
     let claim = client
         .invocation_claim_next(InvocationClaimNextApiRequest {
@@ -1019,7 +1078,9 @@ async fn simultaneous_code_drift_and_source_state_creates_code_plan_then_source_
         .await
         .expect("load actual state after code change")
         .actual_state;
-    let new_run_id = new_actual.last_successful_run_id.expect("new baseline run id");
+    let new_run_id = new_actual
+        .last_successful_run_id
+        .expect("new baseline run id");
     sqlx::query(
         "INSERT INTO manifest_snapshots (run_id, manifest, manifest_size_bytes, checksum) VALUES ($1, '{}'::jsonb, 2, 'post-code-change')",
     )
@@ -1069,13 +1130,20 @@ async fn simultaneous_code_drift_and_source_state_creates_code_plan_then_source_
     // Source event should still be unsatisfied (code_change doesn't mark source satisfaction)
     // Second reconcile should now create a source_state_change plan
     let source_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create source_state_change plan after code change completes")
         .plan;
     assert_eq!(source_plan.reason, "source_state_change");
     assert_eq!(source_plan.source_event_id, Some(source_event.id));
-    assert_eq!(source_plan.selection_spec.as_deref(), Some("source_downstream"));
+    assert_eq!(
+        source_plan.selection_spec.as_deref(),
+        Some("source_downstream")
+    );
 }
 
 #[tokio::test]
@@ -1122,12 +1190,24 @@ async fn code_drift_with_empty_diff_returns_empty_plan() {
     )
     .await;
     // Mark current node state as reconciled with matching checksums
-    mark_current_node_state_reconciled(db.pool(), &project_id, "remote", "model.pkg.orders", None).await;
-    mark_current_node_state_reconciled(db.pool(), &project_id, "remote", "model.pkg.customers", None).await;
+    mark_current_node_state_reconciled(db.pool(), &project_id, "remote", "model.pkg.orders", None)
+        .await;
+    mark_current_node_state_reconciled(
+        db.pool(),
+        &project_id,
+        "remote",
+        "model.pkg.customers",
+        None,
+    )
+    .await;
 
     // Reconcile should detect code drift but find no changed nodes → empty plan
     let err = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect_err("empty diff should not create a plan");
     assert!(
@@ -1198,7 +1278,11 @@ async fn admitted_source_plan_produces_invocation_with_select_args() {
         .expect("create source state event");
 
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create plan")
         .plan;
@@ -1207,7 +1291,9 @@ async fn admitted_source_plan_produces_invocation_with_select_args() {
         .await
         .expect("admit plan")
         .plan;
-    let invocation_id = admitted.admitted_invocation_id.expect("admitted invocation id");
+    let invocation_id = admitted
+        .admitted_invocation_id
+        .expect("admitted invocation id");
 
     // Check the run's args contain --select with the expected resources
     let row = sqlx::query(
@@ -1247,9 +1333,15 @@ async fn admitted_source_plan_produces_invocation_with_select_args() {
     expected.sort();
     let mut actual: Vec<&str> = select_args.clone();
     actual.sort();
-    assert_eq!(actual, expected, "select args should match plan selected_resources");
+    assert_eq!(
+        actual, expected,
+        "select args should match plan selected_resources"
+    );
 
-    assert!(!is_full_graph_run, "selective plan should set is_full_graph_run=false");
+    assert!(
+        !is_full_graph_run,
+        "selective plan should set is_full_graph_run=false"
+    );
 }
 
 #[tokio::test]
@@ -1298,7 +1390,11 @@ async fn selective_source_plan_does_not_promote_manifest() {
         .expect("create source state event");
 
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create plan")
         .plan;
@@ -1307,7 +1403,9 @@ async fn selective_source_plan_does_not_promote_manifest() {
         .await
         .expect("admit plan")
         .plan;
-    let invocation_id = admitted.admitted_invocation_id.expect("admitted invocation id");
+    let invocation_id = admitted
+        .admitted_invocation_id
+        .expect("admitted invocation id");
 
     // Verify promote_base_manifest is false on the invocation
     let promote: bool = sqlx::query_scalar(
@@ -1317,7 +1415,10 @@ async fn selective_source_plan_does_not_promote_manifest() {
     .fetch_one(db.pool())
     .await
     .expect("load promote_base_manifest");
-    assert!(!promote, "selective source plan should not promote manifest");
+    assert!(
+        !promote,
+        "selective source plan should not promote manifest"
+    );
 
     // Complete the invocation and verify no promoted manifest was written
     let claim = client
@@ -1361,7 +1462,10 @@ async fn selective_source_plan_does_not_promote_manifest() {
     .fetch_one(db.pool())
     .await
     .expect("count promoted manifest nodes");
-    assert_eq!(promoted_count, 0, "selective source plan should not promote manifest nodes");
+    assert_eq!(
+        promoted_count, 0,
+        "selective source plan should not promote manifest nodes"
+    );
 }
 
 #[tokio::test]
@@ -1449,7 +1553,11 @@ async fn partial_satisfaction_targets_only_unsatisfied_source_downstream() {
 
     // Reconcile should only target the unsatisfied source (raw_customers) downstream
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create plan for unsatisfied source")
         .plan;
@@ -1461,7 +1569,11 @@ async fn partial_satisfaction_targets_only_unsatisfied_source_downstream() {
         .and_then(|v| v.as_array())
         .expect("source_keys in metadata");
     let keys: Vec<&str> = source_keys.iter().filter_map(|v| v.as_str()).collect();
-    assert_eq!(keys, vec!["source.pkg.raw_customers"], "only unsatisfied source should be in plan");
+    assert_eq!(
+        keys,
+        vec!["source.pkg.raw_customers"],
+        "only unsatisfied source should be in plan"
+    );
 
     // selected_resources should include raw_customers downstream but NOT raw_orders downstream
     let mut resources = plan.selected_resources.clone();
@@ -1533,7 +1645,11 @@ async fn blocked_source_plan_completed_as_noop_when_events_already_satisfied() {
 
     // Create and admit a first plan, then claim it to make it "running"
     let first_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first plan")
         .plan;
@@ -1542,7 +1658,9 @@ async fn blocked_source_plan_completed_as_noop_when_events_already_satisfied() {
         .await
         .expect("admit first plan")
         .plan;
-    let first_invocation_id = first_admitted.admitted_invocation_id.expect("first invocation id");
+    let first_invocation_id = first_admitted
+        .admitted_invocation_id
+        .expect("first invocation id");
 
     let claim = client
         .invocation_claim_next(InvocationClaimNextApiRequest {
@@ -1582,7 +1700,11 @@ async fn blocked_source_plan_completed_as_noop_when_events_already_satisfied() {
         .expect("create second source event");
 
     let second_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create second plan")
         .plan;
@@ -1740,7 +1862,11 @@ async fn failed_source_plan_with_same_fingerprint_respects_backoff() {
         .iter()
         .filter(|p| p.reason == "source_state_change")
         .collect();
-    assert_eq!(source_plans.len(), 1, "backoff should prevent creating a new plan");
+    assert_eq!(
+        source_plans.len(),
+        1,
+        "backoff should prevent creating a new plan"
+    );
     assert_eq!(
         source_plans[0].status,
         PlanStatus::Failed,
@@ -1840,7 +1966,10 @@ async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_befo
     )
     .await;
 
-    db.client().reconcile_tick().await.expect("reconcile tick for manifest prepare");
+    db.client()
+        .reconcile_tick()
+        .await
+        .expect("reconcile tick for manifest prepare");
     wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", desired_commit).await;
 
     let row = sqlx::query(
@@ -1863,7 +1992,11 @@ async fn periodic_reconciler_starts_manifest_prepare_for_unseen_code_commit_befo
     .await
     .expect("load reconcile preparation record");
     assert_eq!(row.get::<String, _>("status"), "running");
-    assert_eq!(row.get::<Option<String>, _>("target_git_commit_sha").as_deref(), Some(desired_commit));
+    assert_eq!(
+        row.get::<Option<String>, _>("target_git_commit_sha")
+            .as_deref(),
+        Some(desired_commit)
+    );
     assert!(row.get::<Option<Uuid>, _>("invocation_id").is_some());
 
     let code_change_plan_count: i64 = sqlx::query_scalar(
@@ -1903,7 +2036,10 @@ async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
     )
     .await;
 
-    client.reconcile_tick().await.expect("reconcile tick for manifest prepare");
+    client
+        .reconcile_tick()
+        .await
+        .expect("reconcile tick for manifest prepare");
     wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", desired_commit).await;
 
     seed_manifest_run_only(
@@ -1919,7 +2055,10 @@ async fn periodic_reconciler_bootstraps_fresh_environment_without_baseline() {
     )
     .await;
 
-    client.reconcile_tick().await.expect("reconcile tick for plan creation");
+    client
+        .reconcile_tick()
+        .await
+        .expect("reconcile tick for plan creation");
     let created_plan = wait_for_plan_reason(&client, &project_id, "remote", "code_change").await;
     let plan = wait_for_plan_status(&client, created_plan.plan_id, PlanStatus::Admitted).await;
     assert!(plan.admitted_invocation_id.is_some());
@@ -2004,10 +2143,12 @@ async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
     )
     .bind(&project_id)
     .bind("remote")
-    .bind(target_manifest_input_fingerprint(&code_change_input_fingerprint(
-        desired_commit,
-        latest_run_id_for_commit(db.pool(), &project_id, "remote", baseline_commit).await,
-    )))
+    .bind(target_manifest_input_fingerprint(
+        &code_change_input_fingerprint(
+            desired_commit,
+            latest_run_id_for_commit(db.pool(), &project_id, "remote", baseline_commit).await,
+        ),
+    ))
     .bind(desired_commit)
     .execute(db.pool())
     .await
@@ -2066,8 +2207,10 @@ async fn manual_reconcile_respects_manifest_prepare_retry_backoff() {
     .await;
     let baseline_run_id =
         latest_run_id_for_commit(db.pool(), &project_id, "remote", baseline_commit).await;
-    let input_fingerprint =
-        target_manifest_input_fingerprint(&code_change_input_fingerprint(desired_commit, baseline_run_id));
+    let input_fingerprint = target_manifest_input_fingerprint(&code_change_input_fingerprint(
+        desired_commit,
+        baseline_run_id,
+    ));
 
     sqlx::query(
         r#"
@@ -2116,7 +2259,11 @@ async fn manual_reconcile_respects_manifest_prepare_retry_backoff() {
 
     assert!(
         client
-            .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+            .environment_reconcile(
+                &project_id,
+                "remote",
+                EnvironmentReconcileApiRequest::default()
+            )
             .await
             .is_err(),
         "manual reconcile should respect manifest prepare retry backoff"
@@ -2342,17 +2489,23 @@ async fn periodic_reconciler_bypasses_old_manifest_prepare_backoff_for_new_desir
     )
     .bind(&project_id)
     .bind("remote")
-    .bind(target_manifest_input_fingerprint(&code_change_input_fingerprint(
-        old_desired_commit,
-        latest_run_id_for_commit(db.pool(), &project_id, "remote", baseline_commit).await,
-    )))
+    .bind(target_manifest_input_fingerprint(
+        &code_change_input_fingerprint(
+            old_desired_commit,
+            latest_run_id_for_commit(db.pool(), &project_id, "remote", baseline_commit).await,
+        ),
+    ))
     .bind(old_desired_commit)
     .execute(db.pool())
     .await
     .expect("insert failed old reconcile preparation");
 
-    db.client().reconcile_tick().await.expect("reconcile tick for manifest prepare bypass");
-    wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", new_desired_commit).await;
+    db.client()
+        .reconcile_tick()
+        .await
+        .expect("reconcile tick for manifest prepare bypass");
+    wait_for_manifest_prepare_invocation(db.pool(), &project_id, "remote", new_desired_commit)
+        .await;
 }
 
 #[tokio::test]
@@ -2488,8 +2641,12 @@ async fn periodic_reconciler_bypasses_old_source_backoff_for_newer_source_event(
         .expect("create second source event")
         .event;
 
-    client.reconcile_tick().await.expect("reconcile tick for source backoff bypass");
-    let new_plan = wait_for_plan_reason(&client, &project_id, "remote", "source_state_change").await;
+    client
+        .reconcile_tick()
+        .await
+        .expect("reconcile tick for source backoff bypass");
+    let new_plan =
+        wait_for_plan_reason(&client, &project_id, "remote", "source_state_change").await;
     assert_eq!(new_plan.source_event_id, Some(second.id));
     let admitted = wait_for_plan_status(&client, new_plan.plan_id, PlanStatus::Admitted).await;
     assert_eq!(admitted.source_event_id, Some(second.id));
@@ -2544,7 +2701,11 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
         .await
         .expect("create first source state event");
     let first_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first reconciliation plan")
         .plan;
@@ -2592,7 +2753,11 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
         .await
         .expect("create second source state event");
     let second_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create second reconciliation plan")
         .plan;
@@ -2628,13 +2793,12 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_completes() {
         .expect("auto-admitted invocation id");
     assert_ne!(auto_admitted_invocation_id, first_invocation_id);
 
-    let linked_plan_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT plan_id FROM invocations WHERE invocation_id = $1",
-    )
-    .bind(auto_admitted_invocation_id)
-    .fetch_one(db.pool())
-    .await
-    .expect("load auto-admitted invocation plan id");
+    let linked_plan_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT plan_id FROM invocations WHERE invocation_id = $1")
+            .bind(auto_admitted_invocation_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("load auto-admitted invocation plan id");
     assert_eq!(linked_plan_id, Some(second_plan.plan_id));
 }
 
@@ -2687,7 +2851,11 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
         .await
         .expect("create first source state event");
     let first_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first reconciliation plan")
         .plan;
@@ -2735,7 +2903,11 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_cancels() {
         .await
         .expect("create second source state event");
     let second_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create second reconciliation plan")
         .plan;
@@ -2820,7 +2992,11 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
         .await
         .expect("create first source state event");
     let first_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first reconciliation plan")
         .plan;
@@ -2868,7 +3044,11 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_times_out() {
         .await
         .expect("create second source state event");
     let second_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create second reconciliation plan")
         .plan;
@@ -2952,7 +3132,11 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
         .await
         .expect("create first source state event");
     let first_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first reconciliation plan")
         .plan;
@@ -3000,7 +3184,11 @@ async fn blocked_plan_auto_admits_when_conflicting_invocation_fails() {
         .await
         .expect("create second source state event");
     let second_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create second reconciliation plan")
         .plan;
@@ -3093,7 +3281,11 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
     }
 
     let first_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first plan")
         .plan;
@@ -3125,12 +3317,20 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
     .await;
 
     let second_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create second plan")
         .plan;
     let third_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create third plan")
         .plan;
@@ -3233,7 +3433,11 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
         .await
         .expect("create first source state event");
     let first_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first plan")
         .plan;
@@ -3279,7 +3483,11 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
         .await
         .expect("create second source state event");
     let second_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create second plan")
         .plan;
@@ -3313,13 +3521,12 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
         .admitted_invocation_id
         .expect("second plan admitted");
 
-    let before_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM invocations WHERE plan_id = $1",
-    )
-    .bind(second_plan.plan_id)
-    .fetch_one(db.pool())
-    .await
-    .expect("count plan invocations before unrelated completion");
+    let before_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM invocations WHERE plan_id = $1")
+            .bind(second_plan.plan_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("count plan invocations before unrelated completion");
     assert_eq!(before_count, 1);
 
     let unrelated = client
@@ -3335,13 +3542,12 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
         .await
         .expect("cancel unrelated invocation");
 
-    let after_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM invocations WHERE plan_id = $1",
-    )
-    .bind(second_plan.plan_id)
-    .fetch_one(db.pool())
-    .await
-    .expect("count plan invocations after unrelated completion");
+    let after_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM invocations WHERE plan_id = $1")
+            .bind(second_plan.plan_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("count plan invocations after unrelated completion");
     assert_eq!(after_count, 1);
     let reloaded = client
         .environment_plan_get(second_plan.plan_id)
@@ -3349,7 +3555,10 @@ async fn admitted_plan_is_not_auto_admitted_again_on_later_completion() {
         .expect("reload second plan after unrelated completion")
         .plan;
     assert_eq!(reloaded.status, PlanStatus::Admitted);
-    assert_eq!(reloaded.admitted_invocation_id, Some(admitted_invocation_id));
+    assert_eq!(
+        reloaded.admitted_invocation_id,
+        Some(admitted_invocation_id)
+    );
 }
 
 #[tokio::test]
@@ -3401,7 +3610,11 @@ async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_cance
         .await
         .expect("create first source state event");
     let first_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first plan")
         .plan;
@@ -3438,7 +3651,11 @@ async fn blocked_plan_auto_admits_when_unclaimed_conflicting_invocation_is_cance
         .await
         .expect("create second source state event");
     let second_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create second plan")
         .plan;
@@ -3524,7 +3741,11 @@ async fn manual_admit_after_auto_admit_fails_cleanly() {
         .await
         .expect("create first source state event");
     let first_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first plan")
         .plan;
@@ -3570,7 +3791,11 @@ async fn manual_admit_after_auto_admit_fails_cleanly() {
         .await
         .expect("create second source state event");
     let second_plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create second plan")
         .plan;
@@ -3603,7 +3828,10 @@ async fn manual_admit_after_auto_admit_fails_cleanly() {
         .plan;
     assert_eq!(reloaded.status, PlanStatus::Admitted);
     assert!(
-        client.environment_plan_admit(second_plan.plan_id).await.is_err(),
+        client
+            .environment_plan_admit(second_plan.plan_id)
+            .await
+            .is_err(),
         "manual admit after auto-admit should fail"
     );
 }
@@ -3676,15 +3904,25 @@ async fn code_change_reconcile_uses_target_manifest_and_live_current_state() {
     .await;
 
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create code-change reconciliation plan")
         .plan;
 
     assert_eq!(plan.status, PlanStatus::Planned);
     assert_eq!(plan.reason, "code_change");
-    assert_eq!(plan.selection_spec.as_deref(), Some("state_modified_live_plus"));
-    assert_eq!(plan.selected_resources, vec!["model.pkg.customers".to_string()]);
+    assert_eq!(
+        plan.selection_spec.as_deref(),
+        Some("state_modified_live_plus")
+    );
+    assert_eq!(
+        plan.selected_resources,
+        vec!["model.pkg.customers".to_string()]
+    );
     assert_eq!(plan.resource_count, 1);
     assert_eq!(
         plan.metadata
@@ -3744,12 +3982,20 @@ async fn reconcile_reuses_equivalent_pending_plan() {
         .expect("create source state event");
 
     let first = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first reconcile plan")
         .plan;
     let second = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("reuse equivalent reconcile plan")
         .plan;
@@ -3810,7 +4056,11 @@ async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
     .await;
 
     let first = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create first plan")
         .plan;
@@ -3838,7 +4088,11 @@ async fn reconcile_supersedes_older_pending_plan_when_target_changes() {
     .await;
 
     let second = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create superseding plan")
         .plan;
@@ -3920,7 +4174,11 @@ async fn reconcile_respects_active_environment_lease() {
 
     assert!(
         client
-            .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+            .environment_reconcile(
+                &project_id,
+                "remote",
+                EnvironmentReconcileApiRequest::default()
+            )
             .await
             .is_err(),
         "active reconcile lease should block a concurrent reconcile request"
@@ -4007,7 +4265,11 @@ async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
     .await;
 
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create code-change plan")
         .plan;
@@ -4040,7 +4302,10 @@ async fn blocked_code_change_plan_replans_to_latest_live_state_before_admit() {
         .expect("re-admit blocked plan")
         .plan;
     assert_eq!(replanned.status, PlanStatus::Blocked);
-    assert_eq!(replanned.selected_resources, vec!["model.pkg.customers".to_string()]);
+    assert_eq!(
+        replanned.selected_resources,
+        vec!["model.pkg.customers".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -4120,7 +4385,11 @@ async fn blocked_source_state_plan_completes_noop_when_source_event_is_already_s
         .expect("create source state event")
         .event;
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create source-state plan")
         .plan;
@@ -4227,7 +4496,11 @@ async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() 
     .await;
 
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create code-change plan")
         .plan;
@@ -4262,7 +4535,10 @@ async fn periodic_blocked_plan_sweep_replans_and_auto_admits_code_change_work() 
         .expect("reload plan after sweep")
         .plan;
     assert_eq!(admitted.status, PlanStatus::Admitted);
-    assert_eq!(admitted.selected_resources, vec!["model.pkg.customers".to_string()]);
+    assert_eq!(
+        admitted.selected_resources,
+        vec!["model.pkg.customers".to_string()]
+    );
     assert!(admitted.admitted_invocation_id.is_some());
 }
 
@@ -4343,7 +4619,11 @@ async fn periodic_blocked_plan_sweep_completes_satisfied_source_plan_noop() {
         .expect("create source state event")
         .event;
     let plan = client
-        .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
         .await
         .expect("create source-state plan")
         .plan;
@@ -4869,7 +5149,10 @@ async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
         .await
         .expect("validate draft");
     assert_eq!(validating.draft.status, DraftStatus::Validating);
-    assert_eq!(validating.draft.git_commit_sha.as_deref(), Some(head_sha.as_str()));
+    assert_eq!(
+        validating.draft.git_commit_sha.as_deref(),
+        Some(head_sha.as_str())
+    );
 
     mark_environment_draft_validated(
         db.pool(),
@@ -4902,9 +5185,16 @@ async fn environment_release_is_idempotent_and_rollback_records_forward_fix() {
     let repo = TempProjectRepo::new("proj");
     let client = db.client().clone();
 
-    fs::write(repo.project_dir().join("README.md"), "second commit\n").expect("write second commit file");
-    git(&["add", "."], repo.project_dir().parent().expect("repo root"));
-    git(&["commit", "-m", "second"], repo.project_dir().parent().expect("repo root"));
+    fs::write(repo.project_dir().join("README.md"), "second commit\n")
+        .expect("write second commit file");
+    git(
+        &["add", "."],
+        repo.project_dir().parent().expect("repo root"),
+    );
+    git(
+        &["commit", "-m", "second"],
+        repo.project_dir().parent().expect("repo root"),
+    );
 
     let head_sha = git_rev_parse(repo.project_dir(), "HEAD");
     let previous_sha = git_rev_parse(repo.project_dir(), "HEAD~1");
@@ -5026,20 +5316,17 @@ async fn project_draft_api_round_trip_and_confirms_validated_draft() {
     assert_eq!(validating.draft.status, DraftStatus::Validating);
 
     let project_name = read_dbt_project_name(repo.project_dir());
-    mark_project_draft_validated(
-        db.pool(),
-        created.draft.id,
-        &project_name,
-        "main",
-    )
-    .await;
+    mark_project_draft_validated(db.pool(), created.draft.id, &project_name, "main").await;
 
     let reloaded = client
         .project_draft_get(created.draft.id)
         .await
         .expect("reload validated draft");
     assert_eq!(reloaded.draft.status, DraftStatus::Validated);
-    assert_eq!(reloaded.draft.project_name.as_deref(), Some(project_name.as_str()));
+    assert_eq!(
+        reloaded.draft.project_name.as_deref(),
+        Some(project_name.as_str())
+    );
     assert_eq!(reloaded.draft.default_branch.as_deref(), Some("main"));
 
     let confirmed = client
@@ -5051,7 +5338,10 @@ async fn project_draft_api_round_trip_and_confirms_validated_draft() {
         confirmed.project.git_repo_url.as_deref(),
         Some("https://example.com/repo.git")
     );
-    assert_eq!(confirmed.project.project_root.as_deref(), Some(project_root.as_str()));
+    assert_eq!(
+        confirmed.project.project_root.as_deref(),
+        Some(project_root.as_str())
+    );
     assert_eq!(confirmed.project.project_name, project_name);
 }
 
@@ -5130,7 +5420,9 @@ async fn validation_queue_routes_onboarding_but_not_normal_remote_invocations() 
     }
 
     assert_eq!(
-        queues.get(&project_validation.invocation_id).map(String::as_str),
+        queues
+            .get(&project_validation.invocation_id)
+            .map(String::as_str),
         Some("validation-only")
     );
     assert_eq!(
@@ -5138,11 +5430,15 @@ async fn validation_queue_routes_onboarding_but_not_normal_remote_invocations() 
         Some("validation-only")
     );
     assert_eq!(
-        queues.get(&env_validation.invocation_id).map(String::as_str),
+        queues
+            .get(&env_validation.invocation_id)
+            .map(String::as_str),
         Some("validation-only")
     );
     assert_eq!(
-        queues.get(&normal_invocation.invocation_id).map(String::as_str),
+        queues
+            .get(&normal_invocation.invocation_id)
+            .map(String::as_str),
         Some("generic")
     );
 }
@@ -5241,16 +5537,25 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
     SHARED_INFRA
         .get_or_init(|| async {
             if let Ok(url) = std::env::var("DBTX_TEST_DATABASE_URL") {
-                let admin_url = url.rsplit_once('/').map(|(base, _)| format!("{base}/postgres"))
+                let admin_url = url
+                    .rsplit_once('/')
+                    .map(|(base, _)| format!("{base}/postgres"))
                     .unwrap_or_else(|| url.clone());
                 let admin_pool = PgPool::connect(&admin_url).await.expect("connect admin");
-                let _ = sqlx::query("CREATE DATABASE dbtx_template").execute(&admin_pool).await;
+                let _ = sqlx::query("CREATE DATABASE dbtx_template")
+                    .execute(&admin_pool)
+                    .await;
                 admin_pool.close().await;
-                let template_url = url.rsplit_once('/').map(|(base, _)| format!("{base}/dbtx_template"))
+                let template_url = url
+                    .rsplit_once('/')
+                    .map(|(base, _)| format!("{base}/dbtx_template"))
                     .unwrap_or_else(|| url.clone());
                 let db = Db::connect(&template_url).await.expect("connect template");
                 db.migrate().await.expect("migrate template");
-                return SharedTestInfra { admin_url, _container: None };
+                return SharedTestInfra {
+                    admin_url,
+                    _container: None,
+                };
             }
 
             let container = Postgres::default()
@@ -5262,14 +5567,20 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
                 .expect("start shared postgres container");
 
             let host = container.get_host().await.expect("postgres host");
-            let port = container.get_host_port_ipv4(5432).await.expect("postgres port");
+            let port = container
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("postgres port");
             let template_url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx_template");
             let admin_url = format!("postgres://dbtx:dbtx@{host}:{port}/postgres");
 
             let db = Db::connect(&template_url).await.expect("connect template");
             db.migrate().await.expect("migrate template");
 
-            SharedTestInfra { admin_url, _container: Some(container) }
+            SharedTestInfra {
+                admin_url,
+                _container: Some(container),
+            }
         })
         .await
 }
@@ -5291,11 +5602,18 @@ impl TestDatabase {
         let infra = get_shared_infra().await;
         let db_name = format!("test_{}", Uuid::new_v4().simple());
 
-        let admin_pool = PgPool::connect(&infra.admin_url).await.expect("connect admin db");
+        let admin_pool = PgPool::connect(&infra.admin_url)
+            .await
+            .expect("connect admin db");
         sqlx::query(&format!("CREATE DATABASE {db_name} TEMPLATE dbtx_template"))
-            .execute(&admin_pool).await.expect("create test database from template");
+            .execute(&admin_pool)
+            .await
+            .expect("create test database from template");
 
-        let test_url = infra.admin_url.rsplit_once('/').map(|(base, _)| format!("{base}/{db_name}"))
+        let test_url = infra
+            .admin_url
+            .rsplit_once('/')
+            .map(|(base, _)| format!("{base}/{db_name}"))
             .unwrap_or_else(|| format!("{}/{db_name}", infra.admin_url));
 
         let db = Db::connect(&test_url).await.expect("connect app db");
@@ -5304,7 +5622,12 @@ impl TestDatabase {
         let client = InProcessClient::new(router(state));
         let pool = PgPool::connect(&test_url).await.expect("connect test db");
 
-        Self { client, pool, db_name, admin_pool }
+        Self {
+            client,
+            pool,
+            db_name,
+            admin_pool,
+        }
     }
 
     fn client(&self) -> &InProcessClient {
@@ -5323,15 +5646,17 @@ impl Drop for TestDatabase {
         let admin_pool = self.admin_pool.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().expect("drop runtime");
+                .enable_all()
+                .build()
+                .expect("drop runtime");
             rt.block_on(async {
                 let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name} WITH (FORCE)"))
-                    .execute(&admin_pool).await;
+                    .execute(&admin_pool)
+                    .await;
             });
         });
     }
 }
-
 
 async fn wait_for_plan_status(
     client: &InProcessClient,
@@ -5340,10 +5665,18 @@ async fn wait_for_plan_status(
 ) -> dbtx::db::EnvironmentRunPlanRecord {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let plan = client.environment_plan_get(plan_id).await.expect("reload plan while waiting");
-        if plan.plan.status == expected_status { return plan.plan; }
-        assert!(Instant::now() < deadline,
-            "timed out waiting for plan {plan_id} to reach status {expected_status}, last status was {}", plan.plan.status);
+        let plan = client
+            .environment_plan_get(plan_id)
+            .await
+            .expect("reload plan while waiting");
+        if plan.plan.status == expected_status {
+            return plan.plan;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for plan {plan_id} to reach status {expected_status}, last status was {}",
+            plan.plan.status
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -5356,28 +5689,60 @@ async fn wait_for_plan_reason(
 ) -> dbtx::db::EnvironmentRunPlanRecord {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let plans = client.environment_plan_list(project_id, slug).await.expect("list plans while waiting").plans;
-        if let Some(plan) = plans.into_iter().find(|plan| plan.reason == expected_reason)
-            && matches!(plan.status, PlanStatus::Planned | PlanStatus::Blocked | PlanStatus::Admitted | PlanStatus::Completed)
-        { return plan; }
-        assert!(Instant::now() < deadline, "timed out waiting for plan with reason {expected_reason} in {project_id}/{slug}");
+        let plans = client
+            .environment_plan_list(project_id, slug)
+            .await
+            .expect("list plans while waiting")
+            .plans;
+        if let Some(plan) = plans
+            .into_iter()
+            .find(|plan| plan.reason == expected_reason)
+            && matches!(
+                plan.status,
+                PlanStatus::Planned
+                    | PlanStatus::Blocked
+                    | PlanStatus::Admitted
+                    | PlanStatus::Completed
+            )
+        {
+            return plan;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for plan with reason {expected_reason} in {project_id}/{slug}"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-async fn wait_for_manifest_prepare_invocation(pool: &PgPool, project_id: &str, slug: &str, commit_sha: &str) {
+async fn wait_for_manifest_prepare_invocation(
+    pool: &PgPool,
+    project_id: &str,
+    slug: &str,
+    commit_sha: &str,
+) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let count: i64 = sqlx::query_scalar(
             r#"SELECT COUNT(*) FROM invocations i JOIN runs r ON r.run_id = i.run_id JOIN projects p ON p.id = i.project_id JOIN environments e ON e.id = i.environment_id WHERE p.project_id = $1 AND e.slug = $2 AND i.command = 'manifest_prepare' AND i.status = 'running' AND i.completed_at IS NULL AND r.git_commit_sha = $3"#,
         ).bind(project_id).bind(slug).bind(commit_sha).fetch_one(pool).await.expect("count manifest prepare invocations");
-        if count > 0 { return; }
-        assert!(Instant::now() < deadline, "timed out waiting for manifest prepare invocation for {commit_sha}");
+        if count > 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for manifest prepare invocation for {commit_sha}"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-async fn latest_run_id_for_commit(pool: &PgPool, project_id: &str, slug: &str, commit_sha: &str) -> Uuid {
+async fn latest_run_id_for_commit(
+    pool: &PgPool,
+    project_id: &str,
+    slug: &str,
+    commit_sha: &str,
+) -> Uuid {
     sqlx::query_scalar(
         r#"SELECT r.run_id FROM runs r JOIN projects p ON p.id = r.project_id JOIN environments e ON e.id = r.environment_id WHERE p.project_id = $1 AND e.slug = $2 AND r.git_commit_sha = $3 ORDER BY r.id DESC LIMIT 1"#,
     ).bind(project_id).bind(slug).bind(commit_sha).fetch_one(pool).await.expect("load latest run id for commit")
@@ -5769,7 +6134,11 @@ async fn seed_manifest_run_only(
     )
     .bind(run_id)
     .bind(sqlx::types::Json(manifest.clone()))
-    .bind(serde_json::to_vec(&manifest).expect("serialize manifest").len() as i64)
+    .bind(
+        serde_json::to_vec(&manifest)
+            .expect("serialize manifest")
+            .len() as i64,
+    )
     .execute(pool)
     .await
     .expect("insert target manifest snapshot");
@@ -6108,7 +6477,8 @@ async fn bootstrap_remote_project_and_env_direct(
 }
 
 fn read_dbt_project_name(project_dir: &Path) -> String {
-    let content = fs::read_to_string(project_dir.join("dbt_project.yml")).expect("read dbt_project");
+    let content =
+        fs::read_to_string(project_dir.join("dbt_project.yml")).expect("read dbt_project");
     content
         .lines()
         .find_map(|line| line.strip_prefix("name: ").map(str::to_string))
@@ -6263,7 +6633,6 @@ fn sample_execution_completion(
     }
 }
 
-
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn reconcile_already_reconciled_environment_returns_conflict() {
@@ -6293,7 +6662,11 @@ async fn reconcile_already_reconciled_environment_returns_conflict() {
 
     // Environment is already reconciled (desired == actual commit)
     let err = client
-        .environment_reconcile(&project_id, "prod", dbtx::api::EnvironmentReconcileApiRequest {})
+        .environment_reconcile(
+            &project_id,
+            "prod",
+            dbtx::api::EnvironmentReconcileApiRequest {},
+        )
         .await
         .expect_err("should fail with conflict");
     assert!(
@@ -6340,7 +6713,11 @@ async fn admit_completed_plan_returns_conflict() {
     .await;
 
     let plan = client
-        .environment_reconcile(&project_id, "prod", dbtx::api::EnvironmentReconcileApiRequest {})
+        .environment_reconcile(
+            &project_id,
+            "prod",
+            dbtx::api::EnvironmentReconcileApiRequest {},
+        )
         .await
         .expect("reconcile should create plan")
         .plan;
@@ -6354,7 +6731,10 @@ async fn admit_completed_plan_returns_conflict() {
     assert_eq!(admitted.plan.status, PlanStatus::Admitted);
 
     // Complete the plan's invocation
-    let invocation_id = admitted.plan.admitted_invocation_id.expect("has invocation");
+    let invocation_id = admitted
+        .plan
+        .admitted_invocation_id
+        .expect("has invocation");
     let claim = client
         .invocation_claim_next(InvocationClaimNextApiRequest {
             execution_mode: Some(InvocationExecutionModeApi::Server),
@@ -6383,7 +6763,9 @@ async fn admit_completed_plan_returns_conflict() {
         .expect_err("should fail with conflict");
     let msg = err.to_string();
     assert!(
-        msg.contains("not admissible") || msg.contains("already in progress") || msg.contains("already reconciled"),
+        msg.contains("not admissible")
+            || msg.contains("already in progress")
+            || msg.contains("already reconciled"),
         "expected conflict error, got: {msg}"
     );
 }
@@ -6408,7 +6790,11 @@ async fn reconcile_without_baseline_returns_unprocessable() {
     // No actual state seeded — no baseline run exists
 
     let err = client
-        .environment_reconcile(&project_id, "prod", dbtx::api::EnvironmentReconcileApiRequest {})
+        .environment_reconcile(
+            &project_id,
+            "prod",
+            dbtx::api::EnvironmentReconcileApiRequest {},
+        )
         .await
         .expect_err("should fail without baseline");
     let msg = err.to_string();

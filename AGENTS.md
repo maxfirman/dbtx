@@ -137,6 +137,7 @@ Split into domain submodules:
 Before finishing significant work, prefer:
 
 ```bash
+cargo fmt
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```

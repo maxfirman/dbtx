@@ -66,9 +66,7 @@ pub(crate) const ENVIRONMENT_FROM_CLAUSE: &str = r#"
 
 /// Build a full environment SELECT query with a WHERE clause suffix.
 pub(crate) fn environment_query(where_and_suffix: &str) -> String {
-    format!(
-        "SELECT {ENVIRONMENT_SELECT_COLUMNS} {ENVIRONMENT_FROM_CLAUSE} {where_and_suffix}"
-    )
+    format!("SELECT {ENVIRONMENT_SELECT_COLUMNS} {ENVIRONMENT_FROM_CLAUSE} {where_and_suffix}")
 }
 
 impl Db {
@@ -112,13 +110,12 @@ impl Db {
     }
 }
 
-mod projects;
 mod environments;
-mod reconciliation;
 mod invocations;
-mod runs;
 mod models;
-
+mod projects;
+mod reconciliation;
+mod runs;
 
 fn null_if_empty(value: &str) -> Option<&str> {
     if value.is_empty() { None } else { Some(value) }
@@ -291,7 +288,8 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         auto_deploy: row.get("auto_deploy"),
         immutable: row.get("immutable"),
         pr_number: row.get("pr_number"),
-        status: EnvironmentStatus::parse(&row.get::<String, _>("status")).unwrap_or(EnvironmentStatus::Active),
+        status: EnvironmentStatus::parse(&row.get::<String, _>("status"))
+            .unwrap_or(EnvironmentStatus::Active),
         adapter_type: row.get("adapter_type"),
         worker_queue: row.get("worker_queue"),
         schema_name: row.get("schema_name"),
@@ -344,7 +342,8 @@ fn environment_reconcile_preparation_from_row(
         kind: row.get("kind"),
         input_fingerprint: row.get("input_fingerprint"),
         target_git_commit_sha: row.get("target_git_commit_sha"),
-        status: PreparationStatus::parse(&row.get::<String, _>("status")).unwrap_or(PreparationStatus::Failed),
+        status: PreparationStatus::parse(&row.get::<String, _>("status"))
+            .unwrap_or(PreparationStatus::Failed),
         invocation_id: row.get("invocation_id"),
         error: row.get("error"),
         failure_count: row.get("failure_count"),
@@ -418,7 +417,9 @@ fn plan_source_event_ids(source_event_id: Option<i64>, metadata: &Value) -> Vec<
         .flatten()
         .filter_map(|value| value.as_i64())
         .collect::<Vec<_>>();
-    if event_ids.is_empty() && let Some(source_event_id) = source_event_id {
+    if event_ids.is_empty()
+        && let Some(source_event_id) = source_event_id
+    {
         event_ids.push(source_event_id);
     }
     event_ids.sort_unstable();
@@ -426,7 +427,9 @@ fn plan_source_event_ids(source_event_id: Option<i64>, metadata: &Value) -> Vec<
     event_ids
 }
 
-fn active_environment_resource_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentActiveResourceRecord {
+fn active_environment_resource_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> EnvironmentActiveResourceRecord {
     EnvironmentActiveResourceRecord {
         invocation_id: row.get("invocation_id"),
         run_id: row.get("run_id"),
@@ -734,7 +737,9 @@ mod tests {
     #[test]
     fn compute_cancel_state_returns_completed_for_canceled() {
         use super::compute_cancel_state;
-        use crate::api::{InvocationCancelStateApi, InvocationLifecycleStatus, InvocationStatusResponse};
+        use crate::api::{
+            InvocationCancelStateApi, InvocationLifecycleStatus, InvocationStatusResponse,
+        };
         let status = InvocationStatusResponse {
             invocation_id: uuid::Uuid::nil(),
             execution_mode: InvocationExecutionModeApi::Server,
@@ -752,13 +757,18 @@ mod tests {
             cancel_state: InvocationCancelStateApi::None,
             worker_health: InvocationWorkerHealthApi::Idle,
         };
-        assert_eq!(compute_cancel_state(&status), InvocationCancelStateApi::Completed);
+        assert_eq!(
+            compute_cancel_state(&status),
+            InvocationCancelStateApi::Completed
+        );
     }
 
     #[test]
     fn compute_cancel_state_returns_requested_when_pending() {
         use super::compute_cancel_state;
-        use crate::api::{InvocationCancelStateApi, InvocationLifecycleStatus, InvocationStatusResponse};
+        use crate::api::{
+            InvocationCancelStateApi, InvocationLifecycleStatus, InvocationStatusResponse,
+        };
         let status = InvocationStatusResponse {
             invocation_id: uuid::Uuid::nil(),
             execution_mode: InvocationExecutionModeApi::Server,
@@ -776,7 +786,10 @@ mod tests {
             cancel_state: InvocationCancelStateApi::None,
             worker_health: InvocationWorkerHealthApi::Claimed,
         };
-        assert_eq!(compute_cancel_state(&status), InvocationCancelStateApi::Requested);
+        assert_eq!(
+            compute_cancel_state(&status),
+            InvocationCancelStateApi::Requested
+        );
     }
 
     #[test]
@@ -873,9 +886,18 @@ mod tests {
     #[test]
     fn execution_mode_from_db_maps_correctly() {
         use super::execution_mode_from_db;
-        assert_eq!(execution_mode_from_db("local"), InvocationExecutionModeApi::Local);
-        assert_eq!(execution_mode_from_db("server"), InvocationExecutionModeApi::Server);
-        assert_eq!(execution_mode_from_db("unknown"), InvocationExecutionModeApi::Server);
+        assert_eq!(
+            execution_mode_from_db("local"),
+            InvocationExecutionModeApi::Local
+        );
+        assert_eq!(
+            execution_mode_from_db("server"),
+            InvocationExecutionModeApi::Server
+        );
+        assert_eq!(
+            execution_mode_from_db("unknown"),
+            InvocationExecutionModeApi::Server
+        );
     }
 
     #[test]
@@ -888,7 +910,10 @@ mod tests {
             InvocationLifecycleStatus::Failed,
             InvocationLifecycleStatus::Canceled,
         ] {
-            assert_eq!(invocation_status_from_db(invocation_status_to_db(status)), status);
+            assert_eq!(
+                invocation_status_from_db(invocation_status_to_db(status)),
+                status
+            );
         }
     }
 

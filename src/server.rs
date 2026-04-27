@@ -4,25 +4,24 @@ use crate::api::{
     EnvironmentActualStateResponse, EnvironmentDraftResponse, EnvironmentDraftStartResponse,
     EnvironmentDraftUpdateApiRequest, EnvironmentReconcileApiRequest,
     EnvironmentReconcilePreparationResponse, EnvironmentReleaseApiRequest, EnvironmentResponse,
-    EnvironmentRollbackApiRequest, EnvironmentRunPlanResponse,
-    EnvironmentRunPlansResponse, EnvironmentVersionsResponse, EnvironmentsResponse, HealthResponse,
-    InvocationCancelApiRequest, InvocationCancelStateApi,
-    InvocationClaimNextApiRequest, InvocationClaimResponse, InvocationCleanupApiRequest,
-    InvocationCleanupResponse, InvocationCommandApi, InvocationCompleteApiRequest,
-    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
-    InvocationEventBatchApiRequest, InvocationExecutionModeApi, InvocationExecutionSpecApi,
-    InvocationHeartbeatApiRequest, InvocationHeartbeatResponse, InvocationLifecycleStatus,
-    InvocationListApiRequest, InvocationStatusResponse, InvocationWorkerHealthApi, InvocationsResponse,
-    MigrateResponse, ProjectDeleteResponse, ProjectDraftCreateApiRequest, ProjectDraftResponse,
-    ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse,
-    QueueStatusResponse, QueuesResponse, ReadyResponse, SourceStateEventCreateApiRequest,
-    SourceStateEventResponse, WorkerStatusResponse, WorkersResponse,
+    EnvironmentRollbackApiRequest, EnvironmentRunPlanResponse, EnvironmentRunPlansResponse,
+    EnvironmentVersionsResponse, EnvironmentsResponse, HealthResponse, InvocationCancelApiRequest,
+    InvocationCancelStateApi, InvocationClaimNextApiRequest, InvocationClaimResponse,
+    InvocationCleanupApiRequest, InvocationCleanupResponse, InvocationCommandApi,
+    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
+    InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
+    InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
+    InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
+    InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse, ProjectDeleteResponse,
+    ProjectDraftCreateApiRequest, ProjectDraftResponse, ProjectDraftValidateResponse,
+    ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse, QueueStatusResponse,
+    QueuesResponse, ReadyResponse, SourceStateEventCreateApiRequest, SourceStateEventResponse,
+    WorkerStatusResponse, WorkersResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{
     AppliedMigration, CreateInvocationInput, Db, EnvironmentRecord, EnvironmentVersionRecord,
-    InvocationCancellationRecord, ProjectRecord,
-    TimedOutInvocationRecord,
+    InvocationCancellationRecord, ProjectRecord, TimedOutInvocationRecord,
 };
 use crate::error::{AppError, AppResult};
 use crate::execution::ExecutionMode;
@@ -31,9 +30,8 @@ use crate::execution::{
 };
 use crate::invocation_bootstrap::invocation_claim_deadline_at;
 use crate::invocation_bootstrap::{
-    ensure_target_manifest_for_reconcile,
-    start_prepared_invocation,
-    start_environment_draft_prepare_invocation, start_environment_draft_validation_invocation,
+    ensure_target_manifest_for_reconcile, start_environment_draft_prepare_invocation,
+    start_environment_draft_validation_invocation, start_prepared_invocation,
     start_project_draft_validation_invocation,
 };
 use crate::invocation_runtime::{
@@ -43,8 +41,8 @@ use crate::invocation_runtime::{
 use crate::reconciler::auto_admit_blocked_plans_for_environment;
 use crate::services::{
     EnvironmentReleaseRequest, EnvironmentRollbackRequest, EnvironmentService, InvocationCommand,
-    InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectCreateRequest, ProjectService,
-    ProjectUpdateRequest, SourceStateEventCreateRequest,
+    InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectCreateRequest,
+    ProjectService, ProjectUpdateRequest, SourceStateEventCreateRequest,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -87,7 +85,10 @@ impl AppState {
         invocation_id: Uuid,
         persistence: Option<InvocationPersistence>,
     ) -> AppResult<()> {
-        let runtime = self.invocations.get_or_create(invocation_id, persistence).await;
+        let runtime = self
+            .invocations
+            .get_or_create(invocation_id, persistence)
+            .await;
         let started_event = started_invocation_event();
         let sequence = self
             .db
@@ -163,7 +164,9 @@ fn project_routes() -> Router<AppState> {
         .route("/v1/projects", get(projects_list))
         .route(
             "/v1/projects/{project_id}",
-            patch(project_update).get(project_get).delete(project_delete),
+            patch(project_update)
+                .get(project_get)
+                .delete(project_delete),
         )
         .route("/v1/project-drafts", post(project_draft_create))
         .route("/v1/project-drafts/{draft_id}", get(project_draft_get))
@@ -183,7 +186,10 @@ fn environment_routes() -> Router<AppState> {
             "/v1/projects/{project_id}/environment-drafts",
             post(environment_draft_create),
         )
-        .route("/v1/environment-drafts/{draft_id}", get(environment_draft_get))
+        .route(
+            "/v1/environment-drafts/{draft_id}",
+            get(environment_draft_get),
+        )
         .route(
             "/v1/environment-drafts/{draft_id}/branch",
             post(environment_draft_branch_refresh),
@@ -639,7 +645,9 @@ async fn project_delete(
         .delete(project_id.clone())
         .await?;
     info!(project_id = %project_id, "deleted project");
-    Ok(Json(ProjectDeleteResponse { deleted_project_id: project_id }))
+    Ok(Json(ProjectDeleteResponse {
+        deleted_project_id: project_id,
+    }))
 }
 
 #[utoipa::path(
@@ -784,7 +792,9 @@ async fn environment_draft_get(
     State(state): State<AppState>,
     Path(draft_id): Path<Uuid>,
 ) -> Result<Json<EnvironmentDraftResponse>, ApiError> {
-    let draft = EnvironmentService::new(&state.db).get_draft(draft_id).await?;
+    let draft = EnvironmentService::new(&state.db)
+        .get_draft(draft_id)
+        .await?;
     Ok(Json(EnvironmentDraftResponse { draft }))
 }
 
@@ -867,7 +877,9 @@ async fn environment_draft_confirm(
     State(state): State<AppState>,
     Path(draft_id): Path<Uuid>,
 ) -> Result<Json<EnvironmentResponse>, ApiError> {
-    let environment = EnvironmentService::new(&state.db).confirm_draft(draft_id).await?;
+    let environment = EnvironmentService::new(&state.db)
+        .confirm_draft(draft_id)
+        .await?;
     Ok(Json(EnvironmentResponse { environment }))
 }
 
@@ -1024,7 +1036,9 @@ async fn environment_reconcile_preparation(
         .db()
         .get_environment_reconcile_preparation(&project_id, &slug)
         .await?;
-    Ok(Json(EnvironmentReconcilePreparationResponse { preparation }))
+    Ok(Json(EnvironmentReconcilePreparationResponse {
+        preparation,
+    }))
 }
 
 #[utoipa::path(
@@ -1243,11 +1257,21 @@ async fn environment_plan_admit(
     let service = EnvironmentService::new(&state.db);
     let prepared = service.admit_plan(Uuid::new_v4(), plan_id).await?;
     let mut plan = prepared.plan;
-    if let (Some(invocation_id), Some(prepared_invocation)) = (prepared.invocation_id, prepared.prepared)
+    if let (Some(invocation_id), Some(prepared_invocation)) =
+        (prepared.invocation_id, prepared.prepared)
     {
-        start_prepared_invocation(&state, invocation_id, InvocationCommandApi::Build, Some(plan_id), prepared_invocation)
+        start_prepared_invocation(
+            &state,
+            invocation_id,
+            InvocationCommandApi::Build,
+            Some(plan_id),
+            prepared_invocation,
+        )
+        .await?;
+        plan = state
+            .db
+            .mark_environment_run_plan_admitted(plan_id, invocation_id)
             .await?;
-        plan = state.db.mark_environment_run_plan_admitted(plan_id, invocation_id).await?;
     }
     Ok(Json(EnvironmentRunPlanResponse { plan }))
 }
@@ -1325,7 +1349,9 @@ async fn invocation_create(
             .as_deref()
             .ok_or(AppError::RemoteExecutionRequiresEnvironmentSlug)?;
         let environment = db.get_environment(project_id, environment_slug).await?;
-        let project = db.get_project_by_project_id(&environment.project_ref).await?;
+        let project = db
+            .get_project_by_project_id(&environment.project_ref)
+            .await?;
         match project.mode.as_str() {
             "remote" => InvocationExecutionModeApi::Server,
             "local" => InvocationExecutionModeApi::Local,
@@ -1780,7 +1806,9 @@ async fn invocation_append_events(
     let runtime = state.invocations.get_or_create(id, None).await;
     let recorder = InvocationRecorder::new(state.db.clone(), id, runtime);
     if !recorder.is_running().await {
-        return Err(ApiError(AppError::Internal("invocation is already completed".to_string())));
+        return Err(ApiError(AppError::Internal(
+            "invocation is already completed".to_string(),
+        )));
     }
     state
         .db
@@ -1823,10 +1851,11 @@ async fn invocation_complete(
     recorder
         .complete(&request.worker_id, request.lease_token, request.completion)
         .await?;
-    if let (Some(project_id), Some(environment_id)) = (persistence.project_id, persistence.environment_id)
+    if let (Some(project_id), Some(environment_id)) =
+        (persistence.project_id, persistence.environment_id)
     {
-        let admitted = auto_admit_blocked_plans_for_environment(&state, project_id, environment_id)
-            .await?;
+        let admitted =
+            auto_admit_blocked_plans_for_environment(&state, project_id, environment_id).await?;
         if admitted > 0 {
             info!(
                 invocation_id = %id,
@@ -1878,7 +1907,12 @@ async fn invocation_events(
     let stream = event_stream(
         history
             .into_iter()
-            .map(|(sequence, event)| crate::invocation_runtime::SequencedInvocationEvent { sequence, event })
+            .map(
+                |(sequence, event)| crate::invocation_runtime::SequencedInvocationEvent {
+                    sequence,
+                    event,
+                },
+            )
             .collect(),
         last_sequence,
         rx,
@@ -1939,9 +1973,7 @@ impl IntoResponse for ApiError {
             | AppError::PlanNotFound(_)
             | AppError::InvocationNotFound(_)
             | AppError::ProjectDraftNotFound(_)
-            | AppError::EnvironmentDraftNotFound(_) => {
-                StatusCode::NOT_FOUND
-            }
+            | AppError::EnvironmentDraftNotFound(_) => StatusCode::NOT_FOUND,
             AppError::EnvironmentAlreadyExists(_, _) | AppError::ProjectIdAlreadyConfigured(_) => {
                 StatusCode::CONFLICT
             }
@@ -2001,7 +2033,10 @@ mod tests {
         ]);
         assert!(queues.is_ok());
         let queues = queues.unwrap_or_default();
-        assert_eq!(queues, vec!["generic".to_string(), "validation".to_string()]);
+        assert_eq!(
+            queues,
+            vec!["generic".to_string(), "validation".to_string()]
+        );
     }
 
     #[test]
@@ -2014,13 +2049,17 @@ mod tests {
     fn error_response_maps_not_found_errors() {
         use super::ApiError;
         use crate::error::AppError;
-        use axum::response::IntoResponse;
         use axum::http::StatusCode;
+        use axum::response::IntoResponse;
 
         let resp = ApiError(AppError::ProjectIdNotFound("prj_1".to_string())).into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-        let resp = ApiError(AppError::EnvironmentNotFound("prj_1".to_string(), "dev".to_string())).into_response();
+        let resp = ApiError(AppError::EnvironmentNotFound(
+            "prj_1".to_string(),
+            "dev".to_string(),
+        ))
+        .into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let resp = ApiError(AppError::PlanNotFound(
@@ -2034,8 +2073,8 @@ mod tests {
     fn error_response_maps_conflict_errors() {
         use super::ApiError;
         use crate::error::AppError;
-        use axum::response::IntoResponse;
         use axum::http::StatusCode;
+        use axum::response::IntoResponse;
 
         let resp = ApiError(AppError::EnvironmentAlreadyReconciled).into_response();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -2043,7 +2082,11 @@ mod tests {
         let resp = ApiError(AppError::ReconciliationInProgress).into_response();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
 
-        let resp = ApiError(AppError::PlanNotAdmissible("id".to_string(), "completed".to_string())).into_response();
+        let resp = ApiError(AppError::PlanNotAdmissible(
+            "id".to_string(),
+            "completed".to_string(),
+        ))
+        .into_response();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
@@ -2051,8 +2094,8 @@ mod tests {
     fn error_response_maps_unprocessable_entity() {
         use super::ApiError;
         use crate::error::AppError;
-        use axum::response::IntoResponse;
         use axum::http::StatusCode;
+        use axum::response::IntoResponse;
 
         let resp = ApiError(AppError::ReconciliationRequiresBaseline).into_response();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -2065,8 +2108,8 @@ mod tests {
     fn error_response_maps_bad_request_errors() {
         use super::ApiError;
         use crate::error::AppError;
-        use axum::response::IntoResponse;
         use axum::http::StatusCode;
+        use axum::response::IntoResponse;
 
         let resp = ApiError(AppError::UserStateNotAllowed).into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -2079,8 +2122,8 @@ mod tests {
     fn error_response_maps_internal_to_500() {
         use super::ApiError;
         use crate::error::AppError;
-        use axum::response::IntoResponse;
         use axum::http::StatusCode;
+        use axum::response::IntoResponse;
 
         let resp = ApiError(AppError::Internal("something broke".to_string())).into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);

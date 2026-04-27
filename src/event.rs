@@ -412,9 +412,7 @@ fn result_status_label_and_style(status: &str) -> (&'static str, &'static [AnsiS
         Some(NodeExecutionStatus::Error | NodeExecutionStatus::Fail) => {
             ("Failed", &[AnsiStyle::Red, AnsiStyle::Bold])
         }
-        Some(NodeExecutionStatus::Skipped) => {
-            ("Skipped", &[AnsiStyle::Yellow, AnsiStyle::Bold])
-        }
+        Some(NodeExecutionStatus::Skipped) => ("Skipped", &[AnsiStyle::Yellow, AnsiStyle::Bold]),
         _ => match status {
             "warn" | "warning" => ("Warned", &[AnsiStyle::Yellow, AnsiStyle::Bold]),
             _ => ("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold]),
@@ -565,7 +563,9 @@ mod tests {
         }"#;
 
         let event = LogEvent::parse(raw).expect("event should parse");
-        let selected = event.selected_resources().expect("selected resources marker");
+        let selected = event
+            .selected_resources()
+            .expect("selected resources marker");
         assert_eq!(selected, vec!["model.pkg.orders", "seed.pkg.customers"]);
     }
 
@@ -619,7 +619,8 @@ mod tests {
 
     #[test]
     fn render_text_line_command_completed() {
-        let raw = r#"{"info":{"name":"CommandCompleted","msg":"Finished 'run' successfully"},"data":{}}"#;
+        let raw =
+            r#"{"info":{"name":"CommandCompleted","msg":"Finished 'run' successfully"},"data":{}}"#;
         let event = LogEvent::parse(raw).unwrap();
         let rendered = event.render_text_line_with_color(false).unwrap();
         assert!(rendered.contains("Finished"));
@@ -665,41 +666,59 @@ mod tests {
     fn render_result_line_error_status() {
         let event = make_result_event("LogModelResult", "error");
         let rendered = render_result_line(&event, false);
-        assert!(rendered.contains("Failed"), "expected 'Failed' in: {rendered}");
+        assert!(
+            rendered.contains("Failed"),
+            "expected 'Failed' in: {rendered}"
+        );
     }
 
     #[test]
     fn render_result_line_fail_status() {
         let event = make_result_event("LogTestResult", "fail");
         let rendered = render_result_line(&event, false);
-        assert!(rendered.contains("Failed"), "expected 'Failed' in: {rendered}");
+        assert!(
+            rendered.contains("Failed"),
+            "expected 'Failed' in: {rendered}"
+        );
     }
 
     #[test]
     fn render_result_line_skip_status() {
         let event = make_result_event("LogModelResult", "skipped");
         let rendered = render_result_line(&event, false);
-        assert!(rendered.contains("Skipped"), "expected 'Skipped' in: {rendered}");
+        assert!(
+            rendered.contains("Skipped"),
+            "expected 'Skipped' in: {rendered}"
+        );
     }
 
     #[test]
     fn render_result_line_warn_status() {
         let event = make_result_event("LogTestResult", "warn");
         let rendered = render_result_line(&event, false);
-        assert!(rendered.contains("Warned"), "expected 'Warned' in: {rendered}");
+        assert!(
+            rendered.contains("Warned"),
+            "expected 'Warned' in: {rendered}"
+        );
     }
 
     #[test]
     fn render_result_line_success_status() {
         let event = make_result_event("LogModelResult", "success");
         let rendered = render_result_line(&event, false);
-        assert!(rendered.contains("Succeeded"), "expected 'Succeeded' in: {rendered}");
+        assert!(
+            rendered.contains("Succeeded"),
+            "expected 'Succeeded' in: {rendered}"
+        );
     }
 
     #[test]
     fn render_result_line_pass_status() {
         let event = make_result_event("LogTestResult", "pass");
         let rendered = render_result_line(&event, false);
-        assert!(rendered.contains("Succeeded"), "expected 'Succeeded' in: {rendered}");
+        assert!(
+            rendered.contains("Succeeded"),
+            "expected 'Succeeded' in: {rendered}"
+        );
     }
 }

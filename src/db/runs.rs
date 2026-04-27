@@ -10,7 +10,6 @@ impl Db {
         persistence: &InvocationPersistenceRecord,
         completion: &crate::execution::ExecutionCompletion,
     ) -> AppResult<()> {
-
         if let Some(run_id) = persistence.run_id {
             let manifest = completion.manifest.clone().map(ManifestSnapshot::from_raw);
             self.finalize_run_in_tx(
@@ -75,7 +74,9 @@ impl Db {
             self.apply_project_validation_completion_in_tx(
                 tx,
                 persistence.project_draft_id.ok_or_else(|| {
-                    AppError::Internal("project validation invocation missing draft scope".to_string())
+                    AppError::Internal(
+                        "project validation invocation missing draft scope".to_string(),
+                    )
                 })?,
                 completion,
             )
@@ -86,7 +87,9 @@ impl Db {
             self.apply_environment_prepare_completion_in_tx(
                 tx,
                 persistence.environment_draft_id.ok_or_else(|| {
-                    AppError::Internal("environment prepare invocation missing draft scope".to_string())
+                    AppError::Internal(
+                        "environment prepare invocation missing draft scope".to_string(),
+                    )
                 })?,
                 completion,
             )
@@ -97,7 +100,9 @@ impl Db {
             self.apply_environment_validation_completion_in_tx(
                 tx,
                 persistence.environment_draft_id.ok_or_else(|| {
-                    AppError::Internal("environment validation invocation missing draft scope".to_string())
+                    AppError::Internal(
+                        "environment validation invocation missing draft scope".to_string(),
+                    )
                 })?,
                 completion,
             )
@@ -108,10 +113,14 @@ impl Db {
             self.apply_manifest_prepare_completion_in_tx(
                 tx,
                 persistence.project_id.ok_or_else(|| {
-                    AppError::Internal("manifest prepare invocation missing project scope".to_string())
+                    AppError::Internal(
+                        "manifest prepare invocation missing project scope".to_string(),
+                    )
                 })?,
                 persistence.environment_id.ok_or_else(|| {
-                    AppError::Internal("manifest prepare invocation missing environment scope".to_string())
+                    AppError::Internal(
+                        "manifest prepare invocation missing environment scope".to_string(),
+                    )
                 })?,
                 invocation_id,
                 completion,
@@ -283,7 +292,9 @@ impl Db {
         result: Option<&Value>,
     ) -> AppResult<()> {
         let result = result.ok_or_else(|| {
-            AppError::Internal("release validation completed without resolved commit metadata".to_string())
+            AppError::Internal(
+                "release validation completed without resolved commit metadata".to_string(),
+            )
         })?;
         let resolved_commit_sha = result
             .get("resolved_commit_sha")
@@ -378,7 +389,12 @@ impl Db {
                     "#,
                 )
                 .bind(draft_id)
-                .bind(completion.error.as_deref().unwrap_or("environment preparation failed"))
+                .bind(
+                    completion
+                        .error
+                        .as_deref()
+                        .unwrap_or("environment preparation failed"),
+                )
                 .execute(&mut **tx)
                 .await?;
             }
@@ -395,17 +411,19 @@ impl Db {
         match completion.status {
             InvocationLifecycleStatus::Succeeded => {
                 let result = completion.result.as_ref().ok_or_else(|| {
-                    AppError::Internal("environment validation completed without metadata".to_string())
+                    AppError::Internal(
+                        "environment validation completed without metadata".to_string(),
+                    )
                 })?;
                 let resolved_commit_sha = result
                     .get("resolved_commit_sha")
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        AppError::Internal("environment validation missing resolved_commit_sha".to_string())
+                        AppError::Internal(
+                            "environment validation missing resolved_commit_sha".to_string(),
+                        )
                     })?;
-                let selected_branch = result
-                    .get("selected_branch")
-                    .and_then(Value::as_str);
+                let selected_branch = result.get("selected_branch").and_then(Value::as_str);
                 sqlx::query(
                     r#"
                     UPDATE environment_onboarding_drafts
@@ -436,7 +454,12 @@ impl Db {
                     "#,
                 )
                 .bind(draft_id)
-                .bind(completion.error.as_deref().unwrap_or("environment validation failed"))
+                .bind(
+                    completion
+                        .error
+                        .as_deref()
+                        .unwrap_or("environment validation failed"),
+                )
                 .execute(&mut **tx)
                 .await?;
             }
@@ -802,22 +825,25 @@ impl Db {
     ) -> AppResult<EnvironmentRecord> {
         let query = environment_query("WHERE e.project_id = $1 AND e.slug = $2");
         let row = sqlx::query(&query)
-        .bind(project_id)
-        .bind(environment_slug)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| {
-            AppError::EnvironmentNotFound(project_ref.to_string(), environment_slug.to_string())
-        })?;
+            .bind(project_id)
+            .bind(environment_slug)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| {
+                AppError::EnvironmentNotFound(project_ref.to_string(), environment_slug.to_string())
+            })?;
         Ok(environment_record_from_row(&row))
     }
 
-    pub(crate) async fn get_environment_by_id(&self, environment_id: i64) -> AppResult<EnvironmentRecord> {
+    pub(crate) async fn get_environment_by_id(
+        &self,
+        environment_id: i64,
+    ) -> AppResult<EnvironmentRecord> {
         let query = environment_query("WHERE e.id = $1");
         let row = sqlx::query(&query)
-        .bind(environment_id)
-        .fetch_one(&self.pool)
-        .await?;
+            .bind(environment_id)
+            .fetch_one(&self.pool)
+            .await?;
         Ok(environment_record_from_row(&row))
     }
 
@@ -828,9 +854,9 @@ impl Db {
     ) -> AppResult<EnvironmentRecord> {
         let query = environment_query("WHERE e.id = $1");
         let row = sqlx::query(&query)
-        .bind(environment_id)
-        .fetch_one(&mut **tx)
-        .await?;
+            .bind(environment_id)
+            .fetch_one(&mut **tx)
+            .await?;
         Ok(environment_record_from_row(&row))
     }
 
@@ -1444,8 +1470,8 @@ impl Db {
             .await?;
         }
 
-        sqlx::query(
-            &format!(r#"
+        sqlx::query(&format!(
+            r#"
             INSERT INTO promoted_manifest_nodes (
                 project_id, environment_id, unique_id, source_run_id, checksum, raw_node
             )
@@ -1466,8 +1492,9 @@ impl Db {
                 checksum = EXCLUDED.checksum,
                 raw_node = EXCLUDED.raw_node,
                 promoted_at = NOW()
-            "#, NodeExecutionStatus::PROMOTABLE_SQL),
-        )
+            "#,
+            NodeExecutionStatus::PROMOTABLE_SQL
+        ))
         .bind(run_id)
         .bind(project_id)
         .bind(environment_id)
@@ -1488,13 +1515,14 @@ impl Db {
         // After upserting, any row with updated_at < rebuild_marker is stale and
         // gets cleaned up — avoiding the empty-table window that a DELETE-first
         // approach would expose to concurrent readers under READ COMMITTED.
-        let rebuild_marker: chrono::DateTime<Utc> =
-            sqlx::query_scalar("SELECT NOW()").fetch_one(&mut **tx).await?;
+        let rebuild_marker: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(&mut **tx)
+            .await?;
 
         // Upsert from node_executions: latest execution for status/timing,
         // latest successful execution for promoted fields (relation, checksum).
-        let upserted = sqlx::query(
-            &format!(r#"
+        let upserted = sqlx::query(&format!(
+            r#"
             WITH latest_execution AS (
                 SELECT DISTINCT ON (ne.unique_id)
                     r.project_id,
@@ -1578,8 +1606,9 @@ impl Db {
                 execution_time_seconds = EXCLUDED.execution_time_seconds,
                 last_success_at = EXCLUDED.last_success_at,
                 updated_at = EXCLUDED.updated_at
-            "#, NodeExecutionStatus::PROMOTABLE_SQL),
-        )
+            "#,
+            NodeExecutionStatus::PROMOTABLE_SQL
+        ))
         .bind(project_id)
         .bind(environment_id)
         .bind(max_run_pk)

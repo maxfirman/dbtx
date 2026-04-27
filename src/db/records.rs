@@ -50,7 +50,10 @@ impl PlanStatus {
     }
 
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Canceled | Self::Superseded)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Canceled | Self::Superseded
+        )
     }
 
     pub fn is_admissible(self) -> bool {
@@ -761,8 +764,13 @@ mod tests {
     #[test]
     fn plan_status_roundtrips_through_parse_and_as_str() {
         for status in [
-            PlanStatus::Planned, PlanStatus::Blocked, PlanStatus::Admitted,
-            PlanStatus::Completed, PlanStatus::Failed, PlanStatus::Canceled, PlanStatus::Superseded,
+            PlanStatus::Planned,
+            PlanStatus::Blocked,
+            PlanStatus::Admitted,
+            PlanStatus::Completed,
+            PlanStatus::Failed,
+            PlanStatus::Canceled,
+            PlanStatus::Superseded,
         ] {
             assert_eq!(PlanStatus::parse(status.as_str()), Some(status));
             assert_eq!(status.to_string(), status.as_str());
@@ -813,8 +821,12 @@ mod tests {
     #[test]
     fn draft_status_roundtrips() {
         for status in [
-            DraftStatus::Draft, DraftStatus::LoadingGit, DraftStatus::Ready,
-            DraftStatus::Validating, DraftStatus::Validated, DraftStatus::Failed,
+            DraftStatus::Draft,
+            DraftStatus::LoadingGit,
+            DraftStatus::Ready,
+            DraftStatus::Validating,
+            DraftStatus::Validated,
+            DraftStatus::Failed,
         ] {
             assert_eq!(DraftStatus::parse(status.as_str()), Some(status));
         }
@@ -831,7 +843,11 @@ mod tests {
 
     #[test]
     fn preparation_status_roundtrips() {
-        for status in [PreparationStatus::Running, PreparationStatus::Succeeded, PreparationStatus::Failed] {
+        for status in [
+            PreparationStatus::Running,
+            PreparationStatus::Succeeded,
+            PreparationStatus::Failed,
+        ] {
             assert_eq!(PreparationStatus::parse(status.as_str()), Some(status));
         }
         assert_eq!(PreparationStatus::parse("invalid"), None);
@@ -840,8 +856,12 @@ mod tests {
     #[test]
     fn node_execution_status_roundtrips() {
         for status in [
-            NodeExecutionStatus::Success, NodeExecutionStatus::Pass, NodeExecutionStatus::Created,
-            NodeExecutionStatus::Error, NodeExecutionStatus::Fail, NodeExecutionStatus::Skipped,
+            NodeExecutionStatus::Success,
+            NodeExecutionStatus::Pass,
+            NodeExecutionStatus::Created,
+            NodeExecutionStatus::Error,
+            NodeExecutionStatus::Fail,
+            NodeExecutionStatus::Skipped,
         ] {
             assert_eq!(NodeExecutionStatus::parse(status.as_str()), Some(status));
             assert_eq!(status.to_string(), status.as_str());
@@ -850,7 +870,10 @@ mod tests {
 
     #[test]
     fn node_execution_status_parse_aliases() {
-        assert_eq!(NodeExecutionStatus::parse("failed"), Some(NodeExecutionStatus::Fail));
+        assert_eq!(
+            NodeExecutionStatus::parse("failed"),
+            Some(NodeExecutionStatus::Fail)
+        );
         assert_eq!(NodeExecutionStatus::parse("unknown"), None);
     }
 

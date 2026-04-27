@@ -95,4 +95,3 @@ impl<'a> ProjectService<'a> {
         self.db.delete_project(&project).await
     }
 }
-

@@ -1,19 +1,18 @@
 //! HTTP client for communicating with the dbtx-server API.
 use crate::api::{
     EnvironmentActiveResourcesApiRequest, EnvironmentActiveResourcesResponse,
-    EnvironmentActualStateResponse, EnvironmentReconcileApiRequest, EnvironmentRunPlanResponse,
-    EnvironmentRunPlansResponse,
-    EnvironmentDraftResponse, EnvironmentDraftStartResponse, EnvironmentDraftUpdateApiRequest,
-    EnvironmentReleaseApiRequest, EnvironmentResponse, EnvironmentRollbackApiRequest,
-    EnvironmentVersionsResponse, EnvironmentsResponse, InvocationCancelApiRequest, InvocationClaimNextApiRequest,
-    InvocationClaimResponse, InvocationCleanupApiRequest, InvocationCleanupResponse,
-    InvocationCompleteApiRequest, InvocationCreateApiRequest, InvocationCreateResponse,
-    InvocationEvent, InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest,
-    InvocationHeartbeatResponse, InvocationListApiRequest, InvocationStatusResponse,
-    InvocationsResponse, MigrateResponse, ProjectDeleteResponse, ProjectDraftCreateApiRequest,
-    ProjectDraftResponse, ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest,
-    ProjectsResponse, QueuesResponse, SourceStateEventCreateApiRequest, SourceStateEventResponse,
-    WorkersResponse,
+    EnvironmentActualStateResponse, EnvironmentDraftResponse, EnvironmentDraftStartResponse,
+    EnvironmentDraftUpdateApiRequest, EnvironmentReconcileApiRequest, EnvironmentReleaseApiRequest,
+    EnvironmentResponse, EnvironmentRollbackApiRequest, EnvironmentRunPlanResponse,
+    EnvironmentRunPlansResponse, EnvironmentVersionsResponse, EnvironmentsResponse,
+    InvocationCancelApiRequest, InvocationClaimNextApiRequest, InvocationClaimResponse,
+    InvocationCleanupApiRequest, InvocationCleanupResponse, InvocationCompleteApiRequest,
+    InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
+    InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
+    InvocationListApiRequest, InvocationStatusResponse, InvocationsResponse, MigrateResponse,
+    ProjectDeleteResponse, ProjectDraftCreateApiRequest, ProjectDraftResponse,
+    ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse,
+    QueuesResponse, SourceStateEventCreateApiRequest, SourceStateEventResponse, WorkersResponse,
 };
 use crate::error::{AppError, AppResult};
 use futures_util::StreamExt;
@@ -131,7 +130,10 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn environment_draft_get(&self, draft_id: Uuid) -> AppResult<EnvironmentDraftResponse> {
+    pub async fn environment_draft_get(
+        &self,
+        draft_id: Uuid,
+    ) -> AppResult<EnvironmentDraftResponse> {
         self.send(
             self.http
                 .get(self.url(&format!("/v1/environment-drafts/{draft_id}"))),
@@ -244,12 +246,9 @@ impl DaemonClient {
         project_id: &str,
         slug: &str,
     ) -> AppResult<EnvironmentActualStateResponse> {
-        self.send(
-            self.http
-                .get(self.url(&format!(
-                    "/v1/projects/{project_id}/environments/{slug}/actual-state"
-                ))),
-        )
+        self.send(self.http.get(self.url(&format!(
+            "/v1/projects/{project_id}/environments/{slug}/actual-state"
+        ))))
         .await
     }
 
@@ -274,12 +273,9 @@ impl DaemonClient {
         project_id: &str,
         slug: &str,
     ) -> AppResult<EnvironmentRunPlansResponse> {
-        self.send(
-            self.http
-                .get(self.url(&format!(
-                    "/v1/projects/{project_id}/environments/{slug}/plans"
-                ))),
-        )
+        self.send(self.http.get(self.url(&format!(
+            "/v1/projects/{project_id}/environments/{slug}/plans"
+        ))))
         .await
     }
 
@@ -299,12 +295,18 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn environment_plan_get(&self, plan_id: Uuid) -> AppResult<EnvironmentRunPlanResponse> {
+    pub async fn environment_plan_get(
+        &self,
+        plan_id: Uuid,
+    ) -> AppResult<EnvironmentRunPlanResponse> {
         self.send(self.http.get(self.url(&format!("/v1/plans/{plan_id}"))))
             .await
     }
 
-    pub async fn environment_plan_admit(&self, plan_id: Uuid) -> AppResult<EnvironmentRunPlanResponse> {
+    pub async fn environment_plan_admit(
+        &self,
+        plan_id: Uuid,
+    ) -> AppResult<EnvironmentRunPlanResponse> {
         self.send(
             self.http
                 .post(self.url(&format!("/v1/plans/{plan_id}/admit"))),
@@ -364,11 +366,13 @@ impl DaemonClient {
     }
 
     pub async fn reconcile_tick(&self) -> AppResult<serde_json::Value> {
-        self.send(self.http.post(self.url("/v1/reconcile/tick"))).await
+        self.send(self.http.post(self.url("/v1/reconcile/tick")))
+            .await
     }
 
     pub async fn sweep_tick(&self) -> AppResult<serde_json::Value> {
-        self.send(self.http.post(self.url("/v1/reconcile/sweep"))).await
+        self.send(self.http.post(self.url("/v1/reconcile/sweep")))
+            .await
     }
 
     pub async fn invocation_cleanup(
@@ -570,8 +574,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_returns_error_on_404() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -589,8 +593,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_returns_error_on_500() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -608,8 +612,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_returns_error_on_409_conflict() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -623,7 +627,11 @@ mod tests {
 
         let client = super::DaemonClient::new(mock_server.uri());
         let err = client
-            .environment_reconcile("prj_1", "prod", crate::api::EnvironmentReconcileApiRequest {})
+            .environment_reconcile(
+                "prj_1",
+                "prod",
+                crate::api::EnvironmentReconcileApiRequest {},
+            )
             .await
             .expect_err("should fail");
         assert!(err.to_string().contains("already reconciled"));
@@ -631,8 +639,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_handles_timeout() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -654,8 +662,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_returns_schema_out_of_date_on_412() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))

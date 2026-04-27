@@ -75,7 +75,8 @@ pub async fn execute_claimed_invocation(
         project_dir = %project_dir.display(),
         "starting claimed invocation execution"
     );
-    if let Err(err) = prepare_runtime_project_for_execution(&spec, command_name, &project_dir).await {
+    if let Err(err) = prepare_runtime_project_for_execution(&spec, command_name, &project_dir).await
+    {
         report_setup_failure(client, &claim, &err.to_string()).await?;
         return Err(err);
     }
@@ -94,7 +95,8 @@ pub async fn execute_claimed_invocation(
         }
     };
 
-    let mut dbt_args: Vec<std::ffi::OsString> = spec.args().iter().cloned().map(Into::into).collect();
+    let mut dbt_args: Vec<std::ffi::OsString> =
+        spec.args().iter().cloned().map(Into::into).collect();
     if let Some(state_dir) = state_dir.as_ref() {
         dbt_args.push("--state".into());
         dbt_args.push(state_dir.path().as_os_str().to_os_string());
@@ -104,13 +106,14 @@ pub async fn execute_claimed_invocation(
 
     let command = map_command(command_name);
     let dbt_path = std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
-    let mut dbt_child = match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, &dbt_args, &project_dir) {
-        Ok(child) => child,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
+    let mut dbt_child =
+        match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, &dbt_args, &project_dir) {
+            Ok(child) => child,
+            Err(err) => {
+                report_setup_failure(client, &claim, &err.to_string()).await?;
+                return Err(err);
+            }
+        };
 
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
     let mut dbt_version: Option<String> = None;
@@ -172,70 +175,120 @@ pub async fn execute_claimed_invocation(
 
     let result = dbt_child.wait().await?;
     for line in &result.stderr_lines {
-        emit_stream_output(pretty_terminal_output, claim.invocation_id, &claim.worker_id, "stderr", line);
-        send_event(client, &claim, crate::execution::ExecutionEvent {
-            kind: crate::execution::ExecutionEventKind::StderrLine,
-            occurred_at: chrono::Utc::now(),
-            text: Some(line.clone()),
-            raw_line: Some(line.clone()),
-            dbt_event_name: None,
-            node_unique_id: None,
-            level: None,
-            error: None,
-        }).await?;
+        emit_stream_output(
+            pretty_terminal_output,
+            claim.invocation_id,
+            &claim.worker_id,
+            "stderr",
+            line,
+        );
+        send_event(
+            client,
+            &claim,
+            crate::execution::ExecutionEvent {
+                kind: crate::execution::ExecutionEventKind::StderrLine,
+                occurred_at: chrono::Utc::now(),
+                text: Some(line.clone()),
+                raw_line: Some(line.clone()),
+                dbt_event_name: None,
+                node_unique_id: None,
+                level: None,
+                error: None,
+            },
+        )
+        .await?;
     }
 
-    let exit_code = if cancel_requested { 130 } else { result.exit_code };
+    let exit_code = if cancel_requested {
+        130
+    } else {
+        result.exit_code
+    };
     let manifest = if persists_state(command_name) {
         let manifest_path = project_dir.join("target").join("manifest.json");
-        std::fs::read_to_string(&manifest_path).ok().and_then(|c| serde_json::from_str(&c).ok())
+        std::fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
     } else {
         None
     };
 
-    client.invocation_complete(claim.invocation_id, InvocationCompleteApiRequest {
-        worker_id: claim.worker_id.clone(),
-        lease_token: claim.lease_token,
-        completion: crate::execution::ExecutionCompletion {
-            status: if cancel_requested { InvocationLifecycleStatus::Canceled }
-                else if exit_code != 0 { InvocationLifecycleStatus::Failed }
-                else { InvocationLifecycleStatus::Succeeded },
-            exit_code,
-            error: if cancel_requested { Some("invocation canceled".to_string()) }
-                else if exit_code == 0 { None }
-                else { Some(format!("dbt invocation failed with exit code {exit_code}")) },
-            dbt_version,
-            manifest,
-            result: None,
-        },
-    }).await?;
+    client
+        .invocation_complete(
+            claim.invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                completion: crate::execution::ExecutionCompletion {
+                    status: if cancel_requested {
+                        InvocationLifecycleStatus::Canceled
+                    } else if exit_code != 0 {
+                        InvocationLifecycleStatus::Failed
+                    } else {
+                        InvocationLifecycleStatus::Succeeded
+                    },
+                    exit_code,
+                    error: if cancel_requested {
+                        Some("invocation canceled".to_string())
+                    } else if exit_code == 0 {
+                        None
+                    } else {
+                        Some(format!("dbt invocation failed with exit code {exit_code}"))
+                    },
+                    dbt_version,
+                    manifest,
+                    result: None,
+                },
+            },
+        )
+        .await?;
 
     info!(invocation_id = %claim.invocation_id, worker_id = %claim.worker_id, exit_code, canceled = cancel_requested, "finished claimed invocation execution");
 
-    if cancel_requested { Err(AppError::InvocationCanceled) }
-    else if exit_code == 0 { Ok(()) }
-    else { Err(AppError::DbtFailed(exit_code)) }
+    if cancel_requested {
+        Err(AppError::InvocationCanceled)
+    } else if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(AppError::DbtFailed(exit_code))
+    }
 }
 
-async fn report_setup_failure(client: &DaemonClient, claim: &InvocationClaimResponse, error_message: &str) -> AppResult<()> {
-    client.invocation_complete(claim.invocation_id, InvocationCompleteApiRequest {
-        worker_id: claim.worker_id.clone(),
-        lease_token: claim.lease_token,
-        completion: crate::execution::ExecutionCompletion {
-            status: InvocationLifecycleStatus::Failed,
-            exit_code: 1,
-            error: Some(error_message.to_string()),
-            dbt_version: None,
-            manifest: None,
-            result: None,
-        },
-    }).await
+async fn report_setup_failure(
+    client: &DaemonClient,
+    claim: &InvocationClaimResponse,
+    error_message: &str,
+) -> AppResult<()> {
+    client
+        .invocation_complete(
+            claim.invocation_id,
+            InvocationCompleteApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                completion: crate::execution::ExecutionCompletion {
+                    status: InvocationLifecycleStatus::Failed,
+                    exit_code: 1,
+                    error: Some(error_message.to_string()),
+                    dbt_version: None,
+                    manifest: None,
+                    result: None,
+                },
+            },
+        )
+        .await
 }
 
-fn emit_dbt_log_output(pretty_terminal_output: bool, invocation_id: uuid::Uuid, worker_id: &str, event: &LogEvent) {
+fn emit_dbt_log_output(
+    pretty_terminal_output: bool,
+    invocation_id: uuid::Uuid,
+    worker_id: &str,
+    event: &LogEvent,
+) {
     let rendered = event.render_text_line();
     if pretty_terminal_output {
-        if let Some(rendered) = rendered { println!("{rendered}"); }
+        if let Some(rendered) = rendered {
+            println!("{rendered}");
+        }
         return;
     }
     info!(
@@ -247,9 +300,18 @@ fn emit_dbt_log_output(pretty_terminal_output: bool, invocation_id: uuid::Uuid, 
     );
 }
 
-fn emit_stream_output(pretty_terminal_output: bool, invocation_id: uuid::Uuid, worker_id: &str, stream: &'static str, line: &str) {
+fn emit_stream_output(
+    pretty_terminal_output: bool,
+    invocation_id: uuid::Uuid,
+    worker_id: &str,
+    stream: &'static str,
+    line: &str,
+) {
     if pretty_terminal_output {
-        match stream { "stderr" => eprintln!("{line}"), _ => println!("{line}") }
+        match stream {
+            "stderr" => eprintln!("{line}"),
+            _ => println!("{line}"),
+        }
         return;
     }
     info!(
@@ -259,12 +321,21 @@ fn emit_stream_output(pretty_terminal_output: bool, invocation_id: uuid::Uuid, w
     );
 }
 
-async fn send_event(client: &DaemonClient, claim: &InvocationClaimResponse, event: crate::execution::ExecutionEvent) -> AppResult<()> {
-    client.invocation_append_events(claim.invocation_id, InvocationEventBatchApiRequest {
-        worker_id: claim.worker_id.clone(),
-        lease_token: claim.lease_token,
-        events: vec![event],
-    }).await
+async fn send_event(
+    client: &DaemonClient,
+    claim: &InvocationClaimResponse,
+    event: crate::execution::ExecutionEvent,
+) -> AppResult<()> {
+    client
+        .invocation_append_events(
+            claim.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: claim.worker_id.clone(),
+                lease_token: claim.lease_token,
+                events: vec![event],
+            },
+        )
+        .await
 }
 
 impl InvocationExecutionSpecApi {
@@ -295,32 +366,63 @@ impl InvocationExecutionSpecApi {
 
     fn state_manifest(&self) -> Option<&serde_json::Value> {
         match self {
-            Self::Local { state_manifest, .. } | Self::Remote { state_manifest, .. } => state_manifest.as_ref(),
+            Self::Local { state_manifest, .. } | Self::Remote { state_manifest, .. } => {
+                state_manifest.as_ref()
+            }
             _ => None,
         }
     }
 }
 
-async fn materialize_execution_project_dir(spec: &InvocationExecutionSpecApi) -> AppResult<PathBuf> {
+async fn materialize_execution_project_dir(
+    spec: &InvocationExecutionSpecApi,
+) -> AppResult<PathBuf> {
     match spec {
         InvocationExecutionSpecApi::Local { project_dir, .. } => Ok(PathBuf::from(project_dir)),
-        InvocationExecutionSpecApi::Remote { repo_url, commit_sha, project_root, .. } => {
+        InvocationExecutionSpecApi::Remote {
+            repo_url,
+            commit_sha,
+            project_root,
+            ..
+        } => {
             let worktree_root = ensure_git_worktree(repo_url, commit_sha).await?;
             validate_remote_project_root(project_root)?;
-            let project_dir = if project_root == "." || project_root.is_empty() { worktree_root } else { worktree_root.join(project_root) };
-            if !project_dir.join("dbt_project.yml").is_file() { return Err(AppError::NotDbtProjectRoot); }
+            let project_dir = if project_root == "." || project_root.is_empty() {
+                worktree_root
+            } else {
+                worktree_root.join(project_root)
+            };
+            if !project_dir.join("dbt_project.yml").is_file() {
+                return Err(AppError::NotDbtProjectRoot);
+            }
             Ok(project_dir)
         }
-        InvocationExecutionSpecApi::ReleaseValidation { .. } => Err(AppError::UnsupportedLocalExecution("release".to_string())),
-        InvocationExecutionSpecApi::ProjectValidation { .. } => Err(AppError::UnsupportedLocalExecution("project_validate".to_string())),
-        InvocationExecutionSpecApi::EnvironmentPrepare { .. } => Err(AppError::UnsupportedLocalExecution("environment_prepare".to_string())),
-        InvocationExecutionSpecApi::EnvironmentValidate { .. } => Err(AppError::UnsupportedLocalExecution("environment_validate".to_string())),
+        InvocationExecutionSpecApi::ReleaseValidation { .. } => {
+            Err(AppError::UnsupportedLocalExecution("release".to_string()))
+        }
+        InvocationExecutionSpecApi::ProjectValidation { .. } => Err(
+            AppError::UnsupportedLocalExecution("project_validate".to_string()),
+        ),
+        InvocationExecutionSpecApi::EnvironmentPrepare { .. } => Err(
+            AppError::UnsupportedLocalExecution("environment_prepare".to_string()),
+        ),
+        InvocationExecutionSpecApi::EnvironmentValidate { .. } => Err(
+            AppError::UnsupportedLocalExecution("environment_validate".to_string()),
+        ),
     }
 }
 
-async fn prepare_runtime_project_for_execution(spec: &InvocationExecutionSpecApi, command: InvocationCommandApi, project_dir: &Path) -> AppResult<()> {
-    if !persists_state(command) { return Ok(()); }
-    let InvocationExecutionSpecApi::Remote { repo_url, .. } = spec else { return Ok(()); };
+async fn prepare_runtime_project_for_execution(
+    spec: &InvocationExecutionSpecApi,
+    command: InvocationCommandApi,
+    project_dir: &Path,
+) -> AppResult<()> {
+    if !persists_state(command) {
+        return Ok(());
+    }
+    let InvocationExecutionSpecApi::Remote { repo_url, .. } = spec else {
+        return Ok(());
+    };
     patch_remote_runtime_project(repo_url, project_dir).await
 }
 
@@ -334,7 +436,8 @@ async fn patch_remote_runtime_project(repo_url: &str, project_dir: &Path) -> App
 
 fn patch_runtime_project_yaml(project_dir: &Path) -> AppResult<()> {
     let project_path = project_dir.join("dbt_project.yml");
-    let mut project_yaml: YamlValue = serde_yaml::from_str(&std::fs::read_to_string(&project_path)?)?;
+    let mut project_yaml: YamlValue =
+        serde_yaml::from_str(&std::fs::read_to_string(&project_path)?)?;
     ensure_on_run_start_hook(&mut project_yaml)?;
     let macro_file = ensure_selected_resources_macro_file(project_dir, &project_yaml)?;
     std::fs::write(project_path, serde_yaml::to_string(&project_yaml)?)?;
@@ -343,27 +446,47 @@ fn patch_runtime_project_yaml(project_dir: &Path) -> AppResult<()> {
 }
 
 fn ensure_on_run_start_hook(project_yaml: &mut YamlValue) -> AppResult<()> {
-    let mapping = project_yaml.as_mapping_mut().ok_or_else(|| AppError::Internal("dbt_project.yml must be a YAML mapping".to_string()))?;
+    let mapping = project_yaml
+        .as_mapping_mut()
+        .ok_or_else(|| AppError::Internal("dbt_project.yml must be a YAML mapping".to_string()))?;
     let key = YamlValue::String("on-run-start".to_string());
     let hook = YamlValue::String(DBTX_SELECTED_RESOURCES_HOOK.to_string());
     let updated = match mapping.remove(&key) {
         Some(YamlValue::Sequence(mut seq)) => {
-            if !seq.iter().any(|v| v.as_str() == Some(DBTX_SELECTED_RESOURCES_HOOK)) { seq.push(hook); }
+            if !seq
+                .iter()
+                .any(|v| v.as_str() == Some(DBTX_SELECTED_RESOURCES_HOOK))
+            {
+                seq.push(hook);
+            }
             YamlValue::Sequence(seq)
         }
         Some(YamlValue::String(existing)) => {
-            if existing == DBTX_SELECTED_RESOURCES_HOOK { YamlValue::String(existing) }
-            else { YamlValue::Sequence(vec![YamlValue::String(existing), hook]) }
+            if existing == DBTX_SELECTED_RESOURCES_HOOK {
+                YamlValue::String(existing)
+            } else {
+                YamlValue::Sequence(vec![YamlValue::String(existing), hook])
+            }
         }
         Some(YamlValue::Null) | None => YamlValue::Sequence(vec![hook]),
-        Some(_) => return Err(AppError::Internal("unsupported on-run-start hook shape in dbt_project.yml".to_string())),
+        Some(_) => {
+            return Err(AppError::Internal(
+                "unsupported on-run-start hook shape in dbt_project.yml".to_string(),
+            ));
+        }
     };
     mapping.insert(key, updated);
     Ok(())
 }
 
-fn ensure_selected_resources_macro_file(project_dir: &Path, project_yaml: &YamlValue) -> AppResult<PathBuf> {
-    let macro_root = project_yaml.get("macro-paths").and_then(first_yaml_path).unwrap_or_else(|| PathBuf::from("macros"));
+fn ensure_selected_resources_macro_file(
+    project_dir: &Path,
+    project_yaml: &YamlValue,
+) -> AppResult<PathBuf> {
+    let macro_root = project_yaml
+        .get("macro-paths")
+        .and_then(first_yaml_path)
+        .unwrap_or_else(|| PathBuf::from("macros"));
     let macro_dir = project_dir.join(macro_root);
     std::fs::create_dir_all(&macro_dir)?;
     Ok(macro_dir.join(DBTX_SELECTED_RESOURCES_MACRO_FILE))
@@ -371,14 +494,24 @@ fn ensure_selected_resources_macro_file(project_dir: &Path, project_yaml: &YamlV
 
 fn first_yaml_path(value: &YamlValue) -> Option<PathBuf> {
     match value {
-        YamlValue::Sequence(seq) => seq.iter().find_map(|item| item.as_str().filter(|p| !p.trim().is_empty())).map(PathBuf::from),
+        YamlValue::Sequence(seq) => seq
+            .iter()
+            .find_map(|item| item.as_str().filter(|p| !p.trim().is_empty()))
+            .map(PathBuf::from),
         YamlValue::String(path) if !path.trim().is_empty() => Some(PathBuf::from(path)),
         _ => None,
     }
 }
 
 fn persists_state(command: InvocationCommandApi) -> bool {
-    !matches!(command, InvocationCommandApi::Ls | InvocationCommandApi::Release | InvocationCommandApi::ProjectValidate | InvocationCommandApi::EnvironmentPrepare | InvocationCommandApi::EnvironmentValidate)
+    !matches!(
+        command,
+        InvocationCommandApi::Ls
+            | InvocationCommandApi::Release
+            | InvocationCommandApi::ProjectValidate
+            | InvocationCommandApi::EnvironmentPrepare
+            | InvocationCommandApi::EnvironmentValidate
+    )
 }
 
 fn map_command(command: InvocationCommandApi) -> &'static str {
@@ -403,9 +536,14 @@ fn write_profiles_dir(profiles_yml: &str) -> AppResult<TempDir> {
 }
 
 fn write_state_dir(state_manifest: Option<&serde_json::Value>) -> AppResult<Option<TempDir>> {
-    let Some(state_manifest) = state_manifest else { return Ok(None); };
+    let Some(state_manifest) = state_manifest else {
+        return Ok(None);
+    };
     let temp_dir = TempDir::new()?;
-    std::fs::write(temp_dir.path().join("manifest.json"), serde_json::to_vec(state_manifest)?)?;
+    std::fs::write(
+        temp_dir.path().join("manifest.json"),
+        serde_json::to_vec(state_manifest)?,
+    )?;
     Ok(Some(temp_dir))
 }
 
@@ -413,8 +551,7 @@ fn write_state_dir(state_manifest: Option<&serde_json::Value>) -> AppResult<Opti
 mod tests {
     use super::{
         DBTX_SELECTED_RESOURCES_HOOK, DBTX_SELECTED_RESOURCES_MACRO_FILE,
-        git::ensure_git_worktree_in, patch_runtime_project_yaml,
-        git::resolve_remote_git_target,
+        git::ensure_git_worktree_in, git::resolve_remote_git_target, patch_runtime_project_yaml,
     };
     use crate::db::validate_remote_project_root;
     use std::path::Path;
@@ -442,8 +579,16 @@ mod tests {
         let commit_sha = git_output(["rev-parse", "HEAD"], repo.path());
 
         let (first, second) = tokio::join!(
-            ensure_git_worktree_in(cache.path(), repo.path().to_str().expect("repo str"), &commit_sha),
-            ensure_git_worktree_in(cache.path(), repo.path().to_str().expect("repo str"), &commit_sha)
+            ensure_git_worktree_in(
+                cache.path(),
+                repo.path().to_str().expect("repo str"),
+                &commit_sha
+            ),
+            ensure_git_worktree_in(
+                cache.path(),
+                repo.path().to_str().expect("repo str"),
+                &commit_sha
+            )
         );
         let first = first.expect("first worktree");
         let second = second.expect("second worktree");
@@ -461,9 +606,18 @@ mod tests {
         run_git(["add", "README.md"], repo.path());
         run_git(["commit", "-m", "init"], repo.path());
 
-        let error = resolve_remote_git_target(repo.path().to_str().expect("repo str"), Some("missing-branch"), None)
-            .await.expect_err("expected missing ref error");
-        assert!(error.to_string().contains("ref missing-branch is not available from remote repository"));
+        let error = resolve_remote_git_target(
+            repo.path().to_str().expect("repo str"),
+            Some("missing-branch"),
+            None,
+        )
+        .await
+        .expect_err("expected missing ref error");
+        assert!(
+            error
+                .to_string()
+                .contains("ref missing-branch is not available from remote repository")
+        );
     }
 
     #[tokio::test]
@@ -476,9 +630,18 @@ mod tests {
         run_git(["add", "README.md"], repo.path());
         run_git(["commit", "-m", "init"], repo.path());
 
-        let error = resolve_remote_git_target(repo.path().to_str().expect("repo str"), None, Some("deadbeef"))
-            .await.expect_err("expected missing commit error");
-        assert!(error.to_string().contains("commit deadbeef is not available from remote repository"));
+        let error = resolve_remote_git_target(
+            repo.path().to_str().expect("repo str"),
+            None,
+            Some("deadbeef"),
+        )
+        .await
+        .expect_err("expected missing commit error");
+        assert!(
+            error
+                .to_string()
+                .contains("commit deadbeef is not available from remote repository")
+        );
     }
 
     #[test]
@@ -488,25 +651,46 @@ mod tests {
         std::fs::write(
             project.path().join("dbt_project.yml"),
             "name: demo\nmacro-paths: [custom_macros]\non-run-start: [\"{{ existing_hook() }}\"]\n",
-        ).expect("dbt project");
+        )
+        .expect("dbt project");
 
         patch_runtime_project_yaml(project.path()).expect("patch project");
         patch_runtime_project_yaml(project.path()).expect("patch project idempotently");
 
-        let patched = std::fs::read_to_string(project.path().join("dbt_project.yml")).expect("patched yaml");
+        let patched =
+            std::fs::read_to_string(project.path().join("dbt_project.yml")).expect("patched yaml");
         assert!(patched.contains("existing_hook"));
         assert!(patched.contains(DBTX_SELECTED_RESOURCES_HOOK));
         assert_eq!(patched.matches(DBTX_SELECTED_RESOURCES_HOOK).count(), 1);
-        assert!(project.path().join("custom_macros").join(DBTX_SELECTED_RESOURCES_MACRO_FILE).is_file());
+        assert!(
+            project
+                .path()
+                .join("custom_macros")
+                .join(DBTX_SELECTED_RESOURCES_MACRO_FILE)
+                .is_file()
+        );
     }
 
     fn run_git<const N: usize>(args: [&str; N], cwd: &Path) {
-        let output = Command::new("git").args(args).current_dir(cwd).output().expect("git command");
-        assert!(output.status.success(), "git failed\nstdout:\n{}\nstderr:\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn git_output<const N: usize>(args: [&str; N], cwd: &Path) -> String {
-        let output = Command::new("git").args(args).current_dir(cwd).output().expect("git output");
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git output");
         assert!(output.status.success(), "git failed");
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }

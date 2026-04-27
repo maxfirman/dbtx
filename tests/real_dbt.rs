@@ -1,8 +1,6 @@
 #![allow(clippy::await_holding_lock)]
 
-use dbtx::api::{
-    InvocationCommandApi, InvocationCreateApiRequest, InvocationLifecycleStatus,
-};
+use dbtx::api::{InvocationCommandApi, InvocationCreateApiRequest, InvocationLifecycleStatus};
 use dbtx::client::DaemonClient;
 use dbtx::services::{infer_local_project_defaults, infer_remote_project_defaults};
 use serde_json::Value;
@@ -300,7 +298,11 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
             .as_deref(),
         Some("model")
     );
-    assert!(selected_rows[0].get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at").is_some());
+    assert!(
+        selected_rows[0]
+            .get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
+            .is_some()
+    );
     assert_eq!(
         selected_rows[0]
             .get::<Option<String>, _>("close_reason")

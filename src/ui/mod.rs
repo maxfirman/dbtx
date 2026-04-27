@@ -5,16 +5,16 @@ use crate::api::{
     QueueStatusResponse, WorkerStatusResponse,
 };
 use crate::db::{
-    DraftStatus, EnvironmentActualStateRecord, EnvironmentActiveResourceRecord, EnvironmentRecord,
-    EnvironmentReconcilePreparationRecord, EnvironmentRunPlanRecord,
+    DraftStatus, EnvironmentActiveResourceRecord, EnvironmentActualStateRecord,
+    EnvironmentReconcilePreparationRecord, EnvironmentRecord, EnvironmentRunPlanRecord,
     EnvironmentVersionRecord, InvocationListFilters, NodeExecutionStatus, PlanStatus,
     PreparationStatus, ProjectRecord,
 };
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
-    ensure_target_manifest_for_reconcile,
-    start_environment_draft_prepare_invocation, start_environment_draft_validation_invocation,
-    start_prepared_invocation, start_project_draft_validation_invocation,
+    ensure_target_manifest_for_reconcile, start_environment_draft_prepare_invocation,
+    start_environment_draft_validation_invocation, start_prepared_invocation,
+    start_project_draft_validation_invocation,
 };
 use crate::server::AppState;
 use crate::services::{
@@ -272,7 +272,9 @@ async fn load_dashboard_summary(
     })
 }
 
-async fn dashboard_recent_invocations(State(state): State<AppState>) -> Result<Html<String>, UiError> {
+async fn dashboard_recent_invocations(
+    State(state): State<AppState>,
+) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
     let invocations = db
@@ -361,9 +363,7 @@ struct EnvironmentDraftForm {
     profile_secrets_json: Option<String>,
 }
 
-fn deserialize_optional_i32_form_field<'de, D>(
-    deserializer: D,
-) -> Result<Option<i32>, D::Error>
+fn deserialize_optional_i32_form_field<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -427,7 +427,13 @@ async fn environment_draft_status(
     State(state): State<AppState>,
     Path(draft_id): Path<Uuid>,
 ) -> Result<Html<String>, UiError> {
-    render_environment_draft_modal(state.db(), &EnvironmentService::new(state.db()).get_draft(draft_id).await?).await
+    render_environment_draft_modal(
+        state.db(),
+        &EnvironmentService::new(state.db())
+            .get_draft(draft_id)
+            .await?,
+    )
+    .await
 }
 
 async fn environment_draft_branch_refresh(
@@ -477,16 +483,19 @@ async fn environment_draft_confirm(
     headers: HeaderMap,
     Path(draft_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, UiError> {
-    let environment = EnvironmentService::new(state.db()).confirm_draft(draft_id).await?;
+    let environment = EnvironmentService::new(state.db())
+        .confirm_draft(draft_id)
+        .await?;
     let redirect = format!(
         "/ui/projects/{}/environments/{}",
         environment.project_ref, environment.slug
     );
     if is_htmx(&headers) {
         let mut response = Html(String::new()).into_response();
-        response
-            .headers_mut()
-            .insert("HX-Redirect", HeaderValue::from_str(&redirect).unwrap_or_else(|_| HeaderValue::from_static("/")));
+        response.headers_mut().insert(
+            "HX-Redirect",
+            HeaderValue::from_str(&redirect).unwrap_or_else(|_| HeaderValue::from_static("/")),
+        );
         Ok(response)
     } else {
         Ok(Redirect::to(&redirect).into_response())
@@ -635,14 +644,24 @@ fn render_project_draft_fragment(
     }
 }
 
-fn environment_draft_update_request(form: EnvironmentDraftForm) -> Result<EnvironmentDraftUpdateRequest, UiError> {
+fn environment_draft_update_request(
+    form: EnvironmentDraftForm,
+) -> Result<EnvironmentDraftUpdateRequest, UiError> {
     let profile_config = parse_json_object(form.profile_config_json.as_deref().unwrap_or("{}"))?;
     let profile_secrets = parse_json_object(form.profile_secrets_json.as_deref().unwrap_or("{}"))?;
     Ok(EnvironmentDraftUpdateRequest {
         project: String::new(),
         slug: form.slug,
-        git_branch: if form.git_branch.trim().is_empty() { None } else { Some(form.git_branch) },
-        git_commit_sha: if form.git_commit_sha.trim().is_empty() { None } else { Some(form.git_commit_sha) },
+        git_branch: if form.git_branch.trim().is_empty() {
+            None
+        } else {
+            Some(form.git_branch)
+        },
+        git_commit_sha: if form.git_commit_sha.trim().is_empty() {
+            None
+        } else {
+            Some(form.git_commit_sha)
+        },
         use_latest_commit: form.use_latest_commit.is_some(),
         auto_deploy: form.auto_deploy.is_some(),
         immutable: form.immutable.is_some(),
@@ -665,7 +684,9 @@ fn parse_json_object(input: &str) -> Result<Value, UiError> {
     if value.is_object() {
         Ok(value)
     } else {
-        Err(UiError(AppError::InvalidProfileConfig("expected object".to_string())))
+        Err(UiError(AppError::InvalidProfileConfig(
+            "expected object".to_string(),
+        )))
     }
 }
 
@@ -673,7 +694,10 @@ async fn render_environment_draft_modal(
     db: &crate::db::Db,
     draft: &crate::db::EnvironmentDraftRecord,
 ) -> Result<Html<String>, UiError> {
-    let project = db.get_project_by_id(draft.project_id).await.map_err(UiError)?;
+    let project = db
+        .get_project_by_id(draft.project_id)
+        .await
+        .map_err(UiError)?;
     render_template(&EnvironmentCreateModalTemplate {
         project: project_summary_view(&project),
         draft: environment_draft_view(&project, draft)?,
@@ -733,9 +757,9 @@ fn parse_display_status_filters(values: &[String]) -> AppResult<Vec<String>> {
                 display_statuses.push(value)
             }
             other => {
-                return Err(AppError::InvalidInput(
-                    format!("invalid invocation status filter: {other}"),
-                ));
+                return Err(AppError::InvalidInput(format!(
+                    "invalid invocation status filter: {other}"
+                )));
             }
         }
     }
@@ -747,14 +771,16 @@ fn parse_execution_mode_filters(values: &[String]) -> AppResult<Vec<String>> {
         .into_iter()
         .map(|value| match value.as_str() {
             "local" | "server" => Ok(value),
-            other => Err(AppError::InvalidInput(
-                format!("invalid invocation execution mode filter: {other}"),
-            )),
+            other => Err(AppError::InvalidInput(format!(
+                "invalid invocation execution mode filter: {other}"
+            ))),
         })
         .collect()
 }
 
-fn normalized_invocation_filters(query: &InvocationFilterQuery) -> AppResult<NormalizedInvocationFilters> {
+fn normalized_invocation_filters(
+    query: &InvocationFilterQuery,
+) -> AppResult<NormalizedInvocationFilters> {
     let display_statuses = parse_display_status_filters(&query.status)?;
     let execution_modes = parse_execution_mode_filters(&query.execution_mode)?;
     Ok(NormalizedInvocationFilters {
@@ -801,7 +827,8 @@ fn parse_invocation_filter_query(raw_query: Option<&str>) -> AppResult<Invocatio
 }
 
 fn invocations_page_url(query: &InvocationFilterQuery, page: usize) -> String {
-    let mut url = reqwest::Url::parse("http://localhost/ui/invocations").expect("valid invocations url");
+    let mut url =
+        reqwest::Url::parse("http://localhost/ui/invocations").expect("valid invocations url");
     {
         let mut pairs = url.query_pairs_mut();
         for value in normalize_filter_values(&query.status) {
@@ -844,7 +871,10 @@ fn invocation_filter_option_views(
         .collect()
 }
 
-fn invocation_dynamic_option_views(selected: &[String], options: &[String]) -> Vec<SelectOptionView> {
+fn invocation_dynamic_option_views(
+    selected: &[String],
+    options: &[String],
+) -> Vec<SelectOptionView> {
     options
         .iter()
         .map(|value| SelectOptionView {
@@ -878,7 +908,10 @@ fn invocation_rows_summary(current_page: usize, total_count: i64, row_count: usi
     format!("Showing {start}-{end} of {total_count}")
 }
 
-fn invocation_page_window(current_page: usize, total_pages: usize) -> std::ops::RangeInclusive<usize> {
+fn invocation_page_window(
+    current_page: usize,
+    total_pages: usize,
+) -> std::ops::RangeInclusive<usize> {
     if total_pages <= 5 {
         return 1..=total_pages.max(1);
     }
@@ -925,7 +958,11 @@ async fn invocations_index(
         invocations: rows.clone(),
         results: InvocationResultsView {
             table_url: invocations_table_url(&query, pagination.current_page),
-            summary: invocation_rows_summary(pagination.current_page, pagination.total_count, rows.len()),
+            summary: invocation_rows_summary(
+                pagination.current_page,
+                pagination.total_count,
+                rows.len(),
+            ),
             pagination,
         },
     })
@@ -941,7 +978,11 @@ async fn invocations_table(
         invocations: rows.clone(),
         results: InvocationResultsView {
             table_url: invocations_table_url(&query, pagination.current_page),
-            summary: invocation_rows_summary(pagination.current_page, pagination.total_count, rows.len()),
+            summary: invocation_rows_summary(
+                pagination.current_page,
+                pagination.total_count,
+                rows.len(),
+            ),
             pagination,
         },
     })
@@ -950,7 +991,14 @@ async fn invocations_table(
 async fn load_invocation_rows(
     db: &crate::db::Db,
     query: &InvocationFilterQuery,
-) -> Result<(Vec<InvocationSummaryView>, InvocationPaginationView, InvocationFilterOptions), UiError> {
+) -> Result<
+    (
+        Vec<InvocationSummaryView>,
+        InvocationPaginationView,
+        InvocationFilterOptions,
+    ),
+    UiError,
+> {
     db.require_current_schema().await?;
     let normalized = normalized_invocation_filters(query).map_err(UiError::from)?;
     let requested_page = parse_page_number(query.page).map_err(UiError::from)?;
@@ -1020,7 +1068,11 @@ async fn invocation_detail(
     let invocation = db.get_invocation_status(invocation_id).await?;
 
     let tab = query.tab.as_deref().unwrap_or("timeline");
-    let tab = if matches!(tab, "timeline" | "lineage" | "logs") { tab } else { "timeline" };
+    let tab = if matches!(tab, "timeline" | "lineage" | "logs") {
+        tab
+    } else {
+        "timeline"
+    };
     let base = format!("/ui/invocations/{invocation_id}");
 
     let tab_content_html = render_invocation_tab_content(db, invocation_id, tab).await?;
@@ -1073,7 +1125,9 @@ async fn render_invocation_tab_content(
             let lineage = db.get_invocation_lineage(invocation_id).await?;
 
             let mut base_url = String::new();
-            if let Ok(p) = db.get_invocation_persistence(invocation_id, None, None).await
+            if let Ok(p) = db
+                .get_invocation_persistence(invocation_id, None, None)
+                .await
                 && let Some(env_id) = p.environment_id
                 && let Ok(env) = db.get_environment_by_id(env_id).await
             {
@@ -1081,7 +1135,8 @@ async fn render_invocation_tab_content(
             }
 
             let test_ids: HashSet<&str> = lineage
-                .nodes.iter()
+                .nodes
+                .iter()
                 .filter(|n| n.resource_type.as_deref() == Some("test"))
                 .map(|n| n.unique_id.as_str())
                 .collect();
@@ -1099,10 +1154,15 @@ async fn render_invocation_tab_content(
                 }
             }
 
-            let nodes_json: Vec<Value> = lineage.nodes.iter()
+            let nodes_json: Vec<Value> = lineage
+                .nodes
+                .iter()
                 .filter(|n| !test_ids.contains(n.unique_id.as_str()))
                 .map(|n| {
-                    let (pass, fail) = test_counts.get(n.unique_id.as_str()).copied().unwrap_or((0, 0));
+                    let (pass, fail) = test_counts
+                        .get(n.unique_id.as_str())
+                        .copied()
+                        .unwrap_or((0, 0));
                     serde_json::json!({
                         "id": n.unique_id,
                         "data": {
@@ -1116,15 +1176,20 @@ async fn render_invocation_tab_content(
                             "testsFailing": fail,
                         }
                     })
-                }).collect();
+                })
+                .collect();
 
-            let edges_json: Vec<Value> = lineage.edges.iter()
+            let edges_json: Vec<Value> = lineage
+                .edges
+                .iter()
                 .filter(|(s, t)| !test_ids.contains(s.as_str()) && !test_ids.contains(t.as_str()))
-                .map(|(src, tgt)| serde_json::json!({
-                    "id": format!("{src}->{tgt}"),
-                    "source": src,
-                    "target": tgt,
-                }))
+                .map(|(src, tgt)| {
+                    serde_json::json!({
+                        "id": format!("{src}->{tgt}"),
+                        "source": src,
+                        "target": tgt,
+                    })
+                })
                 .collect();
 
             let lineage_data = serde_json::json!({
@@ -1217,9 +1282,7 @@ async fn invocation_timeline(
         if let Some(env_id) = p.environment_id
             && let Ok(env) = db.get_environment_by_id(env_id).await
         {
-            model_base_url = Some(format!(
-                "/ui/catalog/{}/{}", env.project_ref, env.slug
-            ));
+            model_base_url = Some(format!("/ui/catalog/{}/{}", env.project_ref, env.slug));
         }
     }
 
@@ -1366,7 +1429,9 @@ fn filter_workers(workers: Vec<WorkerSummaryView>, show_stale: bool) -> Vec<Work
 }
 
 fn queue_is_stale_only(queue: &QueueSummaryView) -> bool {
-    queue.pending_count == 0 && queue.claimed_count > 0 && queue.claimed_count == queue.stale_claim_count
+    queue.pending_count == 0
+        && queue.claimed_count > 0
+        && queue.claimed_count == queue.stale_claim_count
 }
 
 fn queue_key(execution_mode: &str, worker_queue: &str) -> String {
@@ -1396,7 +1461,11 @@ async fn configured_queue_keys(db: &crate::db::Db) -> Result<HashSet<String>, Ui
     let projects = db.list_projects().await?;
     let mut keys = HashSet::new();
     for project in projects {
-        let execution_mode = if project.mode == "remote" { "server" } else { "local" };
+        let execution_mode = if project.mode == "remote" {
+            "server"
+        } else {
+            "local"
+        };
         for environment in db.list_environments(&project.project_id).await? {
             keys.insert(queue_key(execution_mode, &environment.worker_queue));
         }
@@ -1432,10 +1501,7 @@ fn filter_queues(
     }
 }
 
-async fn workers_index_inner(
-    state: AppState,
-    show_stale: bool,
-) -> Result<Html<String>, UiError> {
+async fn workers_index_inner(state: AppState, show_stale: bool) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
     let workers = filter_workers(
@@ -1484,10 +1550,7 @@ async fn workers_table(
     })
 }
 
-async fn queues_index_inner(
-    state: AppState,
-    show_stale: bool,
-) -> Result<Html<String>, UiError> {
+async fn queues_index_inner(state: AppState, show_stale: bool) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
     let raw_workers = db.list_workers().await?;
@@ -1707,16 +1770,23 @@ async fn load_environment_panel(
                 slug.to_string(),
             ))
         })?;
-    let history = db.list_environment_versions(&project.project_id, slug).await?;
-    let actual_state = db.get_environment_actual_state(&project.project_id, slug).await?;
+    let history = db
+        .list_environment_versions(&project.project_id, slug)
+        .await?;
+    let actual_state = db
+        .get_environment_actual_state(&project.project_id, slug)
+        .await?;
     let preparation = db
         .get_environment_reconcile_preparation(&project.project_id, slug)
         .await?;
     let active_resources = db
         .list_active_environment_resources(&project.project_id, slug, None)
         .await?;
-    let plans = db.list_environment_run_plans(&project.project_id, slug).await?;
-    let plan_views = build_environment_run_plan_views(db, &project.project_id, slug, &plans).await?;
+    let plans = db
+        .list_environment_run_plans(&project.project_id, slug)
+        .await?;
+    let plan_views =
+        build_environment_run_plan_views(db, &project.project_id, slug, &plans).await?;
 
     Ok(EnvironmentPanelTemplate {
         project: project_summary_view(&project),
@@ -1792,9 +1862,7 @@ fn htmx_headers() -> HeaderMap {
 }
 
 fn parse_uuid(value: &str) -> AppResult<Uuid> {
-    Uuid::parse_str(value).map_err(|err| {
-        AppError::InvalidInput(format!("invalid uuid: {err}"))
-    })
+    Uuid::parse_str(value).map_err(|err| AppError::InvalidInput(format!("invalid uuid: {err}")))
 }
 
 fn strip_ansi(input: &str) -> String {
@@ -1850,10 +1918,7 @@ fn style_relation_tokens(input: &str) -> String {
     while index < bytes.len() {
         let start = index;
         let left_end = consume_identifier(bytes, index);
-        if left_end > start
-            && left_end < bytes.len()
-            && bytes[left_end] == b'.'
-        {
+        if left_end > start && left_end < bytes.len() && bytes[left_end] == b'.' {
             let right_start = left_end + 1;
             let right_end = consume_identifier(bytes, right_start);
             if right_end > right_start {
@@ -1967,7 +2032,10 @@ fn invocation_display_status(invocation: &InvocationStatusResponse) -> &'static 
     match invocation.status {
         InvocationLifecycleStatus::Running if invocation.claimed_by.is_none() => "queued",
         InvocationLifecycleStatus::Running
-            if !matches!(invocation.cancel_state, crate::api::InvocationCancelStateApi::None) =>
+            if !matches!(
+                invocation.cancel_state,
+                crate::api::InvocationCancelStateApi::None
+            ) =>
         {
             "cancelling"
         }
@@ -2400,13 +2468,12 @@ fn environment_draft_view(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            selected: value
-                .get("sha")
-                .and_then(Value::as_str)
-                == draft.git_commit_sha.as_deref(),
+            selected: value.get("sha").and_then(Value::as_str) == draft.git_commit_sha.as_deref(),
         })
         .collect::<Vec<_>>();
-    let commit_options = if commit_options.is_empty() && !draft.git_commit_sha.clone().unwrap_or_default().is_empty() {
+    let commit_options = if commit_options.is_empty()
+        && !draft.git_commit_sha.clone().unwrap_or_default().is_empty()
+    {
         let sha = draft.git_commit_sha.clone().unwrap_or_default();
         vec![EnvironmentDraftCommitOptionView {
             sha: sha.clone(),
@@ -2427,7 +2494,10 @@ fn environment_draft_view(
         use_latest_commit: draft.use_latest_commit,
         auto_deploy: draft.auto_deploy,
         immutable: draft.immutable,
-        adapter_type: draft.adapter_type.clone().unwrap_or_else(|| "postgres".to_string()),
+        adapter_type: draft
+            .adapter_type
+            .clone()
+            .unwrap_or_else(|| "postgres".to_string()),
         schema_name: draft.schema_name.clone().unwrap_or_default(),
         threads: draft.threads.map(|v| v.to_string()).unwrap_or_default(),
         branch_options,
@@ -2636,7 +2706,10 @@ fn environment_reconciliation_summary_view(
         .clone()
         .unwrap_or_else(|| "—".to_string());
     let (state, state_class) = if desired_commit_sha == "—" {
-        ("missing desired commit".to_string(), "bg-slate-100 text-slate-700")
+        (
+            "missing desired commit".to_string(),
+            "bg-slate-100 text-slate-700",
+        )
     } else if desired_commit_sha == actual_commit_sha && active_resource_count == 0 {
         ("reconciled".to_string(), "bg-emerald-100 text-emerald-800")
     } else if active_resource_count > 0 {
@@ -2686,7 +2759,10 @@ fn environment_reconciliation_summary_view(
         .and_then(|preparation| preparation.next_attempt_at)
         .map(fmt_ts)
         .unwrap_or_else(|| "—".to_string());
-    let blocked_plan_count = plans.iter().filter(|plan| plan.status == PlanStatus::Blocked).count();
+    let blocked_plan_count = plans
+        .iter()
+        .filter(|plan| plan.status == PlanStatus::Blocked)
+        .count();
     EnvironmentReconciliationSummaryView {
         state,
         state_class,
@@ -2779,7 +2855,10 @@ fn environment_plan_blocker_view(
             status_class: status_badge_class(&status),
             status,
             worker_queue: invocation.worker_queue.clone(),
-            claimed_by: invocation.claimed_by.clone().unwrap_or_else(|| "—".to_string()),
+            claimed_by: invocation
+                .claimed_by
+                .clone()
+                .unwrap_or_else(|| "—".to_string()),
             overlap_count,
             overlapping_resources,
             remaining_overlap_count,
@@ -2832,12 +2911,7 @@ fn reconcile_plan_input_summary(plan: &EnvironmentRunPlanRecord) -> String {
                 .metadata
                 .get("source_keys")
                 .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                })
+                .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
                 .unwrap_or_default();
             if source_keys.is_empty() {
                 "Unsatisfied source state change".to_string()
@@ -3468,7 +3542,9 @@ async fn models_index(
             && let Some(env) = environments.iter().find(|e| &e.slug == slug)
             && let Some(project) = projects.iter().find(|p| &p.project_id == pid)
         {
-            let raw = db.list_models_for_environment(project.id, env.id, &query.resource_type).await?;
+            let raw = db
+                .list_models_for_environment(project.id, env.id, &query.resource_type)
+                .await?;
             models = raw
                 .iter()
                 .map(|m| ModelSummaryViewItem {
@@ -3580,20 +3656,38 @@ async fn model_detail(
     db.require_current_schema().await?;
     let project = db.get_project_by_project_id(&project_id).await?;
     let env = db.get_environment(&project.project_id, &env_slug).await?;
-    let unique_id = urlencoding::decode(&unique_id).unwrap_or_default().to_string();
+    let unique_id = urlencoding::decode(&unique_id)
+        .unwrap_or_default()
+        .to_string();
     let resource_type = resource_type_from_unique_id(&unique_id).to_string();
 
     let tab = query.tab.as_deref().unwrap_or("overview");
-    let base = format!("/ui/catalog/{}/{}/{}", project_id, env_slug, urlencoding::encode(&unique_id));
+    let base = format!(
+        "/ui/catalog/{}/{}/{}",
+        project_id,
+        env_slug,
+        urlencoding::encode(&unique_id)
+    );
 
     let valid_tabs: &[&str] = match resource_type.as_str() {
         "source" => &["overview", "lineage"],
         "test" => &["overview", "invocations"],
         "seed" => &["overview", "invocations", "lineage", "history"],
         "snapshot" => &["overview", "code", "invocations", "lineage", "history"],
-        _ => &["overview", "code", "invocations", "lineage", "tests", "history"],
+        _ => &[
+            "overview",
+            "code",
+            "invocations",
+            "lineage",
+            "tests",
+            "history",
+        ],
     };
-    let tab = if valid_tabs.contains(&tab) { tab } else { "overview" };
+    let tab = if valid_tabs.contains(&tab) {
+        tab
+    } else {
+        "overview"
+    };
 
     let tab_content_html = render_tab(db, &project, &env, &unique_id, tab, &base, &query).await?;
 
@@ -3663,9 +3757,16 @@ async fn model_tab(
     db.require_current_schema().await?;
     let project = db.get_project_by_project_id(&project_id).await?;
     let env = db.get_environment(&project.project_id, &env_slug).await?;
-    let unique_id = urlencoding::decode(&unique_id).unwrap_or_default().to_string();
+    let unique_id = urlencoding::decode(&unique_id)
+        .unwrap_or_default()
+        .to_string();
     let tab = query.tab.as_deref().unwrap_or("overview");
-    let base = format!("/ui/catalog/{}/{}/{}", project_id, env_slug, urlencoding::encode(&unique_id));
+    let base = format!(
+        "/ui/catalog/{}/{}/{}",
+        project_id,
+        env_slug,
+        urlencoding::encode(&unique_id)
+    );
     let html = render_tab(db, &project, &env, &unique_id, tab, &base, &query).await?;
     Ok(Html(html))
 }
@@ -3695,9 +3796,7 @@ fn model_status_class(status: &str) -> &'static str {
         Some(NodeExecutionStatus::Success | NodeExecutionStatus::Pass) => {
             "bg-emerald-100 text-emerald-800"
         }
-        Some(NodeExecutionStatus::Error | NodeExecutionStatus::Fail) => {
-            "bg-rose-100 text-rose-800"
-        }
+        Some(NodeExecutionStatus::Error | NodeExecutionStatus::Fail) => "bg-rose-100 text-rose-800",
         _ => "bg-slate-100 text-slate-600",
     }
 }
@@ -3733,8 +3832,20 @@ async fn render_overview_tab(
 
     match resource_type {
         "source" => {
-            let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, resource_type, status).await?;
-            let freshness = n.get("freshness").map(|v| v.to_string()).unwrap_or_default();
+            let lineage = build_overview_lineage(
+                db,
+                project,
+                env,
+                unique_id,
+                &node_name,
+                resource_type,
+                status,
+            )
+            .await?;
+            let freshness = n
+                .get("freshness")
+                .map(|v| v.to_string())
+                .unwrap_or_default();
             SourceOverviewTemplate {
                 description: extract_str(n, "description"),
                 database: extract_str(n, "database"),
@@ -3752,7 +3863,16 @@ async fn render_overview_tab(
             .map_err(|e| UiError(AppError::Internal(e.to_string())))
         }
         "seed" => {
-            let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, resource_type, status).await?;
+            let lineage = build_overview_lineage(
+                db,
+                project,
+                env,
+                unique_id,
+                &node_name,
+                resource_type,
+                status,
+            )
+            .await?;
             SeedOverviewTemplate {
                 description: extract_str(n, "description"),
                 file_path: extract_str(n, "original_file_path"),
@@ -3770,13 +3890,25 @@ async fn render_overview_tab(
             .map_err(|e| UiError(AppError::Internal(e.to_string())))
         }
         "test" => {
-            let config = n.get("config").cloned().unwrap_or(Value::Object(Default::default()));
-            let test_type = config.get("test_metadata")
-                .and_then(|tm| tm.get("name")).and_then(Value::as_str)
-                .unwrap_or("").to_string();
-            let severity = config.get("severity").and_then(Value::as_str).unwrap_or("ERROR").to_string();
-            let depends_on_nodes = n.get("depends_on")
-                .and_then(|d| d.get("nodes")).and_then(Value::as_array);
+            let config = n
+                .get("config")
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
+            let test_type = config
+                .get("test_metadata")
+                .and_then(|tm| tm.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let severity = config
+                .get("severity")
+                .and_then(Value::as_str)
+                .unwrap_or("ERROR")
+                .to_string();
+            let depends_on_nodes = n
+                .get("depends_on")
+                .and_then(|d| d.get("nodes"))
+                .and_then(Value::as_array);
             let base_url = format!("/ui/catalog/{}/{}", project.project_id, env.slug);
             let depends_on: Vec<TestDependsOnView> = depends_on_nodes
                 .into_iter()
@@ -3804,20 +3936,48 @@ async fn render_overview_tab(
             .map_err(|e| UiError(AppError::Internal(e.to_string())))
         }
         "snapshot" => {
-            let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, resource_type, status).await?;
-            let config = n.get("config").cloned().unwrap_or(Value::Object(Default::default()));
+            let lineage = build_overview_lineage(
+                db,
+                project,
+                env,
+                unique_id,
+                &node_name,
+                resource_type,
+                status,
+            )
+            .await?;
+            let config = n
+                .get("config")
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
             SnapshotOverviewTemplate {
                 description: extract_str(n, "description"),
-                strategy: config.get("strategy").and_then(Value::as_str).unwrap_or("").to_string(),
-                unique_key: config.get("unique_key").and_then(Value::as_str).unwrap_or("").to_string(),
-                updated_at_col: config.get("updated_at").and_then(Value::as_str).unwrap_or("").to_string(),
+                strategy: config
+                    .get("strategy")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                unique_key: config
+                    .get("unique_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                updated_at_col: config
+                    .get("updated_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 database: extract_str(n, "database"),
                 schema: extract_str(n, "schema"),
                 alias: extract_str(n, "alias"),
                 file_path: extract_str(n, "original_file_path"),
                 package_name: extract_str(n, "package_name"),
                 columns,
-                raw_code: n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string(),
+                raw_code: n
+                    .get("raw_code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 status: status.to_string(),
                 status_class: model_status_class(status).to_string(),
                 lineage,
@@ -3828,25 +3988,46 @@ async fn render_overview_tab(
         }
         _ => {
             // model (default)
-            let latest_checksum = node
-                .and_then(|n| n.get("checksum").and_then(|c| c.get("checksum")).and_then(Value::as_str));
-            let promoted_checksum = promoted
-                .and_then(|n| n.get("checksum").and_then(|c| c.get("checksum")).and_then(Value::as_str));
+            let latest_checksum = node.and_then(|n| {
+                n.get("checksum")
+                    .and_then(|c| c.get("checksum"))
+                    .and_then(Value::as_str)
+            });
+            let promoted_checksum = promoted.and_then(|n| {
+                n.get("checksum")
+                    .and_then(|c| c.get("checksum"))
+                    .and_then(Value::as_str)
+            });
             let is_stale = match (latest_checksum, promoted_checksum) {
                 (Some(l), Some(p)) => l != p,
                 (Some(_), None) => true,
                 _ => false,
             };
-            let tags: Vec<String> = n.get("tags").and_then(Value::as_array)
-                .into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
-            let materialized = n.get("config")
-                .and_then(|c| c.get("materialized")).and_then(Value::as_str).unwrap_or("").to_string();
+            let tags: Vec<String> = n
+                .get("tags")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect();
+            let materialized = n
+                .get("config")
+                .and_then(|c| c.get("materialized"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let promoted_raw_code = if is_stale {
-                promoted.and_then(|p| p.get("raw_code").and_then(Value::as_str)).unwrap_or("").to_string()
+                promoted
+                    .and_then(|p| p.get("raw_code").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .to_string()
             } else {
                 String::new()
             };
-            let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, "model", status).await?;
+            let lineage =
+                build_overview_lineage(db, project, env, unique_id, &node_name, "model", status)
+                    .await?;
             ModelOverviewTemplate {
                 description: extract_str(n, "description"),
                 materialized,
@@ -3880,13 +4061,34 @@ async fn render_code_tab(
     let node = detail.latest_manifest_node.as_ref();
     let empty = Value::Object(Default::default());
     let n = node.unwrap_or(&empty);
-    let raw_code = n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string();
-    let compiled_code = n.get("compiled_code").and_then(Value::as_str).unwrap_or("").to_string();
-    let raw_code_html = if raw_code.is_empty() { String::new() } else { highlight_sql(&raw_code) };
-    let compiled_code_html = if compiled_code.is_empty() { String::new() } else { highlight_sql(&compiled_code) };
-    ModelCodeTemplate { raw_code, compiled_code, raw_code_html, compiled_code_html }
-        .render()
-        .map_err(|e| UiError(AppError::Internal(e.to_string())))
+    let raw_code = n
+        .get("raw_code")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let compiled_code = n
+        .get("compiled_code")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let raw_code_html = if raw_code.is_empty() {
+        String::new()
+    } else {
+        highlight_sql(&raw_code)
+    };
+    let compiled_code_html = if compiled_code.is_empty() {
+        String::new()
+    } else {
+        highlight_sql(&compiled_code)
+    };
+    ModelCodeTemplate {
+        raw_code,
+        compiled_code,
+        raw_code_html,
+        compiled_code_html,
+    }
+    .render()
+    .map_err(|e| UiError(AppError::Internal(e.to_string())))
 }
 
 async fn render_invocations_tab(
@@ -3895,7 +4097,9 @@ async fn render_invocations_tab(
     env: &crate::db::EnvironmentRecord,
     unique_id: &str,
 ) -> Result<String, UiError> {
-    let execs = db.get_model_node_executions(project.id, env.id, unique_id, 50).await?;
+    let execs = db
+        .get_model_node_executions(project.id, env.id, unique_id, 50)
+        .await?;
     let executions = execs.iter().map(build_exec_view).collect();
     ModelInvocationsTemplate { executions }
         .render()
@@ -3906,13 +4110,20 @@ fn build_exec_view(e: &crate::db::ModelNodeExecutionRecord) -> ModelExecView {
     let status = e.status.as_deref().unwrap_or("unknown");
     ModelExecView {
         invocation_id: e.invocation_id.map(|id| id.to_string()).unwrap_or_default(),
-        invocation_url: e.invocation_id.map(|id| format!("/ui/invocations/{id}")).unwrap_or_default(),
+        invocation_url: e
+            .invocation_id
+            .map(|id| format!("/ui/invocations/{id}"))
+            .unwrap_or_default(),
         command: e.command.clone(),
         status: status.to_string(),
         status_class: model_status_class(status).to_string(),
         started_at: fmt_opt_time(e.started_at),
         duration: fmt_duration(e.execution_time_seconds),
-        git_commit_sha: e.git_commit_sha.as_deref().map(short_hash).unwrap_or_default(),
+        git_commit_sha: e
+            .git_commit_sha
+            .as_deref()
+            .map(short_hash)
+            .unwrap_or_default(),
     }
 }
 
@@ -3931,12 +4142,15 @@ async fn render_lineage_tab(
 ) -> Result<String, UiError> {
     let depth = query.depth.unwrap_or(2).clamp(1, 5);
     let direction = query.direction.as_deref().unwrap_or("both");
-    let lineage = db.get_model_lineage(project.id, env.id, unique_id, depth, direction).await?;
+    let lineage = db
+        .get_model_lineage(project.id, env.id, unique_id, depth, direction)
+        .await?;
 
     let base_url = format!("/ui/catalog/{}/{}", project.project_id, env.slug);
 
     let test_ids: std::collections::HashSet<&str> = lineage
-        .nodes.iter()
+        .nodes
+        .iter()
         .filter(|n| n.resource_type.as_deref() == Some("test"))
         .map(|n| n.unique_id.as_str())
         .collect();
@@ -3955,10 +4169,15 @@ async fn render_lineage_tab(
         }
     }
 
-    let nodes_json: Vec<Value> = lineage.nodes.iter()
+    let nodes_json: Vec<Value> = lineage
+        .nodes
+        .iter()
         .filter(|n| !test_ids.contains(n.unique_id.as_str()))
         .map(|n| {
-            let (pass, fail) = test_counts.get(n.unique_id.as_str()).copied().unwrap_or((0, 0));
+            let (pass, fail) = test_counts
+                .get(n.unique_id.as_str())
+                .copied()
+                .unwrap_or((0, 0));
             serde_json::json!({
                 "id": n.unique_id,
                 "data": {
@@ -3972,9 +4191,12 @@ async fn render_lineage_tab(
                     "testsFailing": fail,
                 }
             })
-        }).collect();
+        })
+        .collect();
 
-    let edges_json: Vec<Value> = lineage.edges.iter()
+    let edges_json: Vec<Value> = lineage
+        .edges
+        .iter()
         .filter(|(s, t)| !test_ids.contains(s.as_str()) && !test_ids.contains(t.as_str()))
         .map(|(src, tgt)| {
             serde_json::json!({
@@ -3982,7 +4204,8 @@ async fn render_lineage_tab(
                 "source": src,
                 "target": tgt,
             })
-        }).collect();
+        })
+        .collect();
 
     let lineage_data = serde_json::json!({
         "nodes": nodes_json,
@@ -4001,7 +4224,8 @@ async fn render_lineage_tab(
         node_count: nodes_json.len(),
         project_id: project.project_id.clone(),
         environment_slug: env.slug.clone(),
-        model_selector: nodes_json.iter()
+        model_selector: nodes_json
+            .iter()
             .filter_map(|n| n.get("id").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join(" "),
@@ -4020,7 +4244,11 @@ fn fmt_duration(seconds: Option<f64>) -> String {
 }
 
 fn short_hash(s: &str) -> String {
-    if s.len() > 8 { s[..8].to_string() } else { s.to_string() }
+    if s.len() > 8 {
+        s[..8].to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 fn highlight_sql(code: &str) -> String {
@@ -4030,18 +4258,31 @@ fn highlight_sql(code: &str) -> String {
 
     let ss = SyntaxSet::load_defaults_newlines();
     let ts = ThemeSet::load_defaults();
-    let syntax = ss.find_syntax_by_extension("sql").unwrap_or_else(|| ss.find_syntax_plain_text());
+    let syntax = ss
+        .find_syntax_by_extension("sql")
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
     let theme = &ts.themes["InspiredGitHub"];
     let inner = match highlighted_html_for_string(code, &ss, syntax, theme) {
-        Ok(html) => {
-            html.strip_prefix("<pre style=\"").and_then(|s| s.find("\">").map(|i| &s[i + 2..]))
-                .and_then(|s| s.strip_suffix("</pre>\n").or_else(|| s.strip_suffix("</pre>")))
-                .unwrap_or(&html).to_string()
-        }
-        Err(_) => code.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"),
+        Ok(html) => html
+            .strip_prefix("<pre style=\"")
+            .and_then(|s| s.find("\">").map(|i| &s[i + 2..]))
+            .and_then(|s| {
+                s.strip_suffix("</pre>\n")
+                    .or_else(|| s.strip_suffix("</pre>"))
+            })
+            .unwrap_or(&html)
+            .to_string(),
+        Err(_) => code
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;"),
     };
     let lines: Vec<&str> = inner.split('\n').collect();
-    let count = if lines.last() == Some(&"") { lines.len() - 1 } else { lines.len() };
+    let count = if lines.last() == Some(&"") {
+        lines.len() - 1
+    } else {
+        lines.len()
+    };
     let mut out = String::from("<table class=\"w-full border-collapse\"><tbody>");
     for (i, line) in lines.iter().enumerate().take(count) {
         let num = i + 1;
@@ -4074,10 +4315,7 @@ async fn render_tests_tab(
                 status: status.to_string(),
                 status_class: model_status_class(status).to_string(),
                 finished_at: fmt_opt_time(t.finished_at),
-                history_url: format!(
-                    "{base}/test-history/{}",
-                    urlencoding::encode(&t.unique_id)
-                ),
+                history_url: format!("{base}/test-history/{}", urlencoding::encode(&t.unique_id)),
                 detail_url: format!(
                     "/ui/catalog/{}/{}/{}",
                     project.project_id,
@@ -4101,8 +4339,8 @@ async fn render_tests_tab(
         all_test_selector,
         test_count,
     }
-        .render()
-        .map_err(|e| UiError(AppError::Internal(e.to_string())))
+    .render()
+    .map_err(|e| UiError(AppError::Internal(e.to_string())))
 }
 
 async fn render_history_tab(
@@ -4130,7 +4368,11 @@ async fn render_history_tab(
                 started_at: h.started_at.format("%Y-%m-%d %H:%M").to_string(),
                 checksum_short: h.checksum.as_deref().map(short_hash).unwrap_or_default(),
                 prev_checksum: h.prev_checksum.clone().unwrap_or_default(),
-                prev_checksum_short: h.prev_checksum.as_deref().map(short_hash).unwrap_or_default(),
+                prev_checksum_short: h
+                    .prev_checksum
+                    .as_deref()
+                    .map(short_hash)
+                    .unwrap_or_default(),
                 diff_url: format!(
                     "{base}/history-diff?run_id={}&prev_run_id={}",
                     h.run_id,
@@ -4146,14 +4388,23 @@ async fn render_history_tab(
 
 async fn model_test_history(
     State(state): State<AppState>,
-    Path((project_id, env_slug, _unique_id, test_unique_id)): Path<(String, String, String, String)>,
+    Path((project_id, env_slug, _unique_id, test_unique_id)): Path<(
+        String,
+        String,
+        String,
+        String,
+    )>,
 ) -> Result<Html<String>, UiError> {
     let db = state.db();
     db.require_current_schema().await?;
     let project = db.get_project_by_project_id(&project_id).await?;
     let env = db.get_environment(&project.project_id, &env_slug).await?;
-    let test_uid = urlencoding::decode(&test_unique_id).unwrap_or_default().to_string();
-    let execs = db.get_model_node_executions(project.id, env.id, &test_uid, 20).await?;
+    let test_uid = urlencoding::decode(&test_unique_id)
+        .unwrap_or_default()
+        .to_string();
+    let execs = db
+        .get_model_node_executions(project.id, env.id, &test_uid, 20)
+        .await?;
     let executions = execs.iter().map(build_exec_view).collect();
     render_template(&ModelTestHistoryTemplate { executions })
 }
@@ -4170,12 +4421,18 @@ async fn model_history_diff(
     Query(query): Query<HistoryDiffQuery>,
 ) -> Result<Html<String>, UiError> {
     let db = state.db();
-    let unique_id = urlencoding::decode(&unique_id).unwrap_or_default().to_string();
-    let new_code = db.get_model_history_raw_code(query.run_id, &unique_id).await?.unwrap_or_default();
+    let unique_id = urlencoding::decode(&unique_id)
+        .unwrap_or_default()
+        .to_string();
+    let new_code = db
+        .get_model_history_raw_code(query.run_id, &unique_id)
+        .await?
+        .unwrap_or_default();
     let old_code = match query.prev_run_id {
-        Some(prev) if prev != Uuid::nil() => {
-            db.get_model_history_raw_code(prev, &unique_id).await?.unwrap_or_default()
-        }
+        Some(prev) if prev != Uuid::nil() => db
+            .get_model_history_raw_code(prev, &unique_id)
+            .await?
+            .unwrap_or_default(),
         _ => String::new(),
     };
     let diff_lines = compute_diff(&old_code, &new_code);
@@ -4276,28 +4533,46 @@ fn compute_diff(old: &str, new: &str) -> Vec<DiffLineView> {
     let mut ni = 0;
     while oi < old_lines.len() || ni < new_lines.len() {
         if oi < old_lines.len() && ni < new_lines.len() && old_lines[oi] == new_lines[ni] {
-            result.push(DiffLineView { kind: "same".into(), text: old_lines[oi].to_string() });
+            result.push(DiffLineView {
+                kind: "same".into(),
+                text: old_lines[oi].to_string(),
+            });
             oi += 1;
             ni += 1;
         } else if oi < old_lines.len()
-            && (ni >= new_lines.len() || (ni + 1 < new_lines.len() && new_lines[ni + 1..].contains(&old_lines[oi])))
+            && (ni >= new_lines.len()
+                || (ni + 1 < new_lines.len() && new_lines[ni + 1..].contains(&old_lines[oi])))
         {
             // Check if old line appears later in new — if so, new lines were added
             if ni < new_lines.len() && !old_lines[oi..].contains(&new_lines[ni]) {
-                result.push(DiffLineView { kind: "add".into(), text: new_lines[ni].to_string() });
+                result.push(DiffLineView {
+                    kind: "add".into(),
+                    text: new_lines[ni].to_string(),
+                });
                 ni += 1;
             } else {
-                result.push(DiffLineView { kind: "remove".into(), text: old_lines[oi].to_string() });
+                result.push(DiffLineView {
+                    kind: "remove".into(),
+                    text: old_lines[oi].to_string(),
+                });
                 oi += 1;
             }
         } else if ni < new_lines.len() {
-            result.push(DiffLineView { kind: "add".into(), text: new_lines[ni].to_string() });
+            result.push(DiffLineView {
+                kind: "add".into(),
+                text: new_lines[ni].to_string(),
+            });
             ni += 1;
         } else {
-            result.push(DiffLineView { kind: "remove".into(), text: old_lines[oi].to_string() });
+            result.push(DiffLineView {
+                kind: "remove".into(),
+                text: old_lines[oi].to_string(),
+            });
             oi += 1;
         }
-        if result.len() > max + 100 { break; } // safety
+        if result.len() > max + 100 {
+            break;
+        } // safety
     }
     let _ = max; // suppress unused
     result
@@ -4461,7 +4736,10 @@ mod tests {
         .render()
         .expect("render invocation detail panel");
 
-        assert!(rendered.contains("hx-get=\"/ui/invocations/00000000-0000-0000-0000-000000000000/panel\""));
+        assert!(
+            rendered
+                .contains("hx-get=\"/ui/invocations/00000000-0000-0000-0000-000000000000/panel\"")
+        );
         assert!(rendered.contains("hx-trigger=\"every 2s\""));
     }
 
@@ -4504,8 +4782,8 @@ mod tests {
             show_stale: false,
             table_url: "/ui/workers/table",
         }
-            .render()
-            .expect("render workers table");
+        .render()
+        .expect("render workers table");
         assert!(rendered.contains("No active or idle workers."));
         assert!(rendered.contains("hx-get=\"/ui/workers/table\""));
     }
@@ -4517,8 +4795,8 @@ mod tests {
             show_stale: false,
             table_url: "/ui/queues/table",
         }
-            .render()
-            .expect("render queues table");
+        .render()
+        .expect("render queues table");
         assert!(rendered.contains("No active or idle queues."));
         assert!(rendered.contains("hx-get=\"/ui/queues/table\""));
     }
@@ -4739,7 +5017,11 @@ mod tests {
             filters: InvocationFilterView {
                 status: invocation_filter_option_views(
                     &["queued".to_string()],
-                    &[("queued", "Queued"), ("running", "Running"), ("cancelling", "Cancelling")],
+                    &[
+                        ("queued", "Queued"),
+                        ("running", "Running"),
+                        ("cancelling", "Cancelling"),
+                    ],
                 ),
                 execution_mode: invocation_filter_option_views(
                     &["server".to_string()],
@@ -4963,12 +5245,27 @@ mod tests {
 
     #[test]
     fn resource_type_from_unique_id_maps_all_types() {
-        assert_eq!(super::resource_type_from_unique_id("model.pkg.orders"), "model");
-        assert_eq!(super::resource_type_from_unique_id("source.pkg.raw"), "source");
+        assert_eq!(
+            super::resource_type_from_unique_id("model.pkg.orders"),
+            "model"
+        );
+        assert_eq!(
+            super::resource_type_from_unique_id("source.pkg.raw"),
+            "source"
+        );
         assert_eq!(super::resource_type_from_unique_id("seed.pkg.data"), "seed");
-        assert_eq!(super::resource_type_from_unique_id("test.pkg.not_null"), "test");
-        assert_eq!(super::resource_type_from_unique_id("snapshot.pkg.snap"), "snapshot");
-        assert_eq!(super::resource_type_from_unique_id("unknown.pkg.x"), "model");
+        assert_eq!(
+            super::resource_type_from_unique_id("test.pkg.not_null"),
+            "test"
+        );
+        assert_eq!(
+            super::resource_type_from_unique_id("snapshot.pkg.snap"),
+            "snapshot"
+        );
+        assert_eq!(
+            super::resource_type_from_unique_id("unknown.pkg.x"),
+            "model"
+        );
         assert_eq!(super::resource_type_from_unique_id(""), "model");
     }
 
