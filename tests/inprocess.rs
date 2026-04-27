@@ -891,3 +891,141 @@ async fn invocation_complete_failed_records_error() {
     assert_eq!(body["status"], "failed");
     assert_eq!(body["error"], "compilation error");
 }
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_renders_with_resource_type_filter() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Catalog"), "page should have Catalog heading");
+    assert!(html.contains("Resource Type"), "page should have resource type filter");
+    assert!(html.contains("resource_type"), "page should have resource_type checkboxes");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn manifest_backfill_populates_sources_in_current_node_state() {
+    let (app, pool) = test_app().await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("dbt_project.yml"), "name: demo\nprofile: demo\n").unwrap();
+    std::fs::write(tmp.path().join("profiles.yml"), "demo:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: w.duckdb\n      schema: main\n").unwrap();
+
+    // Create invocation
+    let (_, body) = post_json(&app, "/v1/invocations", json!({
+        "command": "build",
+        "args": [],
+        "current_dir": tmp.path().to_str().unwrap(),
+        "project_id": null,
+        "environment_slug": null
+    })).await;
+    let inv_id = body["invocation_id"].as_str().unwrap().to_string();
+    let wq = body["worker_queue"].as_str().unwrap().to_string();
+
+    // Claim
+    let (_, body) = post_json(&app, "/v1/invocations/claim-next", json!({
+        "execution_mode": "local",
+        "worker_id": "w1",
+        "worker_queues": [wq]
+    })).await;
+    let worker_id = body["worker_id"].as_str().unwrap().to_string();
+    let lease_token = body["lease_token"].as_str().unwrap().to_string();
+
+    // Send node execution event for the model only (not the source)
+    let dbt_log = r#"{"info":{"name":"LogModelResult","code":"Q012","invocation_id":"abc","level":"info","msg":"OK model.demo.orders"},"data":{"node_info":{"unique_id":"model.demo.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"success","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"2026-01-01T00:00:01Z","node_relation":{"database":"db","schema":"main","alias":"orders","relation_name":"db.main.orders"},"node_checksum":"abc123"},"run_result":{"status":"success","execution_time":1.0}}}"#;
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/events"), json!({
+        "worker_id": worker_id,
+        "lease_token": lease_token,
+        "events": [{
+            "kind": "DbtLog",
+            "occurred_at": "2026-01-01T00:00:01Z",
+            "text": "OK model.demo.orders",
+            "raw_line": dbt_log,
+            "dbt_event_name": "LogModelResult",
+            "node_unique_id": "model.demo.orders",
+            "level": "info",
+            "error": null
+        }]
+    })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Complete with manifest that includes both a model and a source
+    let manifest = json!({
+        "nodes": {
+            "model.demo.orders": {
+                "unique_id": "model.demo.orders",
+                "resource_type": "model",
+                "name": "orders",
+                "package_name": "demo",
+                "original_file_path": "models/orders.sql",
+                "tags": [],
+                "fqn": ["demo", "orders"],
+                "config": {"materialized": "table"},
+                "checksum": {"name": "sha256", "checksum": "abc123"},
+                "database": "db",
+                "schema": "main",
+                "alias": "orders",
+                "relation_name": "db.main.orders",
+                "depends_on": {"nodes": ["source.demo.raw_orders"]}
+            }
+        },
+        "sources": {
+            "source.demo.raw_orders": {
+                "unique_id": "source.demo.raw_orders",
+                "resource_type": "source",
+                "name": "raw_orders",
+                "package_name": "demo",
+                "original_file_path": "models/staging/__sources.yml",
+                "tags": [],
+                "fqn": ["demo", "raw_orders"],
+                "config": {},
+                "database": "db",
+                "schema": "raw",
+                "identifier": "raw_orders",
+                "loader": "csv"
+            }
+        },
+        "parent_map": {
+            "model.demo.orders": ["source.demo.raw_orders"],
+            "source.demo.raw_orders": []
+        },
+        "child_map": {
+            "source.demo.raw_orders": ["model.demo.orders"],
+            "model.demo.orders": []
+        }
+    });
+
+    let (status, _) = post_json(&app, &format!("/v1/invocations/{inv_id}/complete"), json!({
+        "worker_id": worker_id,
+        "lease_token": lease_token,
+        "completion": {
+            "status": "succeeded",
+            "exit_code": 0,
+            "error": null,
+            "dbt_version": "1.0.0",
+            "manifest": manifest,
+            "result": null
+        }
+    })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Verify the model is in current_node_state (from node execution)
+    let model_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM current_node_state WHERE unique_id = 'model.demo.orders'"
+    ).fetch_one(&pool).await.unwrap();
+    assert_eq!(model_count, 1, "model should be in current_node_state from execution");
+
+    // Verify the source is ALSO in current_node_state (from manifest backfill)
+    let source_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM current_node_state WHERE unique_id = 'source.demo.raw_orders'"
+    ).fetch_one(&pool).await.unwrap();
+    assert_eq!(source_count, 1, "source should be in current_node_state from manifest backfill");
+
+    // Verify the source has the correct resource_type
+    let source_rt: Option<String> = sqlx::query_scalar(
+        "SELECT resource_type FROM current_node_state WHERE unique_id = 'source.demo.raw_orders'"
+    ).fetch_one(&pool).await.unwrap();
+    assert_eq!(source_rt.as_deref(), Some("source"));
+}

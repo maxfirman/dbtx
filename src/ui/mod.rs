@@ -4732,4 +4732,15 @@ mod tests {
         let sorted = super::topo_sort_resources(&ids, &edges);
         assert_eq!(sorted, vec!["model.pkg.b", "model.pkg.c"]);
     }
+
+    #[test]
+    fn resource_type_from_unique_id_maps_all_types() {
+        assert_eq!(super::resource_type_from_unique_id("model.pkg.orders"), "model");
+        assert_eq!(super::resource_type_from_unique_id("source.pkg.raw"), "source");
+        assert_eq!(super::resource_type_from_unique_id("seed.pkg.data"), "seed");
+        assert_eq!(super::resource_type_from_unique_id("test.pkg.not_null"), "test");
+        assert_eq!(super::resource_type_from_unique_id("snapshot.pkg.snap"), "snapshot");
+        assert_eq!(super::resource_type_from_unique_id("unknown.pkg.x"), "model");
+        assert_eq!(super::resource_type_from_unique_id(""), "model");
+    }
 }
