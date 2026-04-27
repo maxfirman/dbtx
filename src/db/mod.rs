@@ -128,6 +128,10 @@ fn should_promote_manifest(subcommand: &str) -> bool {
     matches!(subcommand, "run" | "build" | "seed" | "snapshot")
 }
 
+fn is_promotable_status(status: &str) -> bool {
+    NodeExecutionStatus::parse(status).is_some_and(|s| s.is_promotable())
+}
+
 fn validate_project_mode(mode: &str) -> AppResult<()> {
     if matches!(mode, "local" | "remote") {
         Ok(())
@@ -854,6 +858,16 @@ mod tests {
         assert!(should_promote_manifest("snapshot"));
         assert!(!should_promote_manifest("ls"));
         assert!(!should_promote_manifest("test"));
+    }
+
+    #[test]
+    fn is_promotable_status_accepts_success_pass_created() {
+        use super::is_promotable_status;
+        assert!(is_promotable_status("success"));
+        assert!(is_promotable_status("pass"));
+        assert!(is_promotable_status("created"));
+        assert!(!is_promotable_status("error"));
+        assert!(!is_promotable_status("skipped"));
     }
 
     #[test]
