@@ -1513,18 +1513,16 @@ impl Db {
         environment_id: i64,
         max_run_pk: Option<i64>,
     ) -> AppResult<u64> {
-        sqlx::query(
-            r#"
-            DELETE FROM current_node_state
-            WHERE project_id = $1 AND environment_id = $2
-            "#,
-        )
-        .bind(project_id)
-        .bind(environment_id)
-        .execute(&mut **tx)
-        .await?;
+        // Use a sentinel timestamp to identify rows touched by this rebuild.
+        // After upserting, any row with updated_at < rebuild_marker is stale and
+        // gets cleaned up — avoiding the empty-table window that a DELETE-first
+        // approach would expose to concurrent readers under READ COMMITTED.
+        let rebuild_marker: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT NOW()").fetch_one(&mut **tx).await?;
 
-        let inserted = sqlx::query(
+        // Upsert from node_executions: latest execution for status/timing,
+        // latest successful execution for promoted fields (relation, checksum).
+        let upserted = sqlx::query(
             r#"
             WITH latest_execution AS (
                 SELECT DISTINCT ON (ne.unique_id)
@@ -1563,22 +1561,6 @@ impl Db {
                   AND ($3::BIGINT IS NULL OR r.id <= $3)
                   AND ne.status IN ('success', 'pass', 'created')
                 ORDER BY ne.unique_id, r.id DESC
-            ),
-            latest_state AS (
-                SELECT DISTINCT ON (ne.unique_id)
-                    ne.unique_id,
-                    ne.materialized,
-                    ne.relation_database,
-                    ne.relation_schema,
-                    ne.relation_alias,
-                    ne.relation_name,
-                    ne.checksum
-                FROM node_executions ne
-                JOIN runs r ON r.run_id = ne.run_id
-                WHERE r.project_id = $1
-                  AND r.environment_id = $2
-                  AND ($3::BIGINT IS NULL OR r.id <= $3)
-                ORDER BY ne.unique_id, r.id DESC
             )
             INSERT INTO current_node_state (
                 project_id, environment_id, unique_id, last_run_id, status, resource_type,
@@ -1595,25 +1577,42 @@ impl Db {
                 le.resource_type,
                 le.node_name,
                 le.node_path,
-                COALESCE(ls.materialized, state.materialized),
-                COALESCE(ls.relation_database, state.relation_database),
-                COALESCE(ls.relation_schema, state.relation_schema),
-                COALESCE(ls.relation_alias, state.relation_alias),
-                COALESCE(ls.relation_name, state.relation_name),
-                COALESCE(ls.checksum, state.checksum),
+                ls.materialized,
+                ls.relation_database,
+                ls.relation_schema,
+                ls.relation_alias,
+                ls.relation_name,
+                ls.checksum,
                 le.started_at,
                 le.finished_at,
                 le.execution_time_seconds,
                 ls.finished_at,
-                NOW()
+                $4
             FROM latest_execution le
             LEFT JOIN latest_success ls ON ls.unique_id = le.unique_id
-            LEFT JOIN latest_state state ON state.unique_id = le.unique_id
+            ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE SET
+                last_run_id = EXCLUDED.last_run_id,
+                status = EXCLUDED.status,
+                resource_type = EXCLUDED.resource_type,
+                node_name = EXCLUDED.node_name,
+                node_path = EXCLUDED.node_path,
+                materialized = EXCLUDED.materialized,
+                relation_database = EXCLUDED.relation_database,
+                relation_schema = EXCLUDED.relation_schema,
+                relation_alias = EXCLUDED.relation_alias,
+                relation_name = EXCLUDED.relation_name,
+                checksum = EXCLUDED.checksum,
+                started_at = EXCLUDED.started_at,
+                finished_at = EXCLUDED.finished_at,
+                execution_time_seconds = EXCLUDED.execution_time_seconds,
+                last_success_at = EXCLUDED.last_success_at,
+                updated_at = EXCLUDED.updated_at
             "#,
         )
         .bind(project_id)
         .bind(environment_id)
         .bind(max_run_pk)
+        .bind(rebuild_marker)
         .execute(&mut **tx)
         .await?;
 
@@ -1642,25 +1641,39 @@ impl Db {
                 $1, $2, mn.unique_id, mn.run_id,
                 mn.resource_type, mn.name, mn.original_file_path,
                 mn.database_name, mn.schema_name, mn.alias, mn.relation_name,
-                mn.checksum, NOW()
+                mn.checksum, $4
             FROM manifest_nodes mn
             JOIN latest_manifest_run lmr ON mn.run_id = lmr.run_id
-            WHERE NOT EXISTS (
-                SELECT 1 FROM current_node_state cns
-                WHERE cns.project_id = $1
-                  AND cns.environment_id = $2
-                  AND cns.unique_id = mn.unique_id
-            )
-            ON CONFLICT (project_id, environment_id, unique_id) DO NOTHING
+            ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE SET
+                updated_at = EXCLUDED.updated_at
+                WHERE current_node_state.status IS NULL
             "#,
         )
         .bind(project_id)
         .bind(environment_id)
         .bind(max_run_pk)
+        .bind(rebuild_marker)
         .execute(&mut **tx)
         .await?;
 
-        Ok(inserted.rows_affected())
+        // Remove stale rows not touched by either upsert above. These are nodes
+        // from previous runs that no longer appear in the execution history or
+        // the current manifest.
+        sqlx::query(
+            r#"
+            DELETE FROM current_node_state
+            WHERE project_id = $1
+              AND environment_id = $2
+              AND updated_at < $3
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(rebuild_marker)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(upserted.rows_affected())
     }
 
     pub(crate) async fn load_reconstructed_manifest(

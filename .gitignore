@@ -5,6 +5,7 @@ warehouse.duckdb
 node_modules/
 test-results/
 playwright-report/
+.playwright-cli/
 logs/
 lineage-ui/dist/
 lineage-ui/.npmrc
