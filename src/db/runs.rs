@@ -1474,7 +1474,7 @@ impl Db {
         }
 
         sqlx::query(
-            r#"
+            &format!(r#"
             INSERT INTO promoted_manifest_nodes (
                 project_id, environment_id, unique_id, source_run_id, checksum, raw_node
             )
@@ -1488,14 +1488,14 @@ impl Db {
             FROM node_executions ne
             JOIN manifest_snapshots ms ON ms.run_id = ne.run_id
             WHERE ne.run_id = $1
-              AND ne.status IN ('success', 'pass', 'created')
+              AND ne.status IN ({})
               AND ms.manifest -> 'nodes' -> ne.unique_id IS NOT NULL
             ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE SET
                 source_run_id = EXCLUDED.source_run_id,
                 checksum = EXCLUDED.checksum,
                 raw_node = EXCLUDED.raw_node,
                 promoted_at = NOW()
-            "#,
+            "#, NodeExecutionStatus::PROMOTABLE_SQL),
         )
         .bind(run_id)
         .bind(project_id)
@@ -1523,7 +1523,7 @@ impl Db {
         // Upsert from node_executions: latest execution for status/timing,
         // latest successful execution for promoted fields (relation, checksum).
         let upserted = sqlx::query(
-            r#"
+            &format!(r#"
             WITH latest_execution AS (
                 SELECT DISTINCT ON (ne.unique_id)
                     r.project_id,
@@ -1559,7 +1559,7 @@ impl Db {
                 WHERE r.project_id = $1
                   AND r.environment_id = $2
                   AND ($3::BIGINT IS NULL OR r.id <= $3)
-                  AND ne.status IN ('success', 'pass', 'created')
+                  AND ne.status IN ({})
                 ORDER BY ne.unique_id, r.id DESC
             )
             INSERT INTO current_node_state (
@@ -1607,7 +1607,7 @@ impl Db {
                 execution_time_seconds = EXCLUDED.execution_time_seconds,
                 last_success_at = EXCLUDED.last_success_at,
                 updated_at = EXCLUDED.updated_at
-            "#,
+            "#, NodeExecutionStatus::PROMOTABLE_SQL),
         )
         .bind(project_id)
         .bind(environment_id)

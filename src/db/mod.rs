@@ -129,7 +129,7 @@ fn should_promote_manifest(subcommand: &str) -> bool {
 }
 
 fn is_promotable_status(status: &str) -> bool {
-    matches!(status, "success" | "pass" | "created")
+    NodeExecutionStatus::parse(status).is_some_and(|s| s.is_promotable())
 }
 
 fn validate_project_mode(mode: &str) -> AppResult<()> {

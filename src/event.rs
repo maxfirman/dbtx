@@ -1,4 +1,5 @@
 //! dbt log event parsing, normalization, and terminal rendering.
+use crate::db::NodeExecutionStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -404,12 +405,20 @@ fn detect_status_from_msg(line: &str) -> Option<(&'static str, &'static [AnsiSty
 }
 
 fn result_status_label_and_style(status: &str) -> (&'static str, &'static [AnsiStyle]) {
-    match status {
-        "success" | "pass" => ("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold]),
-        "error" | "fail" | "failed" => ("Failed", &[AnsiStyle::Red, AnsiStyle::Bold]),
-        "warn" | "warning" => ("Warned", &[AnsiStyle::Yellow, AnsiStyle::Bold]),
-        "skipped" => ("Skipped", &[AnsiStyle::Yellow, AnsiStyle::Bold]),
-        _ => ("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold]),
+    match NodeExecutionStatus::parse(status) {
+        Some(NodeExecutionStatus::Success | NodeExecutionStatus::Pass) => {
+            ("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold])
+        }
+        Some(NodeExecutionStatus::Error | NodeExecutionStatus::Fail) => {
+            ("Failed", &[AnsiStyle::Red, AnsiStyle::Bold])
+        }
+        Some(NodeExecutionStatus::Skipped) => {
+            ("Skipped", &[AnsiStyle::Yellow, AnsiStyle::Bold])
+        }
+        _ => match status {
+            "warn" | "warning" => ("Warned", &[AnsiStyle::Yellow, AnsiStyle::Bold]),
+            _ => ("Succeeded", &[AnsiStyle::Green, AnsiStyle::Bold]),
+        },
     }
 }
 

@@ -182,6 +182,56 @@ impl std::fmt::Display for PreparationStatus {
     }
 }
 
+/// Node execution status from dbt log events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeExecutionStatus {
+    Success,
+    Pass,
+    Created,
+    Error,
+    Fail,
+    Skipped,
+}
+
+impl NodeExecutionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Pass => "pass",
+            Self::Created => "created",
+            Self::Error => "error",
+            Self::Fail => "fail",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "success" => Some(Self::Success),
+            "pass" => Some(Self::Pass),
+            "created" => Some(Self::Created),
+            "error" => Some(Self::Error),
+            "fail" | "failed" => Some(Self::Fail),
+            "skipped" => Some(Self::Skipped),
+            _ => None,
+        }
+    }
+
+    pub fn is_promotable(self) -> bool {
+        matches!(self, Self::Success | Self::Pass | Self::Created)
+    }
+
+    /// SQL literal list for use in queries that filter on promotable statuses.
+    pub const PROMOTABLE_SQL: &str = "'success', 'pass', 'created'";
+}
+
+impl std::fmt::Display for NodeExecutionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AppliedMigration {
     pub version: i64,
@@ -785,5 +835,32 @@ mod tests {
             assert_eq!(PreparationStatus::parse(status.as_str()), Some(status));
         }
         assert_eq!(PreparationStatus::parse("invalid"), None);
+    }
+
+    #[test]
+    fn node_execution_status_roundtrips() {
+        for status in [
+            NodeExecutionStatus::Success, NodeExecutionStatus::Pass, NodeExecutionStatus::Created,
+            NodeExecutionStatus::Error, NodeExecutionStatus::Fail, NodeExecutionStatus::Skipped,
+        ] {
+            assert_eq!(NodeExecutionStatus::parse(status.as_str()), Some(status));
+            assert_eq!(status.to_string(), status.as_str());
+        }
+    }
+
+    #[test]
+    fn node_execution_status_parse_aliases() {
+        assert_eq!(NodeExecutionStatus::parse("failed"), Some(NodeExecutionStatus::Fail));
+        assert_eq!(NodeExecutionStatus::parse("unknown"), None);
+    }
+
+    #[test]
+    fn node_execution_status_promotable() {
+        assert!(NodeExecutionStatus::Success.is_promotable());
+        assert!(NodeExecutionStatus::Pass.is_promotable());
+        assert!(NodeExecutionStatus::Created.is_promotable());
+        assert!(!NodeExecutionStatus::Error.is_promotable());
+        assert!(!NodeExecutionStatus::Fail.is_promotable());
+        assert!(!NodeExecutionStatus::Skipped.is_promotable());
     }
 }

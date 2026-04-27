@@ -7,7 +7,8 @@ use crate::api::{
 use crate::db::{
     DraftStatus, EnvironmentActualStateRecord, EnvironmentActiveResourceRecord, EnvironmentRecord,
     EnvironmentReconcilePreparationRecord, EnvironmentRunPlanRecord,
-    EnvironmentVersionRecord, InvocationListFilters, PlanStatus, PreparationStatus, ProjectRecord,
+    EnvironmentVersionRecord, InvocationListFilters, NodeExecutionStatus, PlanStatus,
+    PreparationStatus, ProjectRecord,
 };
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
@@ -3524,10 +3525,13 @@ async fn render_tab(
 }
 
 fn model_status_class(status: &str) -> &'static str {
-    match status {
-        "success" | "pass" => "bg-emerald-100 text-emerald-800",
-        "error" | "fail" => "bg-rose-100 text-rose-800",
-        "skipped" => "bg-slate-100 text-slate-600",
+    match NodeExecutionStatus::parse(status) {
+        Some(NodeExecutionStatus::Success | NodeExecutionStatus::Pass) => {
+            "bg-emerald-100 text-emerald-800"
+        }
+        Some(NodeExecutionStatus::Error | NodeExecutionStatus::Fail) => {
+            "bg-rose-100 text-rose-800"
+        }
         _ => "bg-slate-100 text-slate-600",
     }
 }
@@ -3777,9 +3781,9 @@ async fn render_lineage_tab(
             && let Some(tn) = lineage.nodes.iter().find(|n| n.unique_id == *child)
         {
             let e = test_counts.entry(parent.as_str()).or_insert((0, 0));
-            match tn.status.as_deref() {
-                Some("pass" | "success") => e.0 += 1,
-                Some("fail" | "error") => e.1 += 1,
+            match tn.status.as_deref().and_then(NodeExecutionStatus::parse) {
+                Some(NodeExecutionStatus::Pass | NodeExecutionStatus::Success) => e.0 += 1,
+                Some(NodeExecutionStatus::Fail | NodeExecutionStatus::Error) => e.1 += 1,
                 _ => {}
             }
         }
