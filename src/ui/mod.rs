@@ -3065,14 +3065,19 @@ struct ModelOverviewTemplate {
     status: String,
     status_class: String,
     columns: Vec<ModelColumnView>,
-    raw_code: String,
-    compiled_code: String,
-    raw_code_html: String,
-    compiled_code_html: String,
     promoted_raw_code: String,
     is_stale: bool,
     poll_url: String,
     lineage: OverviewLineageView,
+}
+
+#[derive(Template)]
+#[template(path = "models/_code.html")]
+struct ModelCodeTemplate {
+    raw_code: String,
+    compiled_code: String,
+    raw_code_html: String,
+    compiled_code_html: String,
 }
 
 #[derive(Template)]
@@ -3418,8 +3423,8 @@ async fn model_detail(
         "source" => &["overview", "lineage"],
         "test" => &["overview", "invocations"],
         "seed" => &["overview", "invocations", "lineage", "history"],
-        "snapshot" => &["overview", "invocations", "lineage", "history"],
-        _ => &["overview", "invocations", "lineage", "tests", "history"],
+        "snapshot" => &["overview", "code", "invocations", "lineage", "history"],
+        _ => &["overview", "code", "invocations", "lineage", "tests", "history"],
     };
     let tab = if valid_tabs.contains(&tab) { tab } else { "overview" };
 
@@ -3446,6 +3451,7 @@ async fn model_detail(
             ModelTabView {
                 label: match t {
                     "overview" => "Overview",
+                    "code" => "Code",
                     "invocations" => "Invocations",
                     "lineage" => "Lineage",
                     "tests" => "Tests",
@@ -3508,6 +3514,7 @@ async fn render_tab(
 ) -> Result<String, UiError> {
     match tab {
         "overview" => render_overview_tab(db, project, env, unique_id, base).await,
+        "code" => render_code_tab(db, project, env, unique_id).await,
         "invocations" => render_invocations_tab(db, project, env, unique_id).await,
         "lineage" => render_lineage_tab(db, project, env, unique_id, base, query).await,
         "tests" => render_tests_tab(db, project, env, unique_id, base).await,
@@ -3670,10 +3677,6 @@ async fn render_overview_tab(
                 String::new()
             };
             let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, "model", status).await?;
-            let raw_code = n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string();
-            let compiled_code = n.get("compiled_code").and_then(Value::as_str).unwrap_or("").to_string();
-            let raw_code_html = if raw_code.is_empty() { String::new() } else { highlight_sql(&raw_code) };
-            let compiled_code_html = if compiled_code.is_empty() { String::new() } else { highlight_sql(&compiled_code) };
             ModelOverviewTemplate {
                 description: extract_str(n, "description"),
                 materialized,
@@ -3686,10 +3689,6 @@ async fn render_overview_tab(
                 status: status.to_string(),
                 status_class: model_status_class(status).to_string(),
                 columns,
-                raw_code,
-                compiled_code,
-                raw_code_html,
-                compiled_code_html,
                 promoted_raw_code,
                 is_stale,
                 poll_url,
@@ -3699,6 +3698,25 @@ async fn render_overview_tab(
             .map_err(|e| UiError(AppError::Internal(e.to_string())))
         }
     }
+}
+
+async fn render_code_tab(
+    db: &crate::db::Db,
+    project: &crate::db::ProjectRecord,
+    env: &crate::db::EnvironmentRecord,
+    unique_id: &str,
+) -> Result<String, UiError> {
+    let detail = db.get_model_detail(project.id, env.id, unique_id).await?;
+    let node = detail.latest_manifest_node.as_ref();
+    let empty = Value::Object(Default::default());
+    let n = node.unwrap_or(&empty);
+    let raw_code = n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string();
+    let compiled_code = n.get("compiled_code").and_then(Value::as_str).unwrap_or("").to_string();
+    let raw_code_html = if raw_code.is_empty() { String::new() } else { highlight_sql(&raw_code) };
+    let compiled_code_html = if compiled_code.is_empty() { String::new() } else { highlight_sql(&compiled_code) };
+    ModelCodeTemplate { raw_code, compiled_code, raw_code_html, compiled_code_html }
+        .render()
+        .map_err(|e| UiError(AppError::Internal(e.to_string())))
 }
 
 async fn render_invocations_tab(
