@@ -1617,6 +1617,49 @@ impl Db {
         .execute(&mut **tx)
         .await?;
 
+        // Backfill current_node_state from manifest_nodes for resources that were never
+        // executed (e.g. sources, macros). This ensures all manifest resources appear in
+        // the catalog, not just those with node_executions.
+        sqlx::query(
+            r#"
+            WITH latest_manifest_run AS (
+                SELECT r.run_id
+                FROM runs r
+                JOIN manifest_snapshots ms ON ms.run_id = r.run_id
+                WHERE r.project_id = $1
+                  AND r.environment_id = $2
+                  AND ($3::BIGINT IS NULL OR r.id <= $3)
+                ORDER BY r.id DESC
+                LIMIT 1
+            )
+            INSERT INTO current_node_state (
+                project_id, environment_id, unique_id, last_run_id,
+                resource_type, node_name, node_path,
+                relation_database, relation_schema, relation_alias, relation_name,
+                checksum, updated_at
+            )
+            SELECT
+                $1, $2, mn.unique_id, mn.run_id,
+                mn.resource_type, mn.name, mn.original_file_path,
+                mn.database_name, mn.schema_name, mn.alias, mn.relation_name,
+                mn.checksum, NOW()
+            FROM manifest_nodes mn
+            JOIN latest_manifest_run lmr ON mn.run_id = lmr.run_id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM current_node_state cns
+                WHERE cns.project_id = $1
+                  AND cns.environment_id = $2
+                  AND cns.unique_id = mn.unique_id
+            )
+            ON CONFLICT (project_id, environment_id, unique_id) DO NOTHING
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(max_run_pk)
+        .execute(&mut **tx)
+        .await?;
+
         Ok(inserted.rows_affected())
     }
 
