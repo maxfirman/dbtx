@@ -38,7 +38,7 @@ impl Db {
         .bind(input.claim_deadline_at)
         .fetch_one(&self.pool)
         .await?;
-        Ok(invocation_status_from_row(&row))
+        invocation_status_from_row(&row)
     }
 
     pub(crate) async fn list_invocations(
@@ -80,7 +80,7 @@ impl Db {
         .bind(filter.limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(invocation_status_from_row).collect())
+        rows.iter().map(invocation_status_from_row).collect()
     }
 
     pub(crate) async fn list_invocations_filtered(
@@ -120,7 +120,7 @@ impl Db {
         .bind(offset)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(invocation_status_from_row).collect())
+        rows.iter().map(invocation_status_from_row).collect()
     }
 
     pub(crate) async fn count_invocations_filtered(
@@ -190,7 +190,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::InvocationNotFound(invocation_id.to_string()))?;
-        Ok(invocation_status_from_row(&row))
+        invocation_status_from_row(&row)
     }
 
     pub(crate) async fn list_workers(&self) -> AppResult<Vec<WorkerStatusResponse>> {
@@ -218,11 +218,11 @@ impl Db {
         let registry = worker_rows
             .into_iter()
             .map(worker_registry_read_model_from_row)
-            .collect::<Vec<_>>();
+            .collect::<AppResult<Vec<_>>>()?;
         let mut claimed_counts: BTreeMap<String, i64> = BTreeMap::new();
         let mut active_health: BTreeMap<String, InvocationWorkerHealthApi> = BTreeMap::new();
         for row in claimed_rows {
-            let model = invocation_read_model_from_row(&row);
+            let model = invocation_read_model_from_row(&row)?;
             let model_health = compute_worker_health_from_model(&model);
             if let Some(worker_id) = model.claimed_by {
                 *claimed_counts.entry(worker_id.clone()).or_insert(0) += 1;
@@ -294,7 +294,7 @@ impl Db {
 
         let mut grouped: BTreeMap<(String, String), Vec<InvocationReadModel>> = BTreeMap::new();
         for row in rows {
-            let model = invocation_read_model_from_row(&row);
+            let model = invocation_read_model_from_row(&row)?;
             let mode = invocation_mode_value(model.execution_mode).to_string();
             let queue = model.worker_queue.clone();
             grouped.entry((mode, queue)).or_default().push(model);
@@ -336,7 +336,7 @@ impl Db {
             grouped.entry((mode, queue)).or_default();
         }
 
-        Ok(grouped
+        grouped
             .into_iter()
             .map(|((execution_mode, worker_queue), models)| {
                 let pending_count = models.iter().filter(|m| m.claimed_by.is_none()).count() as i64;
@@ -356,16 +356,16 @@ impl Db {
                     .filter(|m| m.claimed_by.is_none())
                     .map(|m| m.started_at)
                     .min();
-                QueueStatusResponse {
+                Ok(QueueStatusResponse {
                     worker_queue,
-                    execution_mode: execution_mode_from_db(&execution_mode),
+                    execution_mode: execution_mode_from_db(&execution_mode)?,
                     pending_count,
                     claimed_count,
                     stale_claim_count,
                     oldest_pending_at,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 
     pub(crate) async fn upsert_worker_registration(
@@ -494,7 +494,7 @@ impl Db {
             invocation_id: row.get("invocation_id"),
             worker_id: worker_id.to_string(),
             lease_token: row.get("lease_token"),
-            execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
+            execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode"))?,
             execution_spec: execution_spec.0,
         }))
     }
@@ -524,7 +524,7 @@ impl Db {
         let Some(row) = row else {
             return Err(AppError::InvocationOwnershipMismatch);
         };
-        let execution_mode = execution_mode_from_db(&row.get::<String, _>("execution_mode"));
+        let execution_mode = execution_mode_from_db(&row.get::<String, _>("execution_mode"))?;
         let worker_queue: String = row.get("worker_queue");
         self.upsert_worker_registration(worker_id, execution_mode, &worker_queue)
             .await?;
@@ -620,7 +620,8 @@ impl Db {
         timed_out.extend(
             unclaimed_rows
                 .into_iter()
-                .map(timed_out_invocation_from_row),
+                .map(timed_out_invocation_from_row)
+                .collect::<AppResult<Vec<_>>>()?,
         );
 
         let claimed_rows = sqlx::query(
@@ -645,7 +646,12 @@ impl Db {
         .bind(server_stale_at)
         .fetch_all(&mut *tx)
         .await?;
-        timed_out.extend(claimed_rows.into_iter().map(timed_out_invocation_from_row));
+        timed_out.extend(
+            claimed_rows
+                .into_iter()
+                .map(timed_out_invocation_from_row)
+                .collect::<AppResult<Vec<_>>>()?,
+        );
 
         tx.commit().await?;
         Ok(timed_out)

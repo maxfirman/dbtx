@@ -255,7 +255,7 @@ impl Db {
             .bind(project.id)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().map(environment_record_from_row).collect())
+        rows.iter().map(environment_record_from_row).collect()
     }
 
     pub(crate) async fn list_auto_deploy_remote_environments(
@@ -265,7 +265,7 @@ impl Db {
             "WHERE p.mode = 'remote' AND e.auto_deploy = TRUE AND e.status = 'active' ORDER BY p.project_id ASC, e.slug ASC",
         );
         let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
-        Ok(rows.iter().map(environment_record_from_row).collect())
+        rows.iter().map(environment_record_from_row).collect()
     }
 
     pub async fn list_environment_versions(

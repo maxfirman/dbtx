@@ -92,7 +92,9 @@ impl Db {
         .bind(environment_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.as_ref().map(environment_reconcile_preparation_from_row))
+        row.as_ref()
+            .map(environment_reconcile_preparation_from_row)
+            .transpose()
     }
 
     pub(crate) async fn create_source_state_event(
@@ -158,7 +160,7 @@ impl Db {
         .bind(environment_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(environment_run_plan_from_row).collect())
+        rows.iter().map(environment_run_plan_from_row).collect()
     }
 
     pub(crate) async fn list_blocked_environment_run_plan_ids(
@@ -222,7 +224,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::PlanNotFound(plan_id.to_string()))?;
-        Ok(environment_run_plan_from_row(&row))
+        environment_run_plan_from_row(&row)
     }
 
     pub(crate) async fn create_environment_run_plan(
@@ -266,7 +268,7 @@ impl Db {
         .bind(sqlx::types::Json(input.metadata))
         .fetch_one(&self.pool)
         .await?;
-        Ok(environment_run_plan_from_row(&row))
+        environment_run_plan_from_row(&row)
     }
 
     pub(crate) async fn find_equivalent_live_environment_run_plan(
@@ -309,7 +311,7 @@ impl Db {
         .bind(sqlx::types::Json(lookup.selected_resources))
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.as_ref().map(environment_run_plan_from_row))
+        row.as_ref().map(environment_run_plan_from_row).transpose()
     }
 
     pub(crate) async fn supersede_pending_environment_run_plans(
@@ -422,7 +424,7 @@ impl Db {
         .bind(error)
         .fetch_one(&self.pool)
         .await?;
-        Ok(environment_run_plan_from_row(&row))
+        environment_run_plan_from_row(&row)
     }
 
     pub(crate) async fn mark_environment_run_plan_admitted(
@@ -508,7 +510,7 @@ impl Db {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(environment_run_plan_from_row(&row))
+        environment_run_plan_from_row(&row)
     }
 
     pub(crate) async fn update_environment_run_plan_selection(
@@ -546,7 +548,7 @@ impl Db {
         .bind(sqlx::types::Json(metadata))
         .fetch_one(&self.pool)
         .await?;
-        Ok(environment_run_plan_from_row(&row))
+        environment_run_plan_from_row(&row)
     }
 
     pub(crate) async fn mark_environment_run_plan_completed_noop(
@@ -602,7 +604,7 @@ impl Db {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(environment_run_plan_from_row(&row))
+        environment_run_plan_from_row(&row)
     }
 
     pub(crate) async fn list_active_conflicting_invocations(

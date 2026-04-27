@@ -832,7 +832,7 @@ impl Db {
             .ok_or_else(|| {
                 AppError::EnvironmentNotFound(project_ref.to_string(), environment_slug.to_string())
             })?;
-        Ok(environment_record_from_row(&row))
+        environment_record_from_row(&row)
     }
 
     pub(crate) async fn get_environment_by_id(
@@ -844,7 +844,7 @@ impl Db {
             .bind(environment_id)
             .fetch_one(&self.pool)
             .await?;
-        Ok(environment_record_from_row(&row))
+        environment_record_from_row(&row)
     }
 
     pub(super) async fn get_environment_by_id_in_tx(
@@ -857,7 +857,7 @@ impl Db {
             .bind(environment_id)
             .fetch_one(&mut **tx)
             .await?;
-        Ok(environment_record_from_row(&row))
+        environment_record_from_row(&row)
     }
 
     pub(crate) async fn persist_log_event(

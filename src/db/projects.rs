@@ -159,7 +159,7 @@ impl Db {
         .bind(&input.project_root)
         .fetch_one(&self.pool)
         .await?;
-        Ok(project_draft_record_from_row(&row))
+        project_draft_record_from_row(&row)
     }
 
     pub async fn get_project_draft(&self, draft_id: Uuid) -> AppResult<ProjectDraftRecord> {
@@ -175,7 +175,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::ProjectDraftNotFound(draft_id.to_string()))?;
-        Ok(project_draft_record_from_row(&row))
+        project_draft_record_from_row(&row)
     }
 
     pub async fn create_environment_draft(
@@ -199,7 +199,7 @@ impl Db {
         .bind(input.default_branch.as_deref())
         .fetch_one(&self.pool)
         .await?;
-        Ok(environment_draft_record_from_row(&row))
+        environment_draft_record_from_row(&row)
     }
 
     pub async fn get_environment_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentDraftRecord> {
@@ -217,7 +217,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
-        Ok(environment_draft_record_from_row(&row))
+        environment_draft_record_from_row(&row)
     }
 
     pub async fn update_environment_draft(
@@ -264,7 +264,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
-        Ok(environment_draft_record_from_row(&row))
+        environment_draft_record_from_row(&row)
     }
 
     pub async fn mark_environment_draft_loading_git(
@@ -290,7 +290,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
-        Ok(environment_draft_record_from_row(&row))
+        environment_draft_record_from_row(&row)
     }
 
     pub async fn mark_environment_draft_validating(
@@ -316,7 +316,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
-        Ok(environment_draft_record_from_row(&row))
+        environment_draft_record_from_row(&row)
     }
 
     pub async fn attach_environment_draft_invocation(
@@ -363,7 +363,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::EnvironmentDraftNotFound(draft_id.to_string()))?;
-        Ok(environment_draft_record_from_row(&row))
+        environment_draft_record_from_row(&row)
     }
 
     pub async fn confirm_environment_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentRecord> {
@@ -425,7 +425,7 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::ProjectDraftNotFound(draft_id.to_string()))?;
-        Ok(project_draft_record_from_row(&row))
+        project_draft_record_from_row(&row)
     }
 
     pub async fn attach_project_draft_invocation(

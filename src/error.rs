@@ -105,6 +105,8 @@ pub enum AppError {
     InvalidProjectMode(String),
     #[error("invalid environment status '{0}'")]
     InvalidEnvironmentStatus(String),
+    #[error("invalid database value for {0}: '{1}'")]
+    InvalidDatabaseValue(&'static str, String),
     #[error("project '{0}' cannot be deleted because dependent records still exist")]
     ProjectDeleteBlocked(String),
     #[error("invalid release target: {0}")]

@@ -226,12 +226,37 @@ fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
     }
 }
 
-fn project_draft_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectDraftRecord {
-    ProjectDraftRecord {
+fn parse_draft_status_from_db(value: &str) -> AppResult<DraftStatus> {
+    DraftStatus::parse(value)
+        .ok_or_else(|| AppError::InvalidDatabaseValue("draft.status", value.to_string()))
+}
+
+fn parse_environment_status_from_db(value: &str) -> AppResult<EnvironmentStatus> {
+    EnvironmentStatus::parse(value)
+        .ok_or_else(|| AppError::InvalidDatabaseValue("environment.status", value.to_string()))
+}
+
+fn parse_preparation_status_from_db(value: &str) -> AppResult<PreparationStatus> {
+    PreparationStatus::parse(value).ok_or_else(|| {
+        AppError::InvalidDatabaseValue(
+            "environment_reconcile_preparations.status",
+            value.to_string(),
+        )
+    })
+}
+
+fn parse_plan_status_from_db(value: &str) -> AppResult<PlanStatus> {
+    PlanStatus::parse(value).ok_or_else(|| {
+        AppError::InvalidDatabaseValue("environment_run_plans.status", value.to_string())
+    })
+}
+
+fn project_draft_record_from_row(row: &sqlx::postgres::PgRow) -> AppResult<ProjectDraftRecord> {
+    Ok(ProjectDraftRecord {
         id: row.get("id"),
         git_repo_url: row.get("git_repo_url"),
         project_root: row.get("project_root"),
-        status: DraftStatus::parse(&row.get::<String, _>("status")).unwrap_or(DraftStatus::Failed),
+        status: parse_draft_status_from_db(&row.get::<String, _>("status"))?,
         validation_error: row.get("validation_error"),
         project_name: row.get("project_name"),
         default_branch: row.get("default_branch"),
@@ -239,11 +264,13 @@ fn project_draft_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectDraftRec
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         validated_at: row.get("validated_at"),
-    }
+    })
 }
 
-fn environment_draft_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentDraftRecord {
-    EnvironmentDraftRecord {
+fn environment_draft_record_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> AppResult<EnvironmentDraftRecord> {
+    Ok(EnvironmentDraftRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
         slug: row.get("slug"),
@@ -259,20 +286,20 @@ fn environment_draft_record_from_row(row: &sqlx::postgres::PgRow) -> Environment
         profile_secrets: row.get::<sqlx::types::Json<Value>, _>("profile_secrets").0,
         branch_options: row.get::<sqlx::types::Json<Value>, _>("branch_options").0,
         commit_options: row.get::<sqlx::types::Json<Value>, _>("commit_options").0,
-        status: DraftStatus::parse(&row.get::<String, _>("status")).unwrap_or(DraftStatus::Failed),
+        status: parse_draft_status_from_db(&row.get::<String, _>("status"))?,
         validation_error: row.get("validation_error"),
         validation_invocation_id: row.get("validation_invocation_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         validated_at: row.get("validated_at"),
-    }
+    })
 }
 
-fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord {
+fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> AppResult<EnvironmentRecord> {
     let metadata: sqlx::types::Json<Value> = row.get("metadata");
     let profile_config: sqlx::types::Json<Value> = row.get("profile_config");
     let profile_secrets: sqlx::types::Json<Value> = row.get("profile_secrets");
-    EnvironmentRecord {
+    Ok(EnvironmentRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
         project_ref: row.get("project_ref"),
@@ -288,8 +315,7 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         auto_deploy: row.get("auto_deploy"),
         immutable: row.get("immutable"),
         pr_number: row.get("pr_number"),
-        status: EnvironmentStatus::parse(&row.get::<String, _>("status"))
-            .unwrap_or(EnvironmentStatus::Active),
+        status: parse_environment_status_from_db(&row.get::<String, _>("status"))?,
         adapter_type: row.get("adapter_type"),
         worker_queue: row.get("worker_queue"),
         schema_name: row.get("schema_name"),
@@ -297,7 +323,7 @@ fn environment_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRecord
         profile_config: profile_config.0,
         profile_secrets: profile_secrets.0,
         metadata: metadata.0,
-    }
+    })
 }
 
 fn environment_version_record_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentVersionRecord {
@@ -335,15 +361,14 @@ fn environment_actual_state_from_row(row: &sqlx::postgres::PgRow) -> Environment
 
 fn environment_reconcile_preparation_from_row(
     row: &sqlx::postgres::PgRow,
-) -> EnvironmentReconcilePreparationRecord {
-    EnvironmentReconcilePreparationRecord {
+) -> AppResult<EnvironmentReconcilePreparationRecord> {
+    Ok(EnvironmentReconcilePreparationRecord {
         project_id: row.get("project_id"),
         environment_id: row.get("environment_id"),
         kind: row.get("kind"),
         input_fingerprint: row.get("input_fingerprint"),
         target_git_commit_sha: row.get("target_git_commit_sha"),
-        status: PreparationStatus::parse(&row.get::<String, _>("status"))
-            .unwrap_or(PreparationStatus::Failed),
+        status: parse_preparation_status_from_db(&row.get::<String, _>("status"))?,
         invocation_id: row.get("invocation_id"),
         error: row.get("error"),
         failure_count: row.get("failure_count"),
@@ -351,15 +376,17 @@ fn environment_reconcile_preparation_from_row(
         started_at: row.get("started_at"),
         completed_at: row.get("completed_at"),
         updated_at: row.get("updated_at"),
-    }
+    })
 }
 
-fn environment_run_plan_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRunPlanRecord {
-    EnvironmentRunPlanRecord {
+fn environment_run_plan_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> AppResult<EnvironmentRunPlanRecord> {
+    Ok(EnvironmentRunPlanRecord {
         plan_id: row.get("plan_id"),
         project_id: row.get("project_id"),
         environment_id: row.get("environment_id"),
-        status: PlanStatus::parse(&row.get::<String, _>("status")).unwrap_or(PlanStatus::Failed),
+        status: parse_plan_status_from_db(&row.get::<String, _>("status"))?,
         reason: row.get("reason"),
         input_fingerprint: row.get("input_fingerprint"),
         target_git_branch: row.get("target_git_branch"),
@@ -386,7 +413,7 @@ fn environment_run_plan_from_row(row: &sqlx::postgres::PgRow) -> EnvironmentRunP
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         metadata: row.get::<sqlx::types::Json<Value>, _>("metadata").0,
-    }
+    })
 }
 
 fn source_state_event_from_row(row: &sqlx::postgres::PgRow) -> SourceStateEventRecord {
@@ -444,14 +471,14 @@ fn active_environment_resource_from_row(
     }
 }
 
-fn invocation_status_from_row(row: &sqlx::postgres::PgRow) -> InvocationStatusResponse {
+fn invocation_status_from_row(row: &sqlx::postgres::PgRow) -> AppResult<InvocationStatusResponse> {
     let mut status = InvocationStatusResponse {
         invocation_id: row.get("invocation_id"),
-        execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
+        execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode"))?,
         worker_queue: row.get("worker_queue"),
         worker_health: InvocationWorkerHealthApi::Unclaimed,
         cancel_state: InvocationCancelStateApi::None,
-        status: invocation_status_from_db(&row.get::<String, _>("status")),
+        status: invocation_status_from_db(&row.get::<String, _>("status"))?,
         exit_code: row.get("exit_code"),
         error: row.get("error"),
         started_at: row.get("started_at"),
@@ -464,43 +491,53 @@ fn invocation_status_from_row(row: &sqlx::postgres::PgRow) -> InvocationStatusRe
     };
     status.worker_health = compute_worker_health(&status);
     status.cancel_state = compute_cancel_state(&status);
-    status
+    Ok(status)
 }
 
-fn invocation_read_model_from_row(row: &sqlx::postgres::PgRow) -> InvocationReadModel {
-    InvocationReadModel {
-        execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
+fn invocation_read_model_from_row(row: &sqlx::postgres::PgRow) -> AppResult<InvocationReadModel> {
+    Ok(InvocationReadModel {
+        execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode"))?,
         worker_queue: row.get("worker_queue"),
-        status: invocation_status_from_db(&row.get::<String, _>("status")),
+        status: invocation_status_from_db(&row.get::<String, _>("status"))?,
         started_at: row.get("started_at"),
         claimed_at: row.get("claimed_at"),
         last_heartbeat_at: row.get("last_heartbeat_at"),
         claimed_by: row.get("claimed_by"),
-    }
+    })
 }
 
-fn timed_out_invocation_from_row(row: sqlx::postgres::PgRow) -> TimedOutInvocationRecord {
-    TimedOutInvocationRecord {
+fn timed_out_invocation_from_row(
+    row: sqlx::postgres::PgRow,
+) -> AppResult<TimedOutInvocationRecord> {
+    Ok(TimedOutInvocationRecord {
         invocation_id: row.get("invocation_id"),
-        status: invocation_status_from_db(&row.get::<String, _>("status")),
+        status: invocation_status_from_db(&row.get::<String, _>("status"))?,
         exit_code: row.get("exit_code"),
         error: row.get("error"),
+    })
+}
+
+fn execution_mode_from_db(value: &str) -> AppResult<InvocationExecutionModeApi> {
+    match value {
+        "server" => Ok(InvocationExecutionModeApi::Server),
+        "local" => Ok(InvocationExecutionModeApi::Local),
+        _ => Err(AppError::InvalidDatabaseValue(
+            "invocations.execution_mode",
+            value.to_string(),
+        )),
     }
 }
 
-fn execution_mode_from_db(value: &str) -> InvocationExecutionModeApi {
+fn invocation_status_from_db(value: &str) -> AppResult<InvocationLifecycleStatus> {
     match value {
-        "local" => InvocationExecutionModeApi::Local,
-        _ => InvocationExecutionModeApi::Server,
-    }
-}
-
-fn invocation_status_from_db(value: &str) -> InvocationLifecycleStatus {
-    match value {
-        "succeeded" => InvocationLifecycleStatus::Succeeded,
-        "failed" => InvocationLifecycleStatus::Failed,
-        "canceled" => InvocationLifecycleStatus::Canceled,
-        _ => InvocationLifecycleStatus::Running,
+        "running" => Ok(InvocationLifecycleStatus::Running),
+        "succeeded" => Ok(InvocationLifecycleStatus::Succeeded),
+        "failed" => Ok(InvocationLifecycleStatus::Failed),
+        "canceled" => Ok(InvocationLifecycleStatus::Canceled),
+        _ => Err(AppError::InvalidDatabaseValue(
+            "invocations.status",
+            value.to_string(),
+        )),
     }
 }
 
@@ -525,13 +562,13 @@ fn compute_worker_health(status: &InvocationStatusResponse) -> InvocationWorkerH
     })
 }
 
-fn worker_registry_read_model_from_row(row: PgRow) -> WorkerRegistryReadModel {
-    WorkerRegistryReadModel {
+fn worker_registry_read_model_from_row(row: PgRow) -> AppResult<WorkerRegistryReadModel> {
+    Ok(WorkerRegistryReadModel {
         worker_id: row.get("worker_id"),
-        execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode")),
+        execution_mode: execution_mode_from_db(&row.get::<String, _>("execution_mode"))?,
         worker_queue: row.get("worker_queue"),
         last_seen_at: row.get("last_seen_at"),
-    }
+    })
 }
 
 fn compute_worker_registry_health(
@@ -692,6 +729,28 @@ mod tests {
         assert_eq!(automatic_retry_backoff(4), Duration::seconds(40));
         // Caps at 300s
         assert_eq!(automatic_retry_backoff(10), Duration::seconds(300));
+    }
+
+    #[test]
+    fn invalid_database_status_values_return_errors() {
+        use super::{
+            invocation_status_from_db, parse_draft_status_from_db,
+            parse_environment_status_from_db, parse_plan_status_from_db,
+            parse_preparation_status_from_db,
+        };
+
+        for result in [
+            parse_draft_status_from_db("bogus").map(|_| ()),
+            parse_environment_status_from_db("bogus").map(|_| ()),
+            parse_plan_status_from_db("bogus").map(|_| ()),
+            parse_preparation_status_from_db("bogus").map(|_| ()),
+            invocation_status_from_db("bogus").map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(AppError::InvalidDatabaseValue(_, value)) if value == "bogus"
+            ));
+        }
     }
 
     #[test]
@@ -887,17 +946,18 @@ mod tests {
     fn execution_mode_from_db_maps_correctly() {
         use super::execution_mode_from_db;
         assert_eq!(
-            execution_mode_from_db("local"),
+            execution_mode_from_db("local").expect("valid local execution mode"),
             InvocationExecutionModeApi::Local
         );
         assert_eq!(
-            execution_mode_from_db("server"),
+            execution_mode_from_db("server").expect("valid server execution mode"),
             InvocationExecutionModeApi::Server
         );
-        assert_eq!(
+        assert!(matches!(
             execution_mode_from_db("unknown"),
-            InvocationExecutionModeApi::Server
-        );
+            Err(AppError::InvalidDatabaseValue("invocations.execution_mode", value))
+                if value == "unknown"
+        ));
     }
 
     #[test]
@@ -911,7 +971,8 @@ mod tests {
             InvocationLifecycleStatus::Canceled,
         ] {
             assert_eq!(
-                invocation_status_from_db(invocation_status_to_db(status)),
+                invocation_status_from_db(invocation_status_to_db(status))
+                    .expect("valid invocation status"),
                 status
             );
         }
