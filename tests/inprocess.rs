@@ -244,7 +244,7 @@ async fn invocation_lifecycle_in_process() {
     // List invocations
     let (status, body) = get_json(&app, "/v1/invocations").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["invocations"].as_array().unwrap().len() >= 1);
+    assert!(!body["invocations"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -505,7 +505,7 @@ async fn environment_release_and_history() {
     // Check history
     let (status, body) = get_json(&app, "/v1/projects/prj_ui/environments/prod/history").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["versions"].as_array().unwrap().len() >= 1);
+    assert!(!body["versions"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -545,7 +545,7 @@ async fn worker_and_queue_list_empty() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["workers"].as_array().unwrap().len(), 0);
 
-    let (status, body) = get_json(&app, "/v1/queues").await;
+    let (status, _body) = get_json(&app, "/v1/queues").await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -563,7 +563,7 @@ async fn invocation_claim_returns_none_when_empty() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_full_lifecycle() {
-    let (app, pool) = test_app().await;
+    let (app, _pool) = test_app().await;
 
     // Seed project + environment
     let tmp = tempfile::TempDir::new().unwrap();

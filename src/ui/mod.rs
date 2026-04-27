@@ -1064,22 +1064,21 @@ async fn invocation_timeline(
 
     let mut edges = Vec::new();
     let mut model_base_url: Option<String> = None;
-    if let Some(p) = db
+    if let Ok(p) = db
         .get_invocation_persistence(invocation_id, None, None)
         .await
-        .ok()
     {
-        if let Some(run_id) = p.run_id {
-            if let Ok(e) = db.load_manifest_edges(run_id).await {
-                edges = e;
-            }
+        if let Some(run_id) = p.run_id
+            && let Ok(e) = db.load_manifest_edges(run_id).await
+        {
+            edges = e;
         }
-        if let Some(env_id) = p.environment_id {
-            if let Ok(env) = db.get_environment_by_id(env_id).await {
-                model_base_url = Some(format!(
-                    "/ui/catalog/{}/{}", env.project_ref, env.slug
-                ));
-            }
+        if let Some(env_id) = p.environment_id
+            && let Ok(env) = db.get_environment_by_id(env_id).await
+        {
+            model_base_url = Some(format!(
+                "/ui/catalog/{}/{}", env.project_ref, env.slug
+            ));
         }
     }
 
@@ -3273,33 +3272,32 @@ async fn models_index(
             .or_else(|| environments.first().map(|e| e.slug.as_str()))
             .map(String::from);
 
-        if let Some(ref slug) = resolved_env_slug {
-            if let Some(env) = environments.iter().find(|e| &e.slug == slug)
-                && let Some(project) = projects.iter().find(|p| &p.project_id == pid)
-            {
-                let raw = db.list_models_for_environment(project.id, env.id, &query.resource_type).await?;
-                models = raw
-                    .iter()
-                    .map(|m| ModelSummaryViewItem {
-                        name: m.node_name.clone().unwrap_or_else(|| m.unique_id.clone()),
-                        node_path: m.node_path.clone().unwrap_or_default(),
-                        resource_type: m.resource_type.clone().unwrap_or_default(),
-                        package_name: m.package_name.clone().unwrap_or_default(),
-                        materialized: m.materialized.clone().unwrap_or_default(),
-                        status: m.status.clone().unwrap_or("unknown".into()),
-                        status_class: model_status_class(m.status.as_deref().unwrap_or("")).to_string(),
-                        schema: m.relation_schema.clone().unwrap_or_default(),
-                        finished_at: fmt_opt_time(m.finished_at),
-                        last_success_at: fmt_opt_time(m.last_success_at),
-                        detail_url: format!(
-                            "/ui/catalog/{}/{}/{}",
-                            pid,
-                            slug,
-                            urlencoding::encode(&m.unique_id)
-                        ),
-                    })
-                    .collect();
-            }
+        if let Some(ref slug) = resolved_env_slug
+            && let Some(env) = environments.iter().find(|e| &e.slug == slug)
+            && let Some(project) = projects.iter().find(|p| &p.project_id == pid)
+        {
+            let raw = db.list_models_for_environment(project.id, env.id, &query.resource_type).await?;
+            models = raw
+                .iter()
+                .map(|m| ModelSummaryViewItem {
+                    name: m.node_name.clone().unwrap_or_else(|| m.unique_id.clone()),
+                    node_path: m.node_path.clone().unwrap_or_default(),
+                    resource_type: m.resource_type.clone().unwrap_or_default(),
+                    package_name: m.package_name.clone().unwrap_or_default(),
+                    materialized: m.materialized.clone().unwrap_or_default(),
+                    status: m.status.clone().unwrap_or("unknown".into()),
+                    status_class: model_status_class(m.status.as_deref().unwrap_or("")).to_string(),
+                    schema: m.relation_schema.clone().unwrap_or_default(),
+                    finished_at: fmt_opt_time(m.finished_at),
+                    last_success_at: fmt_opt_time(m.last_success_at),
+                    detail_url: format!(
+                        "/ui/catalog/{}/{}/{}",
+                        pid,
+                        slug,
+                        urlencoding::encode(&m.unique_id)
+                    ),
+                })
+                .collect();
         }
     }
 
@@ -3730,14 +3728,14 @@ async fn render_lineage_tab(
     let mut test_counts: std::collections::HashMap<&str, (u32, u32)> =
         std::collections::HashMap::new();
     for (parent, child) in &lineage.edges {
-        if test_ids.contains(child.as_str()) {
-            if let Some(tn) = lineage.nodes.iter().find(|n| n.unique_id == *child) {
-                let e = test_counts.entry(parent.as_str()).or_insert((0, 0));
-                match tn.status.as_deref() {
-                    Some("pass" | "success") => e.0 += 1,
-                    Some("fail" | "error") => e.1 += 1,
-                    _ => {}
-                }
+        if test_ids.contains(child.as_str())
+            && let Some(tn) = lineage.nodes.iter().find(|n| n.unique_id == *child)
+        {
+            let e = test_counts.entry(parent.as_str()).or_insert((0, 0));
+            match tn.status.as_deref() {
+                Some("pass" | "success") => e.0 += 1,
+                Some("fail" | "error") => e.1 += 1,
+                _ => {}
             }
         }
     }
