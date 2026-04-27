@@ -3,11 +3,11 @@
 {% block content %}
 <div class="space-y-6">
   <nav class="flex items-center gap-2 text-sm text-slate-500">
-    <a href="/ui/models" class="hover:text-slate-900">Models</a>
+    <a href="/ui/catalog" class="hover:text-slate-900">Catalog</a>
     <span>›</span>
-    <a href="/ui/models?project_id={{ project_id }}" class="hover:text-slate-900">{{ project_name }}</a>
+    <a href="/ui/catalog?project_id={{ project_id }}" class="hover:text-slate-900">{{ project_name }}</a>
     <span>›</span>
-    <a href="/ui/models?project_id={{ project_id }}&environment_slug={{ environment_slug }}" class="hover:text-slate-900">{{ environment_slug }}</a>
+    <a href="/ui/catalog?project_id={{ project_id }}&environment_slug={{ environment_slug }}" class="hover:text-slate-900">{{ environment_slug }}</a>
     <span>›</span>
     <span class="text-slate-900">{{ model_name }}</span>
   </nav>
@@ -17,7 +17,7 @@
       <h1 class="text-3xl font-semibold tracking-tight">{{ model_name }}</h1>
       <p class="mt-1 font-mono text-sm text-slate-500">{{ unique_id }}</p>
     </div>
-    {% if project_mode == "remote" %}
+    {% if project_mode == "remote" && resource_type != "source" %}
     <div class="relative" x-data="{ open: false, loading: false }">
       <div class="flex">
         <button

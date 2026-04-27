@@ -3,12 +3,18 @@
 use super::*;
 
 impl Db {
-    /// List models for a given environment from current_node_state, filtered to resource_type = 'model'.
+    /// List models for a given environment from current_node_state, optionally filtered by resource type.
     pub(crate) async fn list_models_for_environment(
         &self,
         project_id: i64,
         environment_id: i64,
+        resource_types: &[String],
     ) -> AppResult<Vec<ModelSummaryRecord>> {
+        let rt_param: Option<Vec<String>> = if resource_types.is_empty() {
+            None
+        } else {
+            Some(resource_types.to_vec())
+        };
         let rows = sqlx::query(
             r#"
             SELECT
@@ -38,12 +44,13 @@ impl Db {
             ) mn ON true
             WHERE cns.project_id = $1
               AND cns.environment_id = $2
-              AND cns.resource_type = 'model'
+              AND ($3::text[] IS NULL OR cns.resource_type = ANY($3))
             ORDER BY cns.node_name ASC
             "#,
         )
         .bind(project_id)
         .bind(environment_id)
+        .bind(&rt_param)
         .fetch_all(&self.pool)
         .await?;
 
@@ -83,7 +90,7 @@ impl Db {
         // Latest manifest node from the most recent run with a manifest
         let latest_raw: Option<Value> = sqlx::query_scalar(
             r#"
-            SELECT ms.manifest -> 'nodes' -> $3
+            SELECT COALESCE(ms.manifest -> 'nodes' -> $3, ms.manifest -> 'sources' -> $3)
             FROM runs r
             JOIN manifest_snapshots ms ON ms.run_id = r.run_id
             WHERE r.project_id = $1

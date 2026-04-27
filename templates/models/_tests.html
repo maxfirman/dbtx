@@ -28,7 +28,7 @@
       <tbody class="divide-y divide-slate-100 bg-white">
         {% for test in tests %}
         <tr>
-          <td class="px-5 py-3 font-mono text-xs">{{ test.name }}</td>
+          <td class="px-5 py-3"><a href="{{ test.detail_url }}" class="font-mono text-xs text-slate-900 hover:text-blue-600">{{ test.name }}</a></td>
           <td class="px-5 py-3 text-slate-600">{{ test.test_type }}</td>
           <td class="px-5 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ test.status_class }}">{{ test.status }}</span></td>
           <td class="px-5 py-3 text-slate-600">{{ test.finished_at }}</td>

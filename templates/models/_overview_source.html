@@ -1,0 +1,40 @@
+<div class="space-y-6"
+     hx-get="{{ poll_url }}"
+     hx-trigger="every 5s [document.visibilityState === 'visible']"
+     hx-target="#tab-content"
+     hx-swap="innerHTML">
+  <div class="grid gap-6 lg:grid-cols-2">
+    <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 class="font-semibold">Source Info</h2>
+      <dl class="mt-4 space-y-3 text-sm">
+        {% if !description.is_empty() %}
+        <div><dt class="text-slate-500">Description</dt><dd class="mt-1">{{ description }}</dd></div>
+        {% endif %}
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Database</dt><dd>{{ database }}</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Schema</dt><dd>{{ schema }}</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Loader</dt><dd>{{ loader }}</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Identifier</dt><dd>{{ identifier }}</dd></div>
+        {% if !freshness.is_empty() %}
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Freshness</dt><dd class="font-mono text-xs">{{ freshness }}</dd></div>
+        {% endif %}
+        <div class="flex justify-between gap-4"><dt class="text-slate-500">Status</dt><dd><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ status_class }}">{{ status }}</span></dd></div>
+      </dl>
+    </section>
+    {% if !columns.is_empty() %}
+    <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 class="font-semibold">Columns</h2>
+      <div class="mt-4 overflow-x-auto">
+        <table class="min-w-full divide-y divide-slate-200 text-sm">
+          <thead class="bg-slate-50 text-left text-slate-500"><tr><th class="px-3 py-2 font-medium">Name</th><th class="px-3 py-2 font-medium">Type</th><th class="px-3 py-2 font-medium">Description</th></tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            {% for col in columns %}
+            <tr><td class="px-3 py-2 font-mono text-xs">{{ col.name }}</td><td class="px-3 py-2 text-slate-600">{{ col.data_type }}</td><td class="px-3 py-2 text-slate-600">{{ col.description }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+  </div>
+  {% include "models/_overview_lineage.html" %}
+</div>

@@ -1,11 +1,13 @@
 import { test, expect } from './fixtures';
 
-test.describe('models UI', () => {
-  test('models list page loads and filters render', async ({ page, app }) => {
-    await page.goto(`${app.baseUrl}/ui/models`);
-    await expect(page.getByRole('heading', { name: 'Models' })).toBeVisible();
+test.describe('catalog UI', () => {
+  test('catalog list page loads and filters render', async ({ page, app }) => {
+    await page.goto(`${app.baseUrl}/ui/catalog`);
+    await expect(page.getByRole('heading', { name: 'Catalog' })).toBeVisible();
     await expect(page.locator('select[name="project_id"]')).toBeVisible();
     await expect(page.locator('select[name="environment_slug"]')).toBeVisible();
+    // Resource type multi-checkbox dropdown should be present
+    await expect(page.locator('input[name="resource_type"]').first()).toBeAttached();
   });
 
   test('lineage JS asset is served and contains mount function', async ({ page, app }) => {
@@ -31,9 +33,9 @@ test.describe('models UI', () => {
       if (msg.type() === 'error') consoleErrors.push(msg.text());
     });
 
-    // Navigate to the models list page (which loads base.html with all scripts)
-    await page.goto(`${app.baseUrl}/ui/models`);
-    await expect(page.getByRole('heading', { name: 'Models' })).toBeVisible();
+    // Navigate to the catalog list page (which loads base.html with all scripts)
+    await page.goto(`${app.baseUrl}/ui/catalog`);
+    await expect(page.getByRole('heading', { name: 'Catalog' })).toBeVisible();
 
     // Inject a lineage-root div and test data, then load the lineage script
     await page.evaluate((baseUrl) => {
@@ -54,7 +56,7 @@ test.describe('models UI', () => {
           { id: 'e2', source: 'model.pkg.b', target: 'model.pkg.c' },
         ],
         currentNodeId: 'model.pkg.b',
-        baseUrl: '/ui/models/test/dev',
+        baseUrl: '/ui/catalog/test/dev',
       };
 
       // Load the lineage script

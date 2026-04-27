@@ -1,7 +1,7 @@
 <div id="model-results">
   {% if models.is_empty() %}
   <div class="px-5 py-12 text-center text-sm text-slate-500">
-    {% if needs_selection %}No projects available. Create a project first.{% else %}No models found for this environment.{% endif %}
+    {% if needs_selection %}No projects available. Create a project first.{% else %}No resources found for this environment.{% endif %}
   </div>
   {% else %}
   {% include "models/_table.html" %}

@@ -107,21 +107,21 @@ pub fn router() -> Router<AppState> {
             "/ui/projects/{project_id}/environments/{slug}/rollback",
             post(environment_rollback),
         )
-        .route("/ui/models", get(models_index))
+        .route("/ui/catalog", get(models_index))
         .route(
-            "/ui/models/{project_id}/{env_slug}/{unique_id}",
+            "/ui/catalog/{project_id}/{env_slug}/{unique_id}",
             get(model_detail),
         )
         .route(
-            "/ui/models/{project_id}/{env_slug}/{unique_id}/tab",
+            "/ui/catalog/{project_id}/{env_slug}/{unique_id}/tab",
             get(model_tab),
         )
         .route(
-            "/ui/models/{project_id}/{env_slug}/{unique_id}/test-history/{test_unique_id}",
+            "/ui/catalog/{project_id}/{env_slug}/{unique_id}/test-history/{test_unique_id}",
             get(model_test_history),
         )
         .route(
-            "/ui/models/{project_id}/{env_slug}/{unique_id}/history-diff",
+            "/ui/catalog/{project_id}/{env_slug}/{unique_id}/history-diff",
             get(model_history_diff),
         )
         .route("/ui/assets/lineage.js", get(lineage_js_asset))
@@ -1077,7 +1077,7 @@ async fn invocation_timeline(
         if let Some(env_id) = p.environment_id {
             if let Ok(env) = db.get_environment_by_id(env_id).await {
                 model_base_url = Some(format!(
-                    "/ui/models/{}/{}", env.project_ref, env.slug
+                    "/ui/catalog/{}/{}", env.project_ref, env.slug
                 ));
             }
         }
@@ -2957,11 +2957,13 @@ struct ModelFilterSelectView {
 struct ModelFiltersView {
     projects: Vec<ModelFilterSelectView>,
     environments: Vec<ModelFilterSelectView>,
+    resource_types: Vec<ModelFilterSelectView>,
 }
 
 struct ModelSummaryViewItem {
     name: String,
     node_path: String,
+    resource_type: String,
     package_name: String,
     materialized: String,
     status: String,
@@ -3005,6 +3007,7 @@ struct ModelTestView {
     status_class: String,
     finished_at: String,
     history_url: String,
+    detail_url: String,
 }
 
 struct ModelHistoryEntryView {
@@ -3043,6 +3046,7 @@ struct ModelDetailTemplate {
     environment_slug: String,
     model_name: String,
     unique_id: String,
+    resource_type: String,
     project_mode: String,
     tabs: Vec<ModelTabView>,
     tab_content_html: String,
@@ -3066,6 +3070,7 @@ struct ModelOverviewTemplate {
     promoted_raw_code: String,
     is_stale: bool,
     poll_url: String,
+    lineage: OverviewLineageView,
 }
 
 #[derive(Template)]
@@ -3117,6 +3122,111 @@ struct ModelHistoryDiffTemplate {
     diff_lines: Vec<DiffLineView>,
 }
 
+// --- Catalog overview structs ---
+
+#[allow(dead_code)]
+struct OverviewLineageNodeView {
+    name: String,
+    resource_type: String,
+    status: String,
+    status_class: String,
+    detail_url: String,
+}
+
+struct OverviewLineageView {
+    parents: Vec<OverviewLineageNodeView>,
+    current: OverviewLineageNodeView,
+    children: Vec<OverviewLineageNodeView>,
+    has_lineage: bool,
+}
+
+impl Default for OverviewLineageView {
+    fn default() -> Self {
+        Self {
+            parents: Vec::new(),
+            current: OverviewLineageNodeView {
+                name: String::new(),
+                resource_type: String::new(),
+                status: String::new(),
+                status_class: String::new(),
+                detail_url: String::new(),
+            },
+            children: Vec::new(),
+            has_lineage: false,
+        }
+    }
+}
+
+struct TestDependsOnView {
+    name: String,
+    unique_id: String,
+    detail_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview_source.html")]
+struct SourceOverviewTemplate {
+    description: String,
+    database: String,
+    schema: String,
+    loader: String,
+    identifier: String,
+    freshness: String,
+    columns: Vec<ModelColumnView>,
+    status: String,
+    status_class: String,
+    lineage: OverviewLineageView,
+    poll_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview_seed.html")]
+struct SeedOverviewTemplate {
+    description: String,
+    file_path: String,
+    package_name: String,
+    database: String,
+    schema: String,
+    alias: String,
+    columns: Vec<ModelColumnView>,
+    status: String,
+    status_class: String,
+    lineage: OverviewLineageView,
+    poll_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview_test.html")]
+struct TestOverviewTemplate {
+    description: String,
+    test_type: String,
+    severity: String,
+    depends_on: Vec<TestDependsOnView>,
+    status: String,
+    status_class: String,
+    poll_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview_snapshot.html")]
+struct SnapshotOverviewTemplate {
+    description: String,
+    strategy: String,
+    unique_key: String,
+    updated_at_col: String,
+    database: String,
+    schema: String,
+    alias: String,
+    file_path: String,
+    package_name: String,
+    columns: Vec<ModelColumnView>,
+    raw_code: String,
+    status: String,
+    status_class: String,
+    lineage: OverviewLineageView,
+    poll_url: String,
+}
+
 // --- Model UI helpers ---
 
 const LINEAGE_JS: &str = include_str!("../../lineage-ui/dist/lineage.js");
@@ -3128,6 +3238,8 @@ const TIMELINE_CSS: &str = include_str!("../../timeline-ui/dist/timeline.css");
 struct ModelListQuery {
     project_id: Option<String>,
     environment_slug: Option<String>,
+    #[serde(default)]
+    resource_type: Vec<String>,
 }
 
 async fn models_index(
@@ -3165,12 +3277,13 @@ async fn models_index(
             if let Some(env) = environments.iter().find(|e| &e.slug == slug)
                 && let Some(project) = projects.iter().find(|p| &p.project_id == pid)
             {
-                let raw = db.list_models_for_environment(project.id, env.id).await?;
+                let raw = db.list_models_for_environment(project.id, env.id, &query.resource_type).await?;
                 models = raw
                     .iter()
                     .map(|m| ModelSummaryViewItem {
                         name: m.node_name.clone().unwrap_or_else(|| m.unique_id.clone()),
                         node_path: m.node_path.clone().unwrap_or_default(),
+                        resource_type: m.resource_type.clone().unwrap_or_default(),
                         package_name: m.package_name.clone().unwrap_or_default(),
                         materialized: m.materialized.clone().unwrap_or_default(),
                         status: m.status.clone().unwrap_or("unknown".into()),
@@ -3179,7 +3292,7 @@ async fn models_index(
                         finished_at: fmt_opt_time(m.finished_at),
                         last_success_at: fmt_opt_time(m.last_success_at),
                         detail_url: format!(
-                            "/ui/models/{}/{}/{}",
+                            "/ui/catalog/{}/{}/{}",
                             pid,
                             slug,
                             urlencoding::encode(&m.unique_id)
@@ -3191,6 +3304,8 @@ async fn models_index(
     }
 
     let needs_selection = projects.is_empty();
+
+    const CATALOG_RESOURCE_TYPES: &[&str] = &["model", "source", "seed", "test", "snapshot"];
 
     let filters = ModelFiltersView {
         projects: projects
@@ -3209,10 +3324,18 @@ async fn models_index(
                 label: e.slug.clone(),
             })
             .collect(),
+        resource_types: CATALOG_RESOURCE_TYPES
+            .iter()
+            .map(|&rt| ModelFilterSelectView {
+                selected: query.resource_type.contains(&rt.to_string()),
+                value: rt.to_string(),
+                label: rt.to_string(),
+            })
+            .collect(),
     };
 
     render_template(&ModelsPageTemplate {
-        title: "Models",
+        title: "Catalog",
         filters,
         models,
         needs_selection,
@@ -3268,9 +3391,19 @@ async fn model_detail(
     let project = db.get_project_by_project_id(&project_id).await?;
     let env = db.get_environment(&project.project_id, &env_slug).await?;
     let unique_id = urlencoding::decode(&unique_id).unwrap_or_default().to_string();
+    let resource_type = resource_type_from_unique_id(&unique_id).to_string();
 
     let tab = query.tab.as_deref().unwrap_or("overview");
-    let base = format!("/ui/models/{}/{}/{}", project_id, env_slug, urlencoding::encode(&unique_id));
+    let base = format!("/ui/catalog/{}/{}/{}", project_id, env_slug, urlencoding::encode(&unique_id));
+
+    let valid_tabs: &[&str] = match resource_type.as_str() {
+        "source" => &["overview", "lineage"],
+        "test" => &["overview", "invocations"],
+        "seed" => &["overview", "invocations", "lineage", "history"],
+        "snapshot" => &["overview", "invocations", "lineage", "history"],
+        _ => &["overview", "invocations", "lineage", "tests", "history"],
+    };
+    let tab = if valid_tabs.contains(&tab) { tab } else { "overview" };
 
     let tab_content_html = render_tab(db, &project, &env, &unique_id, tab, &base, &query).await?;
 
@@ -3282,7 +3415,7 @@ async fn model_detail(
         .unwrap_or(&unique_id)
         .to_string();
 
-    let tabs = ["overview", "invocations", "lineage", "tests", "history"]
+    let tabs = valid_tabs
         .iter()
         .map(|&t| {
             let extra = if t == "lineage" {
@@ -3308,13 +3441,22 @@ async fn model_detail(
         })
         .collect();
 
+    let title: &'static str = match resource_type.as_str() {
+        "source" => "Source",
+        "seed" => "Seed",
+        "test" => "Test",
+        "snapshot" => "Snapshot",
+        _ => "Model",
+    };
+
     render_template(&ModelDetailTemplate {
-        title: "Model",
+        title,
         project_id: project_id.clone(),
         project_name: project.project_name.clone(),
         environment_slug: env_slug.clone(),
         model_name,
         unique_id,
+        resource_type: resource_type.to_string(),
         project_mode: project.mode.clone(),
         tabs,
         tab_content_html,
@@ -3332,7 +3474,7 @@ async fn model_tab(
     let env = db.get_environment(&project.project_id, &env_slug).await?;
     let unique_id = urlencoding::decode(&unique_id).unwrap_or_default().to_string();
     let tab = query.tab.as_deref().unwrap_or("overview");
-    let base = format!("/ui/models/{}/{}/{}", project_id, env_slug, urlencoding::encode(&unique_id));
+    let base = format!("/ui/catalog/{}/{}/{}", project_id, env_slug, urlencoding::encode(&unique_id));
     let html = render_tab(db, &project, &env, &unique_id, tab, &base, &query).await?;
     Ok(Html(html))
 }
@@ -3376,18 +3518,12 @@ async fn render_overview_tab(
     let node = detail.latest_manifest_node.as_ref();
     let promoted = detail.promoted_manifest_node.as_ref();
 
-    let latest_checksum = node
-        .and_then(|n| n.get("checksum").and_then(|c| c.get("checksum")).and_then(Value::as_str));
-    let promoted_checksum = promoted
-        .and_then(|n| n.get("checksum").and_then(|c| c.get("checksum")).and_then(Value::as_str));
-    let is_stale = match (latest_checksum, promoted_checksum) {
-        (Some(l), Some(p)) => l != p,
-        (Some(_), None) => true,
-        _ => false,
-    };
-
     let empty = Value::Object(Default::default());
     let n = node.unwrap_or(&empty);
+    let status = detail.status.as_deref().unwrap_or("unknown");
+    let poll_url = format!("{base}/tab?tab=overview");
+    let resource_type = resource_type_from_unique_id(unique_id);
+    let node_name = extract_str(n, "name");
 
     let columns_obj = n.get("columns").and_then(Value::as_object);
     let columns: Vec<ModelColumnView> = columns_obj
@@ -3400,52 +3536,144 @@ async fn render_overview_tab(
         })
         .collect();
 
-    let tags: Vec<String> = n
-        .get("tags")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(String::from)
-        .collect();
-
-    let materialized = n
-        .get("config")
-        .and_then(|c| c.get("materialized"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-
-    let status = detail.status.as_deref().unwrap_or("unknown");
-
-    let promoted_raw_code = if is_stale {
-        promoted
-            .and_then(|p| p.get("raw_code").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string()
-    } else {
-        String::new()
-    };
-
-    ModelOverviewTemplate {
-        description: extract_str(n, "description"),
-        materialized,
-        database: extract_str(n, "database"),
-        schema: extract_str(n, "schema"),
-        alias: extract_str(n, "alias"),
-        file_path: extract_str(n, "original_file_path"),
-        package_name: extract_str(n, "package_name"),
-        tags,
-        status: status.to_string(),
-        status_class: model_status_class(status).to_string(),
-        columns,
-        raw_code: n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string(),
-        promoted_raw_code,
-        is_stale,
-        poll_url: format!("{base}/tab?tab=overview"),
+    match resource_type {
+        "source" => {
+            let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, resource_type, status).await?;
+            let freshness = n.get("freshness").map(|v| v.to_string()).unwrap_or_default();
+            SourceOverviewTemplate {
+                description: extract_str(n, "description"),
+                database: extract_str(n, "database"),
+                schema: extract_str(n, "schema"),
+                loader: extract_str(n, "loader"),
+                identifier: extract_str(n, "identifier"),
+                freshness,
+                columns,
+                status: status.to_string(),
+                status_class: model_status_class(status).to_string(),
+                lineage,
+                poll_url,
+            }
+            .render()
+            .map_err(|e| UiError(AppError::Internal(e.to_string())))
+        }
+        "seed" => {
+            let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, resource_type, status).await?;
+            SeedOverviewTemplate {
+                description: extract_str(n, "description"),
+                file_path: extract_str(n, "original_file_path"),
+                package_name: extract_str(n, "package_name"),
+                database: extract_str(n, "database"),
+                schema: extract_str(n, "schema"),
+                alias: extract_str(n, "alias"),
+                columns,
+                status: status.to_string(),
+                status_class: model_status_class(status).to_string(),
+                lineage,
+                poll_url,
+            }
+            .render()
+            .map_err(|e| UiError(AppError::Internal(e.to_string())))
+        }
+        "test" => {
+            let config = n.get("config").cloned().unwrap_or(Value::Object(Default::default()));
+            let test_type = config.get("test_metadata")
+                .and_then(|tm| tm.get("name")).and_then(Value::as_str)
+                .unwrap_or("").to_string();
+            let severity = config.get("severity").and_then(Value::as_str).unwrap_or("ERROR").to_string();
+            let depends_on_nodes = n.get("depends_on")
+                .and_then(|d| d.get("nodes")).and_then(Value::as_array);
+            let base_url = format!("/ui/catalog/{}/{}", project.project_id, env.slug);
+            let depends_on: Vec<TestDependsOnView> = depends_on_nodes
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|uid| {
+                    let name = uid.rsplit('.').next().unwrap_or(uid).to_string();
+                    TestDependsOnView {
+                        name,
+                        unique_id: uid.to_string(),
+                        detail_url: format!("{}/{}", base_url, urlencoding::encode(uid)),
+                    }
+                })
+                .collect();
+            TestOverviewTemplate {
+                description: extract_str(n, "description"),
+                test_type,
+                severity,
+                depends_on,
+                status: status.to_string(),
+                status_class: model_status_class(status).to_string(),
+                poll_url,
+            }
+            .render()
+            .map_err(|e| UiError(AppError::Internal(e.to_string())))
+        }
+        "snapshot" => {
+            let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, resource_type, status).await?;
+            let config = n.get("config").cloned().unwrap_or(Value::Object(Default::default()));
+            SnapshotOverviewTemplate {
+                description: extract_str(n, "description"),
+                strategy: config.get("strategy").and_then(Value::as_str).unwrap_or("").to_string(),
+                unique_key: config.get("unique_key").and_then(Value::as_str).unwrap_or("").to_string(),
+                updated_at_col: config.get("updated_at").and_then(Value::as_str).unwrap_or("").to_string(),
+                database: extract_str(n, "database"),
+                schema: extract_str(n, "schema"),
+                alias: extract_str(n, "alias"),
+                file_path: extract_str(n, "original_file_path"),
+                package_name: extract_str(n, "package_name"),
+                columns,
+                raw_code: n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string(),
+                status: status.to_string(),
+                status_class: model_status_class(status).to_string(),
+                lineage,
+                poll_url,
+            }
+            .render()
+            .map_err(|e| UiError(AppError::Internal(e.to_string())))
+        }
+        _ => {
+            // model (default)
+            let latest_checksum = node
+                .and_then(|n| n.get("checksum").and_then(|c| c.get("checksum")).and_then(Value::as_str));
+            let promoted_checksum = promoted
+                .and_then(|n| n.get("checksum").and_then(|c| c.get("checksum")).and_then(Value::as_str));
+            let is_stale = match (latest_checksum, promoted_checksum) {
+                (Some(l), Some(p)) => l != p,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            let tags: Vec<String> = n.get("tags").and_then(Value::as_array)
+                .into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+            let materialized = n.get("config")
+                .and_then(|c| c.get("materialized")).and_then(Value::as_str).unwrap_or("").to_string();
+            let promoted_raw_code = if is_stale {
+                promoted.and_then(|p| p.get("raw_code").and_then(Value::as_str)).unwrap_or("").to_string()
+            } else {
+                String::new()
+            };
+            let lineage = build_overview_lineage(db, project, env, unique_id, &node_name, "model", status).await?;
+            ModelOverviewTemplate {
+                description: extract_str(n, "description"),
+                materialized,
+                database: extract_str(n, "database"),
+                schema: extract_str(n, "schema"),
+                alias: extract_str(n, "alias"),
+                file_path: extract_str(n, "original_file_path"),
+                package_name: extract_str(n, "package_name"),
+                tags,
+                status: status.to_string(),
+                status_class: model_status_class(status).to_string(),
+                columns,
+                raw_code: n.get("raw_code").and_then(Value::as_str).unwrap_or("").to_string(),
+                promoted_raw_code,
+                is_stale,
+                poll_url,
+                lineage,
+            }
+            .render()
+            .map_err(|e| UiError(AppError::Internal(e.to_string())))
+        }
     }
-    .render()
-    .map_err(|e| UiError(AppError::Internal(e.to_string())))
 }
 
 async fn render_invocations_tab(
@@ -3492,7 +3720,7 @@ async fn render_lineage_tab(
     let direction = query.direction.as_deref().unwrap_or("both");
     let lineage = db.get_model_lineage(project.id, env.id, unique_id, depth, direction).await?;
 
-    let base_url = format!("/ui/models/{}/{}", project.project_id, env.slug);
+    let base_url = format!("/ui/catalog/{}/{}", project.project_id, env.slug);
 
     let test_ids: std::collections::HashSet<&str> = lineage
         .nodes.iter()
@@ -3605,6 +3833,12 @@ async fn render_tests_tab(
                     "{base}/test-history/{}",
                     urlencoding::encode(&t.unique_id)
                 ),
+                detail_url: format!(
+                    "/ui/catalog/{}/{}/{}",
+                    project.project_id,
+                    env.slug,
+                    urlencoding::encode(&t.unique_id)
+                ),
             }
         })
         .collect();
@@ -3715,6 +3949,77 @@ fn git_commit_url(repo_url: Option<&str>, sha: Option<&str>) -> String {
 
 fn extract_str(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+fn resource_type_from_unique_id(unique_id: &str) -> &str {
+    if unique_id.starts_with("source.") {
+        "source"
+    } else if unique_id.starts_with("seed.") {
+        "seed"
+    } else if unique_id.starts_with("test.") {
+        "test"
+    } else if unique_id.starts_with("snapshot.") {
+        "snapshot"
+    } else {
+        "model"
+    }
+}
+
+async fn build_overview_lineage(
+    db: &crate::db::Db,
+    project: &crate::db::ProjectRecord,
+    env: &crate::db::EnvironmentRecord,
+    unique_id: &str,
+    current_name: &str,
+    current_resource_type: &str,
+    current_status: &str,
+) -> Result<OverviewLineageView, UiError> {
+    let lineage = db
+        .get_model_lineage(project.id, env.id, unique_id, 1, "both")
+        .await?;
+    let base_url = format!("/ui/catalog/{}/{}", project.project_id, env.slug);
+
+    let make_node = |n: &crate::db::LineageNodeRecord| {
+        let status = n.status.as_deref().unwrap_or("unknown");
+        OverviewLineageNodeView {
+            name: n.name.clone().unwrap_or_else(|| n.unique_id.clone()),
+            resource_type: n.resource_type.clone().unwrap_or_default(),
+            status: status.to_string(),
+            status_class: model_status_class(status).to_string(),
+            detail_url: format!("{}/{}", base_url, urlencoding::encode(&n.unique_id)),
+        }
+    };
+
+    let parents: Vec<OverviewLineageNodeView> = lineage
+        .edges
+        .iter()
+        .filter(|(_, child)| child == unique_id)
+        .filter_map(|(parent, _)| lineage.nodes.iter().find(|n| n.unique_id == *parent))
+        .map(make_node)
+        .collect();
+
+    let children: Vec<OverviewLineageNodeView> = lineage
+        .edges
+        .iter()
+        .filter(|(parent, _)| parent == unique_id)
+        .filter_map(|(_, child)| lineage.nodes.iter().find(|n| n.unique_id == *child))
+        .map(make_node)
+        .collect();
+
+    let has_lineage = !parents.is_empty() || !children.is_empty();
+
+    Ok(OverviewLineageView {
+        parents,
+        current: OverviewLineageNodeView {
+            name: current_name.to_string(),
+            resource_type: current_resource_type.to_string(),
+            status: current_status.to_string(),
+            status_class: model_status_class(current_status).to_string(),
+            detail_url: String::new(),
+        },
+        children,
+        has_lineage,
+    })
 }
 
 fn compute_diff(old: &str, new: &str) -> Vec<DiffLineView> {
