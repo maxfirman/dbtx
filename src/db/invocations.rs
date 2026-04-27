@@ -778,10 +778,15 @@ impl Db {
         lease_token: Uuid,
         completion: &crate::execution::ExecutionCompletion,
     ) -> AppResult<()> {
-        let persistence = self
-            .get_invocation_persistence(invocation_id, Some(worker_id), Some(lease_token))
-            .await?;
         let mut tx = self.pool.begin().await?;
+        let persistence = self
+            .get_invocation_persistence_for_completion_in_tx(
+                &mut tx,
+                invocation_id,
+                worker_id,
+                lease_token,
+            )
+            .await?;
 
         self.apply_invocation_completion_side_effects_in_tx(
             &mut tx,
@@ -791,7 +796,7 @@ impl Db {
         )
         .await?;
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE invocations
             SET status = $3,
@@ -802,6 +807,7 @@ impl Db {
             WHERE invocation_id = $1
               AND claimed_by = $2
               AND lease_token = $6
+              AND status = 'running'
             "#,
         )
         .bind(invocation_id)
@@ -812,9 +818,68 @@ impl Db {
         .bind(lease_token)
         .execute(&mut *tx)
         .await?;
+        if result.rows_affected() != 1 {
+            return Err(AppError::InvocationOwnershipMismatch);
+        }
 
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn get_invocation_persistence_for_completion_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        invocation_id: Uuid,
+        worker_id: &str,
+        lease_token: Uuid,
+    ) -> AppResult<InvocationPersistenceRecord> {
+        let row = sqlx::query(
+            r#"
+            SELECT plan_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id, command, promote_base_manifest, updates_actual_state
+            FROM invocations
+            WHERE invocation_id = $1
+              AND claimed_by = $2
+              AND lease_token = $3
+              AND status = 'running'
+            FOR UPDATE
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(worker_id)
+        .bind(lease_token)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(row) = row {
+            return Ok(InvocationPersistenceRecord {
+                plan_id: row.get("plan_id"),
+                run_id: row.get("run_id"),
+                project_id: row.get("project_id"),
+                environment_id: row.get("environment_id"),
+                project_draft_id: row.get("project_draft_id"),
+                environment_draft_id: row.get("environment_draft_id"),
+                command: row.get("command"),
+                promote_base_manifest: row.get("promote_base_manifest"),
+                updates_actual_state: row.get("updates_actual_state"),
+            });
+        }
+
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM invocations
+                WHERE invocation_id = $1
+            )
+            "#,
+        )
+        .bind(invocation_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if exists {
+            Err(AppError::InvocationOwnershipMismatch)
+        } else {
+            Err(AppError::InvocationNotFound(invocation_id.to_string()))
+        }
     }
 
     pub(crate) async fn force_complete_invocation(

@@ -2,10 +2,13 @@
 use crate::api::{
     InvocationCommandApi, InvocationExecutionModeApi, InvocationExecutionSpecApi,
 };
-use crate::db::CreateInvocationInput;
+use crate::db::{CreateInvocationInput, PreparationStatus};
 use crate::error::{AppError, AppResult};
 use crate::server::AppState;
-use crate::services::{InvocationCommand, InvocationService};
+use crate::services::{
+    InvocationCommand, InvocationService, code_change_input_fingerprint_for_baseline,
+    target_manifest_input_fingerprint,
+};
 use chrono::{Duration, Utc};
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
@@ -255,9 +258,18 @@ pub async fn ensure_target_manifest_for_reconcile(
     environment_slug: &str,
 ) -> AppResult<()> {
     let environment = state.db().get_environment(project_id, environment_slug).await?;
-    let desired_commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
-        AppError::Internal("reconciliation requires a desired git commit sha".to_string())
-    })?;
+    let desired_commit_sha = environment
+        .git_commit_sha
+        .clone()
+        .ok_or(AppError::ReconciliationRequiresCommitSha)?;
+    let baseline_run_id = state
+        .db()
+        .get_environment_actual_state(&environment.project_ref, &environment.slug)
+        .await?
+        .last_successful_run_id;
+    let input_fingerprint = target_manifest_input_fingerprint(
+        &code_change_input_fingerprint_for_baseline(&desired_commit_sha, baseline_run_id),
+    );
     if state
         .db()
         .latest_manifest_run_id_for_commit(environment.project_id, environment.id, &desired_commit_sha)
@@ -265,6 +277,34 @@ pub async fn ensure_target_manifest_for_reconcile(
         .is_some()
     {
         return Ok(());
+    }
+    if state
+        .db()
+        .has_active_manifest_prepare_for_commit(
+            environment.project_id,
+            environment.id,
+            &desired_commit_sha,
+        )
+        .await?
+    {
+        return Err(AppError::ReconciliationInProgress);
+    }
+    if state
+        .db()
+        .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
+        .await?
+        .filter(|preparation| {
+            preparation.kind == "target_manifest"
+                && preparation.input_fingerprint.as_deref() == Some(input_fingerprint.as_str())
+                && preparation.status == PreparationStatus::Failed
+                && preparation
+                    .next_attempt_at
+                    .map(|next_attempt_at| next_attempt_at > Utc::now())
+                    .unwrap_or(false)
+        })
+        .is_some()
+    {
+        return Err(AppError::ReconciliationInProgress);
     }
 
     let invocation_id = Uuid::new_v4();
@@ -279,6 +319,16 @@ pub async fn ensure_target_manifest_for_reconcile(
         prepared,
     )
     .await?;
+    state
+        .db()
+        .mark_manifest_prepare_running(
+            environment.project_id,
+            environment.id,
+            &input_fingerprint,
+            &desired_commit_sha,
+            invocation_id,
+        )
+        .await?;
     wait_for_terminal_invocation(state, invocation_id, std::time::Duration::from_secs(120)).await?;
     let status = state.db().get_invocation_status(invocation_id).await?;
     match status.status {

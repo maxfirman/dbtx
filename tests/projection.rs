@@ -2039,6 +2039,113 @@ async fn periodic_reconciler_respects_manifest_prepare_retry_backoff() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
+async fn manual_reconcile_respects_manifest_prepare_retry_backoff() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let repo = TempProjectRepo::new("proj");
+    let client = db.client().clone();
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let desired_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let baseline_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(desired_commit),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        baseline_commit,
+        &[("model.pkg.orders", "model")],
+        &[],
+    )
+    .await;
+    let baseline_run_id =
+        latest_run_id_for_commit(db.pool(), &project_id, "remote", baseline_commit).await;
+    let input_fingerprint =
+        target_manifest_input_fingerprint(&code_change_input_fingerprint(desired_commit, baseline_run_id));
+
+    sqlx::query(
+        r#"
+        INSERT INTO environment_reconcile_preparations (
+            project_id,
+            environment_id,
+            kind,
+            input_fingerprint,
+            target_git_commit_sha,
+            status,
+            invocation_id,
+            error,
+            failure_count,
+            next_attempt_at,
+            started_at,
+            completed_at,
+            updated_at
+        )
+        SELECT
+            p.id,
+            e.id,
+            'target_manifest',
+            $3,
+            $4,
+            'failed',
+            NULL,
+            'manifest prepare failed',
+            2,
+            NOW() + INTERVAL '5 minutes',
+            NOW() - INTERVAL '1 minute',
+            NOW() - INTERVAL '1 minute',
+            NOW()
+        FROM projects p
+        JOIN environments e ON e.project_id = p.id
+        WHERE p.project_id = $1
+          AND e.slug = $2
+        "#,
+    )
+    .bind(&project_id)
+    .bind("remote")
+    .bind(&input_fingerprint)
+    .bind(desired_commit)
+    .execute(db.pool())
+    .await
+    .expect("insert failed reconcile preparation");
+
+    assert!(
+        client
+            .environment_reconcile(&project_id, "remote", EnvironmentReconcileApiRequest::default())
+            .await
+            .is_err(),
+        "manual reconcile should respect manifest prepare retry backoff"
+    );
+
+    let manifest_prepare_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM invocations i
+        JOIN runs r ON r.run_id = i.run_id
+        JOIN projects p ON p.id = i.project_id
+        JOIN environments e ON e.id = i.environment_id
+        WHERE p.project_id = $1
+          AND e.slug = $2
+          AND i.command = 'manifest_prepare'
+          AND r.git_commit_sha = $3
+        "#,
+    )
+    .bind(&project_id)
+    .bind("remote")
+    .bind(desired_commit)
+    .fetch_one(db.pool())
+    .await
+    .expect("count manifest prepare invocations");
+    assert_eq!(manifest_prepare_count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
 async fn periodic_reconciler_respects_failed_plan_retry_backoff() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");

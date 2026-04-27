@@ -1948,6 +1948,7 @@ impl IntoResponse for ApiError {
             AppError::ProjectDeleteBlocked(_) => StatusCode::CONFLICT,
             AppError::ImmutableEnvironment(_) => StatusCode::CONFLICT,
             AppError::InvocationAlreadyClaimed(_) => StatusCode::CONFLICT,
+            AppError::InvocationOwnershipMismatch => StatusCode::CONFLICT,
             AppError::InvocationNotClaimable(_) => StatusCode::BAD_REQUEST,
             AppError::EnvironmentAlreadyReconciled
             | AppError::ReconciliationInProgress

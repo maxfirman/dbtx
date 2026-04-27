@@ -435,18 +435,38 @@ impl Db {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             r#"
-            UPDATE environment_run_plans
-            SET status = 'admitted',
-                admitted_invocation_id = $2,
-                superseded_by_plan_id = NULL,
-                blocked_by_invocation_id = NULL,
-                error = NULL,
-                next_attempt_at = NULL,
-                last_checked_at = NOW(),
-                admitted_at = NOW(),
-                updated_at = NOW()
-            WHERE plan_id = $1
-            RETURNING
+            WITH current_plan AS (
+                SELECT *
+                FROM environment_run_plans
+                WHERE plan_id = $1
+                FOR UPDATE
+            ),
+            admitted AS (
+                UPDATE environment_run_plans plan
+                SET status = 'admitted',
+                    admitted_invocation_id = $2,
+                    superseded_by_plan_id = NULL,
+                    blocked_by_invocation_id = NULL,
+                    error = NULL,
+                    next_attempt_at = NULL,
+                    last_checked_at = NOW(),
+                    admitted_at = NOW(),
+                    updated_at = NOW()
+                FROM current_plan
+                WHERE plan.plan_id = current_plan.plan_id
+                  AND current_plan.status IN ('planned', 'blocked', 'admitted')
+                RETURNING
+                    plan.plan_id, plan.project_id, plan.environment_id, plan.status, plan.reason,
+                    plan.input_fingerprint, plan.target_git_branch, plan.target_git_commit_sha,
+                    plan.baseline_run_id, plan.selection_spec, plan.selected_resources,
+                    plan.resource_count, plan.superseded_by_plan_id, plan.retry_count,
+                    plan.blocked_by_invocation_id, plan.admitted_invocation_id,
+                    plan.source_event_id, plan.error, plan.failure_count, plan.next_attempt_at,
+                    plan.first_blocked_at, plan.last_blocked_at, plan.last_checked_at,
+                    plan.admitted_at, plan.completed_at, plan.created_at, plan.updated_at,
+                    plan.metadata
+            )
+            SELECT
                 plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
                 target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
                 resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
@@ -454,12 +474,25 @@ impl Db {
                 first_blocked_at,
                 last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
                 updated_at, metadata
+            FROM admitted
+            UNION ALL
+            SELECT
+                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
+                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
+                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
+                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
+                first_blocked_at,
+                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
+                updated_at, metadata
+            FROM current_plan
+            WHERE NOT EXISTS (SELECT 1 FROM admitted)
             "#,
         )
         .bind(plan_id)
         .bind(invocation_id)
-        .fetch_one(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::PlanNotFound(plan_id.to_string()))?;
         sqlx::query(
             r#"
             INSERT INTO environment_actual_state (
