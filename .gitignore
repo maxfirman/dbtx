@@ -8,6 +8,7 @@ playwright-report/
 .playwright-cli/
 logs/
 lineage-ui/dist/
+.npmrc
 lineage-ui/.npmrc
 timeline-ui/dist/
 timeline-ui/.npmrc
