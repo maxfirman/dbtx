@@ -1989,6 +1989,7 @@ impl IntoResponse for ApiError {
             | AppError::ReconciliationRequiresCommitSha
             | AppError::ReconciliationEmptyPlan => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,
+            AppError::InvalidDatabaseValue(_, _) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Io(ref err) if err.kind() == std::io::ErrorKind::NotFound => {
                 StatusCode::NOT_FOUND
             }
