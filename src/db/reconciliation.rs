@@ -2,6 +2,56 @@
 
 use super::*;
 
+const ENVIRONMENT_RUN_PLAN_COLUMNS: &[&str] = &[
+    "plan_id",
+    "project_id",
+    "environment_id",
+    "status",
+    "reason",
+    "input_fingerprint",
+    "target_git_branch",
+    "target_git_commit_sha",
+    "baseline_run_id",
+    "selection_spec",
+    "selected_resources",
+    "resource_count",
+    "superseded_by_plan_id",
+    "retry_count",
+    "blocked_by_invocation_id",
+    "admitted_invocation_id",
+    "source_event_id",
+    "error",
+    "failure_count",
+    "next_attempt_at",
+    "first_blocked_at",
+    "last_blocked_at",
+    "last_checked_at",
+    "admitted_at",
+    "completed_at",
+    "created_at",
+    "updated_at",
+    "metadata",
+];
+
+fn environment_run_plan_columns() -> String {
+    ENVIRONMENT_RUN_PLAN_COLUMNS.join(", ")
+}
+
+fn environment_run_plan_columns_for_alias(alias: &str) -> String {
+    ENVIRONMENT_RUN_PLAN_COLUMNS
+        .iter()
+        .map(|column| format!("{alias}.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn environment_run_plan_select(where_and_suffix: &str) -> String {
+    format!(
+        "SELECT {} FROM environment_run_plans {where_and_suffix}",
+        environment_run_plan_columns()
+    )
+}
+
 impl Db {
     pub(crate) async fn get_environment_actual_state(
         &self,
@@ -140,22 +190,13 @@ impl Db {
         project_id: i64,
         environment_id: i64,
     ) -> AppResult<Vec<EnvironmentRunPlanRecord>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(&environment_run_plan_select(
             r#"
-            SELECT
-                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
-                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
-                first_blocked_at,
-                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
-                updated_at, metadata
-            FROM environment_run_plans
             WHERE project_id = $1
               AND environment_id = $2
             ORDER BY created_at DESC, plan_id DESC
             "#,
-        )
+        ))
         .bind(project_id)
         .bind(environment_id)
         .fetch_all(&self.pool)
@@ -206,20 +247,11 @@ impl Db {
         &self,
         plan_id: Uuid,
     ) -> AppResult<EnvironmentRunPlanRecord> {
-        let row = sqlx::query(
+        let row = sqlx::query(&environment_run_plan_select(
             r#"
-            SELECT
-                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
-                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
-                first_blocked_at,
-                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
-                updated_at, metadata
-            FROM environment_run_plans
             WHERE plan_id = $1
             "#,
-        )
+        ))
         .bind(plan_id)
         .fetch_optional(&self.pool)
         .await?
@@ -231,7 +263,7 @@ impl Db {
         &self,
         input: CreateEnvironmentRunPlanInput<'_>,
     ) -> AppResult<EnvironmentRunPlanRecord> {
-        let row = sqlx::query(
+        let query = format!(
             r#"
             INSERT INTO environment_run_plans (
                 plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
@@ -243,31 +275,26 @@ impl Db {
                 $7, $8, $9, $10,
                 $11, $12, $13
             )
-            RETURNING
-                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
-                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
-                first_blocked_at,
-                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
-                updated_at, metadata
+            RETURNING {}
             "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(input.environment.project_id)
-        .bind(input.environment.id)
-        .bind(input.reason)
-        .bind(input.input_fingerprint)
-        .bind(input.environment.git_branch.as_deref())
-        .bind(input.environment.git_commit_sha.as_deref())
-        .bind(input.baseline_run_id)
-        .bind(input.selection_spec)
-        .bind(sqlx::types::Json(input.selected_resources))
-        .bind(input.selected_resources.len() as i32)
-        .bind(input.source_event_id)
-        .bind(sqlx::types::Json(input.metadata))
-        .fetch_one(&self.pool)
-        .await?;
+            environment_run_plan_columns()
+        );
+        let row = sqlx::query(&query)
+            .bind(Uuid::new_v4())
+            .bind(input.environment.project_id)
+            .bind(input.environment.id)
+            .bind(input.reason)
+            .bind(input.input_fingerprint)
+            .bind(input.environment.git_branch.as_deref())
+            .bind(input.environment.git_commit_sha.as_deref())
+            .bind(input.baseline_run_id)
+            .bind(input.selection_spec)
+            .bind(sqlx::types::Json(input.selected_resources))
+            .bind(input.selected_resources.len() as i32)
+            .bind(input.source_event_id)
+            .bind(sqlx::types::Json(input.metadata))
+            .fetch_one(&self.pool)
+            .await?;
         environment_run_plan_from_row(&row)
     }
 
@@ -275,17 +302,8 @@ impl Db {
         &self,
         lookup: EquivalentPlanLookup<'_>,
     ) -> AppResult<Option<EnvironmentRunPlanRecord>> {
-        let row = sqlx::query(
+        let row = sqlx::query(&environment_run_plan_select(
             r#"
-            SELECT
-                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
-                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
-                first_blocked_at,
-                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
-                updated_at, metadata
-            FROM environment_run_plans
             WHERE project_id = $1
               AND environment_id = $2
               AND status IN ('planned', 'blocked')
@@ -299,7 +317,7 @@ impl Db {
             ORDER BY created_at DESC, plan_id DESC
             LIMIT 1
             "#,
-        )
+        ))
         .bind(lookup.project_id)
         .bind(lookup.environment_id)
         .bind(lookup.reason)
@@ -396,7 +414,7 @@ impl Db {
         blocked_by_invocation_id: Option<Uuid>,
         error: &str,
     ) -> AppResult<EnvironmentRunPlanRecord> {
-        let row = sqlx::query(
+        let query = format!(
             r#"
             UPDATE environment_run_plans
             SET status = 'blocked',
@@ -409,21 +427,16 @@ impl Db {
                 last_checked_at = NOW(),
                 updated_at = NOW()
             WHERE plan_id = $1
-            RETURNING
-                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
-                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
-                first_blocked_at,
-                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
-                updated_at, metadata
+            RETURNING {}
             "#,
-        )
-        .bind(plan_id)
-        .bind(blocked_by_invocation_id)
-        .bind(error)
-        .fetch_one(&self.pool)
-        .await?;
+            environment_run_plan_columns()
+        );
+        let row = sqlx::query(&query)
+            .bind(plan_id)
+            .bind(blocked_by_invocation_id)
+            .bind(error)
+            .fetch_one(&self.pool)
+            .await?;
         environment_run_plan_from_row(&row)
     }
 
@@ -433,7 +446,7 @@ impl Db {
         invocation_id: Uuid,
     ) -> AppResult<EnvironmentRunPlanRecord> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(
+        let query = format!(
             r#"
             WITH current_plan AS (
                 SELECT *
@@ -456,43 +469,27 @@ impl Db {
                 WHERE plan.plan_id = current_plan.plan_id
                   AND current_plan.status IN ('planned', 'blocked', 'admitted')
                 RETURNING
-                    plan.plan_id, plan.project_id, plan.environment_id, plan.status, plan.reason,
-                    plan.input_fingerprint, plan.target_git_branch, plan.target_git_commit_sha,
-                    plan.baseline_run_id, plan.selection_spec, plan.selected_resources,
-                    plan.resource_count, plan.superseded_by_plan_id, plan.retry_count,
-                    plan.blocked_by_invocation_id, plan.admitted_invocation_id,
-                    plan.source_event_id, plan.error, plan.failure_count, plan.next_attempt_at,
-                    plan.first_blocked_at, plan.last_blocked_at, plan.last_checked_at,
-                    plan.admitted_at, plan.completed_at, plan.created_at, plan.updated_at,
-                    plan.metadata
+                    {}
             )
             SELECT
-                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
-                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
-                first_blocked_at,
-                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
-                updated_at, metadata
+                {}
             FROM admitted
             UNION ALL
             SELECT
-                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
-                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
-                first_blocked_at,
-                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
-                updated_at, metadata
+                {}
             FROM current_plan
             WHERE NOT EXISTS (SELECT 1 FROM admitted)
             "#,
-        )
-        .bind(plan_id)
-        .bind(invocation_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| AppError::PlanNotFound(plan_id.to_string()))?;
+            environment_run_plan_columns_for_alias("plan"),
+            environment_run_plan_columns(),
+            environment_run_plan_columns()
+        );
+        let row = sqlx::query(&query)
+            .bind(plan_id)
+            .bind(invocation_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| AppError::PlanNotFound(plan_id.to_string()))?;
         sqlx::query(
             r#"
             INSERT INTO environment_actual_state (
@@ -520,7 +517,7 @@ impl Db {
         selected_resources: &[String],
         metadata: Value,
     ) -> AppResult<EnvironmentRunPlanRecord> {
-        let row = sqlx::query(
+        let query = format!(
             r#"
             UPDATE environment_run_plans
             SET selection_spec = $2,
@@ -531,23 +528,18 @@ impl Db {
                 last_checked_at = NOW(),
                 updated_at = NOW()
             WHERE plan_id = $1
-            RETURNING
-                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
-                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at,
-                first_blocked_at,
-                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
-                updated_at, metadata
+            RETURNING {}
             "#,
-        )
-        .bind(plan_id)
-        .bind(selection_spec)
-        .bind(sqlx::types::Json(selected_resources))
-        .bind(selected_resources.len() as i32)
-        .bind(sqlx::types::Json(metadata))
-        .fetch_one(&self.pool)
-        .await?;
+            environment_run_plan_columns()
+        );
+        let row = sqlx::query(&query)
+            .bind(plan_id)
+            .bind(selection_spec)
+            .bind(sqlx::types::Json(selected_resources))
+            .bind(selected_resources.len() as i32)
+            .bind(sqlx::types::Json(metadata))
+            .fetch_one(&self.pool)
+            .await?;
         environment_run_plan_from_row(&row)
     }
 
@@ -558,7 +550,7 @@ impl Db {
         metadata: Value,
     ) -> AppResult<EnvironmentRunPlanRecord> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(
+        let query = format!(
             r#"
             UPDATE environment_run_plans
             SET status = 'completed',
@@ -573,20 +565,16 @@ impl Db {
                 completed_at = NOW(),
                 updated_at = NOW()
             WHERE plan_id = $1
-            RETURNING
-                plan_id, project_id, environment_id, status, reason, input_fingerprint, target_git_branch,
-                target_git_commit_sha, baseline_run_id, selection_spec, selected_resources,
-                resource_count, superseded_by_plan_id, retry_count, blocked_by_invocation_id,
-                admitted_invocation_id, source_event_id, error, failure_count, next_attempt_at, first_blocked_at,
-                last_blocked_at, last_checked_at, admitted_at, completed_at, created_at,
-                updated_at, metadata
+            RETURNING {}
             "#,
-        )
-        .bind(plan_id)
-        .bind(error)
-        .bind(sqlx::types::Json(metadata))
-        .fetch_one(&mut *tx)
-        .await?;
+            environment_run_plan_columns()
+        );
+        let row = sqlx::query(&query)
+            .bind(plan_id)
+            .bind(error)
+            .bind(sqlx::types::Json(metadata))
+            .fetch_one(&mut *tx)
+            .await?;
         sqlx::query(
             r#"
             INSERT INTO environment_actual_state (
