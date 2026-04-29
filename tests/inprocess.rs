@@ -20,7 +20,7 @@ use tower::ServiceExt;
 
 const TEST_POOL_MAX_CONNECTIONS: u32 = 4;
 const TEST_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-static TEMPLATE_CLONE_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+static TEMPLATE_CLONE_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// Shared Postgres container for all in-process tests.
 static SHARED_PG: tokio::sync::OnceCell<SharedPg> = tokio::sync::OnceCell::const_new();
