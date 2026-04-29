@@ -5,12 +5,45 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use dbtx::api::*;
+use dbtx::db::Db;
 use dbtx::error::{AppError, AppResult};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+pub const TEST_POOL_MAX_CONNECTIONS: u32 = 4;
+pub const TEST_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub static TEMPLATE_CLONE_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+pub async fn connect_test_pool(database_url: &str, context: &str) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(TEST_POOL_MAX_CONNECTIONS)
+        .acquire_timeout(TEST_POOL_ACQUIRE_TIMEOUT)
+        .connect(database_url)
+        .await
+        .unwrap_or_else(|err| panic!("{context}: {err}"))
+}
+
+pub async fn connect_db_with_retry(database_url: &str, context: &str) -> Db {
+    let mut last_error = None;
+    for attempt in 1..=5 {
+        match Db::connect(database_url).await {
+            Ok(db) => return db,
+            Err(err) => {
+                last_error = Some(err.to_string());
+                tokio::time::sleep(std::time::Duration::from_millis(200 * attempt)).await;
+            }
+        }
+    }
+    panic!(
+        "{context} after retries: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    );
+}
 
 #[derive(Clone)]
 pub struct InProcessClient {

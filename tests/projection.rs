@@ -1,6 +1,6 @@
 mod common;
 
-use common::InProcessClient;
+use common::{InProcessClient, TEMPLATE_CLONE_LOCK, connect_db_with_retry, connect_test_pool};
 use dbtx::api::{
     EnvironmentActiveResourcesApiRequest, EnvironmentDraftUpdateApiRequest,
     EnvironmentReconcileApiRequest, EnvironmentReleaseApiRequest, EnvironmentRollbackApiRequest,
@@ -10,14 +10,13 @@ use dbtx::api::{
     InvocationListApiRequest, ProjectDraftCreateApiRequest, SourceStateEventCreateApiRequest,
 };
 use dbtx::config::RuntimeConfig;
-use dbtx::db::{Db, DraftStatus, PlanStatus};
+use dbtx::db::{DraftStatus, PlanStatus};
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use dbtx::server::{AppState, router};
 use dbtx::services::{
     code_change_input_fingerprint, infer_local_project_defaults, infer_remote_project_defaults,
     source_state_change_input_fingerprint, target_manifest_input_fingerprint,
 };
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,10 +28,6 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, runners::AsyncRunner},
 };
 use uuid::Uuid;
-
-const TEST_POOL_MAX_CONNECTIONS: u32 = 4;
-const TEST_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
-static TEMPLATE_CLONE_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
@@ -5537,32 +5532,6 @@ struct SharedTestInfra {
 }
 
 static SHARED_INFRA: tokio::sync::OnceCell<SharedTestInfra> = tokio::sync::OnceCell::const_new();
-
-async fn connect_test_pool(database_url: &str, context: &str) -> PgPool {
-    PgPoolOptions::new()
-        .max_connections(TEST_POOL_MAX_CONNECTIONS)
-        .acquire_timeout(TEST_POOL_ACQUIRE_TIMEOUT)
-        .connect(database_url)
-        .await
-        .unwrap_or_else(|err| panic!("{context}: {err}"))
-}
-
-async fn connect_db_with_retry(database_url: &str, context: &str) -> Db {
-    let mut last_error = None;
-    for attempt in 1..=5 {
-        match Db::connect(database_url).await {
-            Ok(db) => return db,
-            Err(err) => {
-                last_error = Some(err.to_string());
-                tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
-            }
-        }
-    }
-    panic!(
-        "{context} after retries: {}",
-        last_error.unwrap_or_else(|| "unknown error".to_string())
-    );
-}
 
 async fn get_shared_infra() -> &'static SharedTestInfra {
     SHARED_INFRA
