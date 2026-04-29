@@ -17,6 +17,7 @@ use dbtx::services::{
     code_change_input_fingerprint, infer_local_project_defaults, infer_remote_project_defaults,
     source_state_change_input_fingerprint, target_manifest_input_fingerprint,
 };
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,10 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, runners::AsyncRunner},
 };
 use uuid::Uuid;
+
+const TEST_POOL_MAX_CONNECTIONS: u32 = 4;
+const TEST_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+static TEMPLATE_CLONE_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
@@ -5533,6 +5538,32 @@ struct SharedTestInfra {
 
 static SHARED_INFRA: tokio::sync::OnceCell<SharedTestInfra> = tokio::sync::OnceCell::const_new();
 
+async fn connect_test_pool(database_url: &str, context: &str) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(TEST_POOL_MAX_CONNECTIONS)
+        .acquire_timeout(TEST_POOL_ACQUIRE_TIMEOUT)
+        .connect(database_url)
+        .await
+        .unwrap_or_else(|err| panic!("{context}: {err}"))
+}
+
+async fn connect_db_with_retry(database_url: &str, context: &str) -> Db {
+    let mut last_error = None;
+    for attempt in 1..=5 {
+        match Db::connect(database_url).await {
+            Ok(db) => return db,
+            Err(err) => {
+                last_error = Some(err.to_string());
+                tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
+            }
+        }
+    }
+    panic!(
+        "{context} after retries: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    );
+}
+
 async fn get_shared_infra() -> &'static SharedTestInfra {
     SHARED_INFRA
         .get_or_init(|| async {
@@ -5541,7 +5572,7 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
                     .rsplit_once('/')
                     .map(|(base, _)| format!("{base}/postgres"))
                     .unwrap_or_else(|| url.clone());
-                let admin_pool = PgPool::connect(&admin_url).await.expect("connect admin");
+                let admin_pool = connect_test_pool(&admin_url, "connect admin").await;
                 let _ = sqlx::query("CREATE DATABASE dbtx_template")
                     .execute(&admin_pool)
                     .await;
@@ -5550,7 +5581,7 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
                     .rsplit_once('/')
                     .map(|(base, _)| format!("{base}/dbtx_template"))
                     .unwrap_or_else(|| url.clone());
-                let db = Db::connect(&template_url).await.expect("connect template");
+                let db = connect_db_with_retry(&template_url, "connect template").await;
                 db.migrate().await.expect("migrate template");
                 return SharedTestInfra {
                     admin_url,
@@ -5574,7 +5605,7 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
             let template_url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx_template");
             let admin_url = format!("postgres://dbtx:dbtx@{host}:{port}/postgres");
 
-            let db = Db::connect(&template_url).await.expect("connect template");
+            let db = connect_db_with_retry(&template_url, "connect template").await;
             db.migrate().await.expect("migrate template");
 
             SharedTestInfra {
@@ -5602,9 +5633,11 @@ impl TestDatabase {
         let infra = get_shared_infra().await;
         let db_name = format!("test_{}", Uuid::new_v4().simple());
 
-        let admin_pool = PgPool::connect(&infra.admin_url)
+        let admin_pool = connect_test_pool(&infra.admin_url, "connect admin db").await;
+        let _clone_permit = TEMPLATE_CLONE_LOCK
+            .acquire()
             .await
-            .expect("connect admin db");
+            .expect("template clone lock");
         sqlx::query(&format!("CREATE DATABASE {db_name} TEMPLATE dbtx_template"))
             .execute(&admin_pool)
             .await
@@ -5616,11 +5649,11 @@ impl TestDatabase {
             .map(|(base, _)| format!("{base}/{db_name}"))
             .unwrap_or_else(|| format!("{}/{db_name}", infra.admin_url));
 
-        let db = Db::connect(&test_url).await.expect("connect app db");
+        let db = connect_db_with_retry(&test_url, "connect app db").await;
         let config = RuntimeConfig::from_database_url(test_url.clone());
         let state = AppState::new(db, config);
         let client = InProcessClient::new(router(state));
-        let pool = PgPool::connect(&test_url).await.expect("connect test db");
+        let pool = connect_test_pool(&test_url, "connect test db").await;
 
         Self {
             client,

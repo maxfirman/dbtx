@@ -11,11 +11,16 @@ use dbtx::server::{AppState, router};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, runners::AsyncRunner},
 };
 use tower::ServiceExt;
+
+const TEST_POOL_MAX_CONNECTIONS: u32 = 4;
+const TEST_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+static TEMPLATE_CLONE_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 /// Shared Postgres container for all in-process tests.
 static SHARED_PG: tokio::sync::OnceCell<SharedPg> = tokio::sync::OnceCell::const_new();
@@ -23,6 +28,32 @@ static SHARED_PG: tokio::sync::OnceCell<SharedPg> = tokio::sync::OnceCell::const
 struct SharedPg {
     admin_url: String,
     _container: Option<ContainerAsync<Postgres>>,
+}
+
+async fn connect_test_pool(database_url: &str, context: &str) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(TEST_POOL_MAX_CONNECTIONS)
+        .acquire_timeout(TEST_POOL_ACQUIRE_TIMEOUT)
+        .connect(database_url)
+        .await
+        .unwrap_or_else(|err| panic!("{context}: {err}"))
+}
+
+async fn connect_db_with_retry(database_url: &str, context: &str) -> Db {
+    let mut last_error = None;
+    for attempt in 1..=5 {
+        match Db::connect(database_url).await {
+            Ok(db) => return db,
+            Err(err) => {
+                last_error = Some(err.to_string());
+                tokio::time::sleep(std::time::Duration::from_millis(200 * attempt)).await;
+            }
+        }
+    }
+    panic!(
+        "{context} after retries: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    );
 }
 
 async fn shared_pg() -> &'static SharedPg {
@@ -51,7 +82,7 @@ async fn shared_pg() -> &'static SharedPg {
             let admin_url = format!("postgres://dbtx:dbtx@{host}:{port}/postgres");
 
             // Apply migrations to template
-            let db = Db::connect(&template_url).await.expect("connect template");
+            let db = connect_db_with_retry(&template_url, "connect template").await;
             db.migrate().await.expect("migrate template");
 
             SharedPg {
@@ -66,7 +97,11 @@ async fn shared_pg() -> &'static SharedPg {
 async fn test_app() -> (axum::Router, PgPool) {
     let pg = shared_pg().await;
     let db_name = format!("inproc_{}", uuid::Uuid::new_v4().simple());
-    let admin_pool = PgPool::connect(&pg.admin_url).await.expect("admin connect");
+    let admin_pool = connect_test_pool(&pg.admin_url, "admin connect").await;
+    let _clone_permit = TEMPLATE_CLONE_LOCK
+        .acquire()
+        .await
+        .expect("template clone lock");
     sqlx::query(&format!(
         "CREATE DATABASE {db_name} TEMPLATE dbtx_inproc_template"
     ))
@@ -78,8 +113,8 @@ async fn test_app() -> (axum::Router, PgPool) {
         .rsplit_once('/')
         .map(|(b, _)| format!("{b}/{db_name}"))
         .unwrap();
-    let pool = PgPool::connect(&test_url).await.expect("connect test db");
-    let db = Db::connect(&test_url).await.expect("connect app db");
+    let pool = connect_test_pool(&test_url, "connect test db").await;
+    let db = connect_db_with_retry(&test_url, "connect app db").await;
     let config = RuntimeConfig::from_database_url(test_url);
     let state = AppState::new(db, config);
     let app = router(state);
