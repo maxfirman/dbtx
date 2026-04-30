@@ -1,6 +1,7 @@
 /target
 .env
 .sqlx
+.codex
 warehouse.duckdb
 node_modules/
 test-results/
