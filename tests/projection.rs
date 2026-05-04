@@ -1,6 +1,8 @@
 mod common;
 
-use common::{InProcessClient, TEMPLATE_CLONE_LOCK, connect_db_with_retry, connect_test_pool};
+use common::{
+    InProcessClient, connect_db_with_retry, connect_test_pool, register_testcontainer_cleanup,
+};
 use dbtx::api::{
     EnvironmentActiveResourcesApiRequest, EnvironmentDraftUpdateApiRequest,
     EnvironmentReconcileApiRequest, EnvironmentReleaseApiRequest, EnvironmentRollbackApiRequest,
@@ -5565,6 +5567,7 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
                 .start()
                 .await
                 .expect("start shared postgres container");
+            register_testcontainer_cleanup(container.id().to_string());
 
             let host = container.get_host().await.expect("postgres host");
             let port = container
@@ -5603,10 +5606,6 @@ impl TestDatabase {
         let db_name = format!("test_{}", Uuid::new_v4().simple());
 
         let admin_pool = connect_test_pool(&infra.admin_url, "connect admin db").await;
-        let _clone_permit = TEMPLATE_CLONE_LOCK
-            .acquire()
-            .await
-            .expect("template clone lock");
         sqlx::query(&format!("CREATE DATABASE {db_name} TEMPLATE dbtx_template"))
             .execute(&admin_pool)
             .await

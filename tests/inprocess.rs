@@ -5,7 +5,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{TEMPLATE_CLONE_LOCK, connect_db_with_retry, connect_test_pool};
+use common::{connect_db_with_retry, connect_test_pool, register_testcontainer_cleanup};
 use dbtx::config::RuntimeConfig;
 use dbtx::server::{AppState, router};
 use http_body_util::BodyExt;
@@ -45,6 +45,7 @@ async fn shared_pg() -> &'static SharedPg {
                 .start()
                 .await
                 .expect("start postgres");
+            register_testcontainer_cleanup(container.id().to_string());
             let host = container.get_host().await.expect("host");
             let port = container.get_host_port_ipv4(5432).await.expect("port");
             let template_url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx_inproc_template");
@@ -67,10 +68,6 @@ async fn test_app() -> (axum::Router, PgPool) {
     let pg = shared_pg().await;
     let db_name = format!("inproc_{}", uuid::Uuid::new_v4().simple());
     let admin_pool = connect_test_pool(&pg.admin_url, "admin connect").await;
-    let _clone_permit = TEMPLATE_CLONE_LOCK
-        .acquire()
-        .await
-        .expect("template clone lock");
     sqlx::query(&format!(
         "CREATE DATABASE {db_name} TEMPLATE dbtx_inproc_template"
     ))
