@@ -6773,7 +6773,7 @@ async fn admit_completed_plan_returns_conflict() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
-async fn reconcile_without_baseline_returns_unprocessable() {
+async fn reconcile_without_baseline_creates_full_graph_plan() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = db.client().clone();
@@ -6788,19 +6788,36 @@ async fn reconcile_without_baseline_returns_unprocessable() {
         Some(desired_sha),
     )
     .await;
-    // No actual state seeded — no baseline run exists
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "prod",
+        desired_sha,
+        &[
+            ("model.pkg.orders", "model", Some("orders-checksum")),
+            ("model.pkg.customers", "model", Some("customers-checksum")),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
 
-    let err = client
+    let plan = client
         .environment_reconcile(
             &project_id,
             "prod",
             dbtx::api::EnvironmentReconcileApiRequest {},
         )
         .await
-        .expect_err("should fail without baseline");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("baseline") || msg.contains("reconcil"),
-        "expected baseline/reconciliation error, got: {msg}"
+        .expect("first deployment should reconcile as a full-graph plan")
+        .plan;
+    assert_eq!(plan.reason, "code_change");
+    assert_eq!(plan.baseline_run_id, None);
+    assert_eq!(plan.selection_spec.as_deref(), Some("full_graph"));
+    assert_eq!(
+        plan.selected_resources,
+        vec![
+            "model.pkg.customers".to_string(),
+            "model.pkg.orders".to_string(),
+        ]
     );
 }
