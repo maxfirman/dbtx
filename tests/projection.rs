@@ -1,6 +1,8 @@
 mod common;
 
-use common::InProcessClient;
+use common::{
+    InProcessClient, connect_db_with_retry, connect_test_pool, register_testcontainer_cleanup,
+};
 use dbtx::api::{
     EnvironmentActiveResourcesApiRequest, EnvironmentDraftUpdateApiRequest,
     EnvironmentReconcileApiRequest, EnvironmentReleaseApiRequest, EnvironmentRollbackApiRequest,
@@ -10,7 +12,7 @@ use dbtx::api::{
     InvocationListApiRequest, ProjectDraftCreateApiRequest, SourceStateEventCreateApiRequest,
 };
 use dbtx::config::RuntimeConfig;
-use dbtx::db::{Db, DraftStatus, PlanStatus};
+use dbtx::db::{DraftStatus, PlanStatus};
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use dbtx::server::{AppState, router};
 use dbtx::services::{
@@ -5541,7 +5543,7 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
                     .rsplit_once('/')
                     .map(|(base, _)| format!("{base}/postgres"))
                     .unwrap_or_else(|| url.clone());
-                let admin_pool = PgPool::connect(&admin_url).await.expect("connect admin");
+                let admin_pool = connect_test_pool(&admin_url, "connect admin").await;
                 let _ = sqlx::query("CREATE DATABASE dbtx_template")
                     .execute(&admin_pool)
                     .await;
@@ -5550,7 +5552,7 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
                     .rsplit_once('/')
                     .map(|(base, _)| format!("{base}/dbtx_template"))
                     .unwrap_or_else(|| url.clone());
-                let db = Db::connect(&template_url).await.expect("connect template");
+                let db = connect_db_with_retry(&template_url, "connect template").await;
                 db.migrate().await.expect("migrate template");
                 return SharedTestInfra {
                     admin_url,
@@ -5565,6 +5567,7 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
                 .start()
                 .await
                 .expect("start shared postgres container");
+            register_testcontainer_cleanup(container.id().to_string());
 
             let host = container.get_host().await.expect("postgres host");
             let port = container
@@ -5574,7 +5577,7 @@ async fn get_shared_infra() -> &'static SharedTestInfra {
             let template_url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx_template");
             let admin_url = format!("postgres://dbtx:dbtx@{host}:{port}/postgres");
 
-            let db = Db::connect(&template_url).await.expect("connect template");
+            let db = connect_db_with_retry(&template_url, "connect template").await;
             db.migrate().await.expect("migrate template");
 
             SharedTestInfra {
@@ -5602,9 +5605,7 @@ impl TestDatabase {
         let infra = get_shared_infra().await;
         let db_name = format!("test_{}", Uuid::new_v4().simple());
 
-        let admin_pool = PgPool::connect(&infra.admin_url)
-            .await
-            .expect("connect admin db");
+        let admin_pool = connect_test_pool(&infra.admin_url, "connect admin db").await;
         sqlx::query(&format!("CREATE DATABASE {db_name} TEMPLATE dbtx_template"))
             .execute(&admin_pool)
             .await
@@ -5616,11 +5617,11 @@ impl TestDatabase {
             .map(|(base, _)| format!("{base}/{db_name}"))
             .unwrap_or_else(|| format!("{}/{db_name}", infra.admin_url));
 
-        let db = Db::connect(&test_url).await.expect("connect app db");
+        let db = connect_db_with_retry(&test_url, "connect app db").await;
         let config = RuntimeConfig::from_database_url(test_url.clone());
         let state = AppState::new(db, config);
         let client = InProcessClient::new(router(state));
-        let pool = PgPool::connect(&test_url).await.expect("connect test db");
+        let pool = connect_test_pool(&test_url, "connect test db").await;
 
         Self {
             client,
@@ -6772,7 +6773,7 @@ async fn admit_completed_plan_returns_conflict() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
-async fn reconcile_without_baseline_returns_unprocessable() {
+async fn reconcile_without_baseline_creates_full_graph_plan() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = db.client().clone();
@@ -6787,19 +6788,36 @@ async fn reconcile_without_baseline_returns_unprocessable() {
         Some(desired_sha),
     )
     .await;
-    // No actual state seeded — no baseline run exists
+    seed_manifest_run_only(
+        db.pool(),
+        &project_id,
+        "prod",
+        desired_sha,
+        &[
+            ("model.pkg.orders", "model", Some("orders-checksum")),
+            ("model.pkg.customers", "model", Some("customers-checksum")),
+        ],
+        &[("model.pkg.orders", "model.pkg.customers")],
+    )
+    .await;
 
-    let err = client
+    let plan = client
         .environment_reconcile(
             &project_id,
             "prod",
             dbtx::api::EnvironmentReconcileApiRequest {},
         )
         .await
-        .expect_err("should fail without baseline");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("baseline") || msg.contains("reconcil"),
-        "expected baseline/reconciliation error, got: {msg}"
+        .expect("first deployment should reconcile as a full-graph plan")
+        .plan;
+    assert_eq!(plan.reason, "code_change");
+    assert_eq!(plan.baseline_run_id, None);
+    assert_eq!(plan.selection_spec.as_deref(), Some("full_graph"));
+    assert_eq!(
+        plan.selected_resources,
+        vec![
+            "model.pkg.customers".to_string(),
+            "model.pkg.orders".to_string(),
+        ]
     );
 }

@@ -5,8 +5,8 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use common::{connect_db_with_retry, connect_test_pool, register_testcontainer_cleanup};
 use dbtx::config::RuntimeConfig;
-use dbtx::db::Db;
 use dbtx::server::{AppState, router};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -45,13 +45,14 @@ async fn shared_pg() -> &'static SharedPg {
                 .start()
                 .await
                 .expect("start postgres");
+            register_testcontainer_cleanup(container.id().to_string());
             let host = container.get_host().await.expect("host");
             let port = container.get_host_port_ipv4(5432).await.expect("port");
             let template_url = format!("postgres://dbtx:dbtx@{host}:{port}/dbtx_inproc_template");
             let admin_url = format!("postgres://dbtx:dbtx@{host}:{port}/postgres");
 
             // Apply migrations to template
-            let db = Db::connect(&template_url).await.expect("connect template");
+            let db = connect_db_with_retry(&template_url, "connect template").await;
             db.migrate().await.expect("migrate template");
 
             SharedPg {
@@ -66,7 +67,7 @@ async fn shared_pg() -> &'static SharedPg {
 async fn test_app() -> (axum::Router, PgPool) {
     let pg = shared_pg().await;
     let db_name = format!("inproc_{}", uuid::Uuid::new_v4().simple());
-    let admin_pool = PgPool::connect(&pg.admin_url).await.expect("admin connect");
+    let admin_pool = connect_test_pool(&pg.admin_url, "admin connect").await;
     sqlx::query(&format!(
         "CREATE DATABASE {db_name} TEMPLATE dbtx_inproc_template"
     ))
@@ -78,8 +79,8 @@ async fn test_app() -> (axum::Router, PgPool) {
         .rsplit_once('/')
         .map(|(b, _)| format!("{b}/{db_name}"))
         .unwrap();
-    let pool = PgPool::connect(&test_url).await.expect("connect test db");
-    let db = Db::connect(&test_url).await.expect("connect app db");
+    let pool = connect_test_pool(&test_url, "connect test db").await;
+    let db = connect_db_with_retry(&test_url, "connect app db").await;
     let config = RuntimeConfig::from_database_url(test_url);
     let state = AppState::new(db, config);
     let app = router(state);

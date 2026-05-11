@@ -5,12 +5,84 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use dbtx::api::*;
+use dbtx::db::Db;
 use dbtx::error::{AppError, AppResult};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
+use std::process::Command;
+use std::sync::{Mutex, Once, OnceLock};
 use tower::ServiceExt;
 use uuid::Uuid;
+
+pub const TEST_POOL_MAX_CONNECTIONS: u32 = 4;
+pub const TEST_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+static TESTCONTAINER_CLEANUP_REGISTERED: Once = Once::new();
+static TESTCONTAINER_IDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+pub fn register_testcontainer_cleanup(container_id: impl Into<String>) {
+    TESTCONTAINER_CLEANUP_REGISTERED.call_once(|| {
+        // SAFETY: the cleanup function has C ABI, does not unwind, and only reads
+        // process-global container IDs to remove test-only Docker containers.
+        unsafe {
+            libc::atexit(cleanup_testcontainers);
+        }
+    });
+
+    TESTCONTAINER_IDS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .expect("testcontainer cleanup registry poisoned")
+        .push(container_id.into());
+}
+
+extern "C" fn cleanup_testcontainers() {
+    let Some(ids) = TESTCONTAINER_IDS.get() else {
+        return;
+    };
+    let Ok(ids) = ids.lock() else {
+        return;
+    };
+    if ids.is_empty() {
+        return;
+    }
+
+    let _ = Command::new("docker")
+        .arg("rm")
+        .arg("-f")
+        .arg("-v")
+        .args(ids.iter().map(String::as_str))
+        .output();
+}
+
+pub async fn connect_test_pool(database_url: &str, context: &str) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(TEST_POOL_MAX_CONNECTIONS)
+        .acquire_timeout(TEST_POOL_ACQUIRE_TIMEOUT)
+        .connect(database_url)
+        .await
+        .unwrap_or_else(|err| panic!("{context}: {err}"))
+}
+
+pub async fn connect_db_with_retry(database_url: &str, context: &str) -> Db {
+    let mut last_error = None;
+    for attempt in 1..=5 {
+        match Db::connect(database_url).await {
+            Ok(db) => return db,
+            Err(err) => {
+                last_error = Some(err.to_string());
+                tokio::time::sleep(std::time::Duration::from_millis(200 * attempt)).await;
+            }
+        }
+    }
+    panic!(
+        "{context} after retries: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    );
+}
 
 #[derive(Clone)]
 pub struct InProcessClient {

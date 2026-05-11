@@ -528,6 +528,13 @@ fn execution_mode_from_db(value: &str) -> AppResult<InvocationExecutionModeApi> 
     }
 }
 
+fn execution_mode_to_db(value: InvocationExecutionModeApi) -> &'static str {
+    match value {
+        InvocationExecutionModeApi::Server => "server",
+        InvocationExecutionModeApi::Local => "local",
+    }
+}
+
 fn invocation_status_from_db(value: &str) -> AppResult<InvocationLifecycleStatus> {
     match value {
         "running" => Ok(InvocationLifecycleStatus::Running),
@@ -611,13 +618,6 @@ fn compute_worker_health_from_model(status: &InvocationReadModel) -> InvocationW
             InvocationWorkerHealthApi::Stale
         }
         (_, _, Some(_)) => InvocationWorkerHealthApi::Claimed,
-    }
-}
-
-fn invocation_mode_value(value: InvocationExecutionModeApi) -> &'static str {
-    match value {
-        InvocationExecutionModeApi::Server => "server",
-        InvocationExecutionModeApi::Local => "local",
     }
 }
 
@@ -943,7 +943,21 @@ mod tests {
     }
 
     #[test]
-    fn execution_mode_from_db_maps_correctly() {
+    fn execution_mode_roundtrips_through_db() {
+        use super::{execution_mode_from_db, execution_mode_to_db};
+        for mode in [
+            InvocationExecutionModeApi::Local,
+            InvocationExecutionModeApi::Server,
+        ] {
+            assert_eq!(
+                execution_mode_from_db(execution_mode_to_db(mode)).expect("valid execution mode"),
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn execution_mode_from_db_rejects_unknown() {
         use super::execution_mode_from_db;
         assert_eq!(
             execution_mode_from_db("local").expect("valid local execution mode"),

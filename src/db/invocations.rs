@@ -13,7 +13,7 @@ impl Db {
                 invocation_id, plan_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id,
                 command, execution_mode, worker_queue, status, execution_spec, promote_base_manifest, updates_actual_state, claim_deadline_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING invocation_id, execution_mode, worker_queue, status, exit_code, error,
                 started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
                 cancel_requested, claimed_by
@@ -27,11 +27,9 @@ impl Db {
         .bind(input.project_draft_id)
         .bind(input.environment_draft_id)
         .bind(&input.command)
-        .bind(match input.execution_mode {
-            InvocationExecutionModeApi::Server => "server",
-            InvocationExecutionModeApi::Local => "local",
-        })
+        .bind(execution_mode_to_db(input.execution_mode))
         .bind(&input.worker_queue)
+        .bind(invocation_status_to_db(InvocationLifecycleStatus::Running))
         .bind(input.execution_spec.as_ref().map(sqlx::types::Json))
         .bind(input.promote_base_manifest)
         .bind(input.updates_actual_state)
@@ -66,10 +64,7 @@ impl Db {
             "#,
         )
         .bind(filter.status.map(invocation_status_to_db))
-        .bind(filter.execution_mode.map(|mode| match mode {
-            InvocationExecutionModeApi::Server => "server",
-            InvocationExecutionModeApi::Local => "local",
-        }))
+        .bind(filter.execution_mode.map(execution_mode_to_db))
         .bind(filter.worker_queue)
         .bind(filter.claimed_by)
         .bind(filter.cancel_state.map(|state| match state {
@@ -295,7 +290,7 @@ impl Db {
         let mut grouped: BTreeMap<(String, String), Vec<InvocationReadModel>> = BTreeMap::new();
         for row in rows {
             let model = invocation_read_model_from_row(&row)?;
-            let mode = invocation_mode_value(model.execution_mode).to_string();
+            let mode = execution_mode_to_db(model.execution_mode).to_string();
             let queue = model.worker_queue.clone();
             grouped.entry((mode, queue)).or_default().push(model);
         }
@@ -374,10 +369,7 @@ impl Db {
         execution_mode: InvocationExecutionModeApi,
         worker_queue: &str,
     ) -> AppResult<()> {
-        let execution_mode = match execution_mode {
-            InvocationExecutionModeApi::Server => "server",
-            InvocationExecutionModeApi::Local => "local",
-        };
+        let execution_mode = execution_mode_to_db(execution_mode);
         sqlx::query(
             r#"
             INSERT INTO workers (worker_id, execution_mode, worker_queue, first_seen_at, last_seen_at)
@@ -401,10 +393,7 @@ impl Db {
         execution_mode: InvocationExecutionModeApi,
         worker_queues: &[String],
     ) -> AppResult<()> {
-        let execution_mode = match execution_mode {
-            InvocationExecutionModeApi::Server => "server",
-            InvocationExecutionModeApi::Local => "local",
-        };
+        let execution_mode = execution_mode_to_db(execution_mode);
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
@@ -475,10 +464,7 @@ impl Db {
             RETURNING inv.invocation_id, inv.lease_token, inv.execution_mode, inv.execution_spec
             "#,
         )
-        .bind(execution_mode.map(|mode| match mode {
-            InvocationExecutionModeApi::Server => "server",
-            InvocationExecutionModeApi::Local => "local",
-        }))
+        .bind(execution_mode.map(execution_mode_to_db))
         .bind(worker_queues)
         .bind(worker_id)
         .bind(lease_token)
