@@ -394,6 +394,26 @@ impl InProcessClient {
         .await
     }
 
+    pub async fn environment_pause(
+        &self,
+        project: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentResponse> {
+        self.post_empty(&format!("/v1/projects/{project}/environments/{slug}/pause"))
+            .await
+    }
+
+    pub async fn environment_resume(
+        &self,
+        project: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentResponse> {
+        self.post_empty(&format!(
+            "/v1/projects/{project}/environments/{slug}/resume"
+        ))
+        .await
+    }
+
     // --- Invocations ---
 
     pub async fn invocation_create(

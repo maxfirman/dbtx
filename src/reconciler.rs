@@ -70,7 +70,7 @@ pub async fn run(state: AppState) -> AppResult<()> {
 }
 
 pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
-    let environments = state.db().list_auto_deploy_remote_environments().await?;
+    let environments = state.db().list_auto_reconcile_remote_environments().await?;
     let mut planned = 0usize;
     for environment in environments {
         let actual_state = state

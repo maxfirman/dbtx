@@ -82,14 +82,14 @@
 
         <label class="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
           <div>
-            <div class="font-medium text-slate-900">Enable Automatic Deployments</div>
-            <div class="mt-1 text-xs text-slate-500">Persist desired state for future automatic reconciliation.</div>
+            <div class="font-medium text-slate-900">Auto Reconcile</div>
+            <div class="mt-1 text-xs text-slate-500">Automatically reconcile this environment when code or source state changes.</div>
           </div>
           <input
-            name="auto_deploy"
+            name="auto_reconcile"
             type="checkbox"
             value="true"
-            {% if draft.auto_deploy %}checked{% endif %}
+            {% if draft.auto_reconcile %}checked{% endif %}
             {% if draft.is_loading || draft.is_validating || draft.is_validated %}disabled{% endif %}
             :disabled="inputsLocked"
             class="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400"

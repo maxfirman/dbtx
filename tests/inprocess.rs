@@ -347,7 +347,7 @@ async fn post_form(app: &axum::Router, path: &str, form: &str) -> (StatusCode, S
 async fn seed_ui_test_data(pool: &PgPool) {
     sqlx::query("INSERT INTO projects (project_id, project_name, mode, git_repo_url, project_root, metadata) VALUES ('prj_ui', 'ui_project', 'remote', 'https://example.com/repo.git', '.', '{}'::jsonb)")
         .execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, git_branch, git_commit_sha, use_latest_commit, auto_deploy, immutable, profile_config, profile_secrets, metadata) VALUES (1, 'prod', 'ui_project', 'prod', 'duckdb', 'generic', 'main', 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', true, true, false, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)")
+    sqlx::query("INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, git_branch, git_commit_sha, use_latest_commit, auto_reconcile, immutable, profile_config, profile_secrets, metadata) VALUES (1, 'prod', 'ui_project', 'prod', 'duckdb', 'generic', 'main', 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', true, true, false, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)")
         .execute(pool).await.unwrap();
 }
 

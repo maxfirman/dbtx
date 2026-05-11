@@ -148,6 +148,20 @@ pub enum EnvironmentCommand {
         #[arg(long)]
         version_id: i64,
     },
+    #[command(about = "Pause automatic reconciliation for an environment")]
+    Pause {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        slug: String,
+    },
+    #[command(about = "Resume automatic reconciliation for an environment")]
+    Resume {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        slug: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

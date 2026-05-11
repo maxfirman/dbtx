@@ -197,6 +197,19 @@ pub async fn handle_environment_command(
                 .environment;
             print_environment(&environment);
         }
+        EnvironmentCommand::Pause { project, slug } => {
+            let environment = client.environment_pause(&project, &slug).await?.environment;
+            println!("Paused automatic reconciliation for {}/{}", project, slug);
+            print_environment(&environment);
+        }
+        EnvironmentCommand::Resume { project, slug } => {
+            let environment = client
+                .environment_resume(&project, &slug)
+                .await?
+                .environment;
+            println!("Resumed automatic reconciliation for {}/{}", project, slug);
+            print_environment(&environment);
+        }
     }
     Ok(())
 }

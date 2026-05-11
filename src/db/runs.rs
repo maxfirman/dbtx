@@ -746,7 +746,7 @@ impl Db {
             r#"
             INSERT INTO environment_versions (
                 environment_id, project_id, reason, git_branch, git_commit_sha,
-                use_latest_commit, auto_deploy, immutable, baseline_environment_id, metadata
+                use_latest_commit, auto_reconcile, immutable, baseline_environment_id, metadata
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
@@ -757,7 +757,7 @@ impl Db {
         .bind(environment.git_branch.as_deref())
         .bind(environment.git_commit_sha.as_deref())
         .bind(environment.use_latest_commit)
-        .bind(environment.auto_deploy)
+        .bind(environment.auto_reconcile)
         .bind(environment.immutable)
         .bind(environment.baseline_environment_id)
         .bind(sqlx::types::Json(serde_json::json!({

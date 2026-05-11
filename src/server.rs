@@ -223,6 +223,14 @@ fn environment_routes() -> Router<AppState> {
             post(environment_release),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{slug}/pause",
+            post(environment_pause),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{slug}/resume",
+            post(environment_resume),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{slug}/history",
             get(environment_history),
         )
@@ -892,7 +900,7 @@ fn environment_draft_update_request(
         git_branch: request.git_branch,
         git_commit_sha: request.git_commit_sha,
         use_latest_commit: request.use_latest_commit,
-        auto_deploy: request.auto_deploy,
+        auto_reconcile: request.auto_reconcile,
         immutable: request.immutable,
         adapter_type: request.adapter_type,
         schema_name: request.schema_name,
@@ -1076,6 +1084,38 @@ async fn environment_release(
         environment = %environment.slug,
         git_commit_sha = %environment.git_commit_sha.as_deref().unwrap_or(""),
         "released environment"
+    );
+    Ok(Json(EnvironmentResponse { environment }))
+}
+
+async fn environment_pause(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Json<EnvironmentResponse>, ApiError> {
+    let environment = state
+        .db
+        .set_environment_auto_reconcile(&project_id, &slug, false)
+        .await?;
+    info!(
+        project_id = %environment.project_ref,
+        environment = %environment.slug,
+        "paused automatic reconciliation"
+    );
+    Ok(Json(EnvironmentResponse { environment }))
+}
+
+async fn environment_resume(
+    State(state): State<AppState>,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Json<EnvironmentResponse>, ApiError> {
+    let environment = state
+        .db
+        .set_environment_auto_reconcile(&project_id, &slug, true)
+        .await?;
+    info!(
+        project_id = %environment.project_ref,
+        environment = %environment.slug,
+        "resumed automatic reconciliation"
     );
     Ok(Json(EnvironmentResponse { environment }))
 }

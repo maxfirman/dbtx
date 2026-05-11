@@ -330,6 +330,28 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn environment_pause(
+        &self,
+        project_id: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentResponse> {
+        self.send(self.http.post(self.url(&format!(
+            "/v1/projects/{project_id}/environments/{slug}/pause"
+        ))))
+        .await
+    }
+
+    pub async fn environment_resume(
+        &self,
+        project_id: &str,
+        slug: &str,
+    ) -> AppResult<EnvironmentResponse> {
+        self.send(self.http.post(self.url(&format!(
+            "/v1/projects/{project_id}/environments/{slug}/resume"
+        ))))
+        .await
+    }
+
     pub async fn invocation_create(
         &self,
         request: InvocationCreateApiRequest,

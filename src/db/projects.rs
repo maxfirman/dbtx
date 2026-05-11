@@ -189,7 +189,7 @@ impl Db {
             )
             VALUES ($1, $2, $3, 'loading_git')
             RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
-                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                auto_reconcile, immutable, adapter_type, schema_name, threads, profile_config,
                 profile_secrets, branch_options, commit_options, status, validation_error,
                 validation_invocation_id, created_at, updated_at, validated_at
             "#,
@@ -206,7 +206,7 @@ impl Db {
         let row = sqlx::query(
             r#"
             SELECT id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
-                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                auto_reconcile, immutable, adapter_type, schema_name, threads, profile_config,
                 profile_secrets, branch_options, commit_options, status, validation_error,
                 validation_invocation_id, created_at, updated_at, validated_at
             FROM environment_onboarding_drafts
@@ -233,7 +233,7 @@ impl Db {
                 git_branch = $3,
                 git_commit_sha = $4,
                 use_latest_commit = $5,
-                auto_deploy = $6,
+                auto_reconcile = $6,
                 immutable = $7,
                 adapter_type = $8,
                 schema_name = $9,
@@ -244,7 +244,7 @@ impl Db {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
-                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                auto_reconcile, immutable, adapter_type, schema_name, threads, profile_config,
                 profile_secrets, branch_options, commit_options, status, validation_error,
                 validation_invocation_id, created_at, updated_at, validated_at
             "#,
@@ -254,7 +254,7 @@ impl Db {
         .bind(input.git_branch.as_deref())
         .bind(input.git_commit_sha.as_deref())
         .bind(input.use_latest_commit)
-        .bind(input.auto_deploy)
+        .bind(input.auto_reconcile)
         .bind(input.immutable)
         .bind(input.adapter_type.as_deref())
         .bind(input.schema_name.as_deref())
@@ -281,7 +281,7 @@ impl Db {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
-                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                auto_reconcile, immutable, adapter_type, schema_name, threads, profile_config,
                 profile_secrets, branch_options, commit_options, status, validation_error,
                 validation_invocation_id, created_at, updated_at, validated_at
             "#,
@@ -307,7 +307,7 @@ impl Db {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
-                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                auto_reconcile, immutable, adapter_type, schema_name, threads, profile_config,
                 profile_secrets, branch_options, commit_options, status, validation_error,
                 validation_invocation_id, created_at, updated_at, validated_at
             "#,
@@ -353,7 +353,7 @@ impl Db {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING id, project_id, slug, git_branch, git_commit_sha, use_latest_commit,
-                auto_deploy, immutable, adapter_type, schema_name, threads, profile_config,
+                auto_reconcile, immutable, adapter_type, schema_name, threads, profile_config,
                 profile_secrets, branch_options, commit_options, status, validation_error,
                 validation_invocation_id, created_at, updated_at, validated_at
             "#,
@@ -386,7 +386,7 @@ impl Db {
             git_branch: draft.git_branch.clone(),
             git_commit_sha: draft.git_commit_sha.clone(),
             use_latest_commit: draft.use_latest_commit,
-            auto_deploy: draft.auto_deploy,
+            auto_reconcile: draft.auto_reconcile,
             immutable: draft.immutable,
             pr_number: None,
             status: "active".to_string(),

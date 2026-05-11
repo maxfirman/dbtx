@@ -34,7 +34,7 @@ impl Db {
             r#"
             INSERT INTO environments (
                 project_id, slug, profile_name, target_name, baseline_environment_id, git_branch, git_commit_sha,
-                use_latest_commit, auto_deploy, immutable, pr_number, status, adapter_type,
+                use_latest_commit, auto_reconcile, immutable, pr_number, status, adapter_type,
                 worker_queue, schema_name, threads, profile_config, profile_secrets
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
@@ -49,7 +49,7 @@ impl Db {
         .bind(input.git_branch.as_deref())
         .bind(input.git_commit_sha.as_deref())
         .bind(input.use_latest_commit)
-        .bind(input.auto_deploy)
+        .bind(input.auto_reconcile)
         .bind(input.immutable)
         .bind(input.pr_number)
         .bind(&input.status)
@@ -103,7 +103,7 @@ impl Db {
         let use_latest_commit = input
             .use_latest_commit
             .unwrap_or(existing.use_latest_commit);
-        let auto_deploy = input.auto_deploy.unwrap_or(existing.auto_deploy);
+        let auto_reconcile = input.auto_reconcile.unwrap_or(existing.auto_reconcile);
         let immutable = input.immutable.unwrap_or(existing.immutable);
         validate_environment_git_metadata(&project, &existing.slug, git_commit_sha.as_deref())?;
         let adapter_type = input
@@ -156,7 +156,7 @@ impl Db {
                 git_branch = $4,
                 git_commit_sha = $5,
                 use_latest_commit = $6,
-                auto_deploy = $7,
+                auto_reconcile = $7,
                 immutable = $8,
                 pr_number = $9,
                 status = $10,
@@ -177,7 +177,7 @@ impl Db {
         .bind(git_branch.as_deref())
         .bind(git_commit_sha.as_deref())
         .bind(use_latest_commit)
-        .bind(auto_deploy)
+        .bind(auto_reconcile)
         .bind(immutable)
         .bind(input.pr_number.or(existing.pr_number))
         .bind(&status)
@@ -258,11 +258,11 @@ impl Db {
         rows.iter().map(environment_record_from_row).collect()
     }
 
-    pub(crate) async fn list_auto_deploy_remote_environments(
+    pub(crate) async fn list_auto_reconcile_remote_environments(
         &self,
     ) -> AppResult<Vec<EnvironmentRecord>> {
         let query = environment_query(
-            "WHERE p.mode = 'remote' AND e.auto_deploy = TRUE AND e.status = 'active' ORDER BY p.project_id ASC, e.slug ASC",
+            "WHERE p.mode = 'remote' AND e.auto_reconcile = TRUE AND e.status = 'active' ORDER BY p.project_id ASC, e.slug ASC",
         );
         let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
         rows.iter().map(environment_record_from_row).collect()
@@ -280,7 +280,7 @@ impl Db {
         let rows = sqlx::query(
             r#"
             SELECT id, environment_id, project_id, recorded_at, reason, git_branch, git_commit_sha,
-                   use_latest_commit, auto_deploy, immutable, baseline_environment_id, metadata
+                   use_latest_commit, auto_reconcile, immutable, baseline_environment_id, metadata
             FROM environment_versions
             WHERE environment_id = $1
             ORDER BY id DESC
@@ -308,7 +308,7 @@ impl Db {
         let version = sqlx::query(
             r#"
             SELECT id, environment_id, project_id, recorded_at, reason, git_branch, git_commit_sha,
-                   use_latest_commit, auto_deploy, immutable, baseline_environment_id, metadata
+                   use_latest_commit, auto_reconcile, immutable, baseline_environment_id, metadata
             FROM environment_versions
             WHERE id = $1 AND environment_id = $2
             "#,
@@ -402,5 +402,20 @@ impl Db {
             .iter()
             .map(active_environment_resource_from_row)
             .collect())
+    }
+
+    pub(crate) async fn set_environment_auto_reconcile(
+        &self,
+        project: &str,
+        slug: &str,
+        auto_reconcile: bool,
+    ) -> AppResult<EnvironmentRecord> {
+        let environment = self.get_environment(project, slug).await?;
+        sqlx::query("UPDATE environments SET auto_reconcile = $2 WHERE id = $1")
+            .bind(environment.id)
+            .bind(auto_reconcile)
+            .execute(&self.pool)
+            .await?;
+        self.get_environment_by_id(environment.id).await
     }
 }

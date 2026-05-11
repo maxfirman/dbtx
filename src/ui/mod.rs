@@ -102,6 +102,14 @@ pub fn router() -> Router<AppState> {
             post(environment_reconcile),
         )
         .route(
+            "/ui/projects/{project_id}/environments/{slug}/pause",
+            post(ui_environment_pause),
+        )
+        .route(
+            "/ui/projects/{project_id}/environments/{slug}/resume",
+            post(ui_environment_resume),
+        )
+        .route(
             "/ui/projects/{project_id}/environments/{slug}/plans/{plan_id}/admit",
             post(environment_plan_admit),
         )
@@ -353,7 +361,7 @@ struct EnvironmentDraftForm {
     git_branch: String,
     git_commit_sha: String,
     use_latest_commit: Option<String>,
-    auto_deploy: Option<String>,
+    auto_reconcile: Option<String>,
     immutable: Option<String>,
     adapter_type: String,
     schema_name: String,
@@ -663,7 +671,7 @@ fn environment_draft_update_request(
             Some(form.git_commit_sha)
         },
         use_latest_commit: form.use_latest_commit.is_some(),
-        auto_deploy: form.auto_deploy.is_some(),
+        auto_reconcile: form.auto_reconcile.is_some(),
         immutable: form.immutable.is_some(),
         adapter_type: form.adapter_type,
         schema_name: form.schema_name,
@@ -1689,6 +1697,40 @@ async fn environment_reconcile(
     Ok(Redirect::to(&format!("/ui/projects/{project_id}/environments/{slug}")).into_response())
 }
 
+async fn ui_environment_pause(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Response, UiError> {
+    state
+        .db()
+        .set_environment_auto_reconcile(&project_id, &slug, false)
+        .await?;
+    if is_htmx(&headers) {
+        return environment_detail_panel(State(state), Path((project_id, slug)))
+            .await
+            .map(IntoResponse::into_response);
+    }
+    Ok(Redirect::to(&format!("/ui/projects/{project_id}/environments/{slug}")).into_response())
+}
+
+async fn ui_environment_resume(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project_id, slug)): Path<(String, String)>,
+) -> Result<Response, UiError> {
+    state
+        .db()
+        .set_environment_auto_reconcile(&project_id, &slug, true)
+        .await?;
+    if is_htmx(&headers) {
+        return environment_detail_panel(State(state), Path((project_id, slug)))
+            .await
+            .map(IntoResponse::into_response);
+    }
+    Ok(Redirect::to(&format!("/ui/projects/{project_id}/environments/{slug}")).into_response())
+}
+
 async fn environment_plan_admit(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1811,6 +1853,8 @@ async fn load_environment_panel(
         is_remote: project.mode == "remote",
         panel_url: format!("/ui/projects/{project_id}/environments/{slug}/panel"),
         reconcile_url: format!("/ui/projects/{project_id}/environments/{slug}/reconcile"),
+        pause_url: format!("/ui/projects/{project_id}/environments/{slug}/pause"),
+        resume_url: format!("/ui/projects/{project_id}/environments/{slug}/resume"),
     })
 }
 
@@ -2128,7 +2172,7 @@ struct EnvironmentDraftView {
     git_commit_sha: String,
     latest_commit_sha: String,
     use_latest_commit: bool,
-    auto_deploy: bool,
+    auto_reconcile: bool,
     immutable: bool,
     adapter_type: String,
     schema_name: String,
@@ -2223,6 +2267,7 @@ struct EnvironmentDetailView {
     status_class: &'static str,
     git_branch: String,
     git_commit_sha: String,
+    auto_reconcile: bool,
 }
 
 #[derive(Clone)]
@@ -2492,7 +2537,7 @@ fn environment_draft_view(
         git_commit_sha: draft.git_commit_sha.clone().unwrap_or_default(),
         latest_commit_sha: draft.git_commit_sha.clone().unwrap_or_default(),
         use_latest_commit: draft.use_latest_commit,
-        auto_deploy: draft.auto_deploy,
+        auto_reconcile: draft.auto_reconcile,
         immutable: draft.immutable,
         adapter_type: draft
             .adapter_type
@@ -2613,6 +2658,7 @@ fn environment_detail_view(environment: &EnvironmentRecord) -> EnvironmentDetail
         status: environment.status.to_string(),
         git_branch: environment.git_branch.clone().unwrap_or_default(),
         git_commit_sha: environment.git_commit_sha.clone().unwrap_or_default(),
+        auto_reconcile: environment.auto_reconcile,
     }
 }
 
@@ -3177,6 +3223,8 @@ struct EnvironmentPanelTemplate {
     is_remote: bool,
     panel_url: String,
     reconcile_url: String,
+    pause_url: String,
+    resume_url: String,
 }
 
 #[derive(Template)]
@@ -5096,6 +5144,7 @@ mod tests {
                 status_class: "bg-emerald-100 text-emerald-800",
                 git_branch: "main".to_string(),
                 git_commit_sha: "aaaaaaaa".to_string(),
+                auto_reconcile: true,
             },
             summary: EnvironmentReconciliationSummaryView {
                 state: "drift detected".to_string(),
@@ -5196,6 +5245,8 @@ mod tests {
             is_remote: true,
             panel_url: "/ui/projects/prj_123/environments/prod/panel".to_string(),
             reconcile_url: "/ui/projects/prj_123/environments/prod/reconcile".to_string(),
+            pause_url: "/ui/projects/prj_123/environments/prod/pause".to_string(),
+            resume_url: "/ui/projects/prj_123/environments/prod/resume".to_string(),
         }
         .render()
         .expect("render environment panel");

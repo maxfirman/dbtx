@@ -5183,7 +5183,7 @@ async fn environment_draft_api_round_trip_and_confirms_validated_draft() {
         Some(head_sha.as_str())
     );
     assert!(!confirmed.environment.use_latest_commit);
-    assert!(confirmed.environment.auto_deploy);
+    assert!(confirmed.environment.auto_reconcile);
 }
 
 #[tokio::test]
@@ -6445,7 +6445,7 @@ async fn bootstrap_remote_project_and_env_direct(
         r#"
         INSERT INTO environments (
             project_id, slug, profile_name, target_name, git_branch, git_commit_sha,
-            use_latest_commit, auto_deploy, immutable, status, adapter_type, worker_queue,
+            use_latest_commit, auto_reconcile, immutable, status, adapter_type, worker_queue,
             schema_name, threads, profile_config, profile_secrets, metadata
         )
         VALUES ($1, $2, $3, 'dev', 'main', $4, false, true, false, 'active', 'duckdb', 'generic',
@@ -6469,7 +6469,7 @@ async fn bootstrap_remote_project_and_env_direct(
         r#"
         INSERT INTO environment_versions (
             environment_id, project_id, reason, git_branch, git_commit_sha,
-            use_latest_commit, auto_deploy, immutable, baseline_environment_id, metadata
+            use_latest_commit, auto_reconcile, immutable, baseline_environment_id, metadata
         )
         VALUES ($1, $2, 'created', 'main', $3, false, true, false, NULL, '{}'::jsonb)
         ON CONFLICT DO NOTHING
@@ -6532,7 +6532,7 @@ fn environment_draft_update_request(
         git_branch: Some(git_branch.to_string()),
         git_commit_sha: git_commit_sha.map(ToString::to_string),
         use_latest_commit,
-        auto_deploy: true,
+        auto_reconcile: true,
         immutable: false,
         adapter_type: "duckdb".to_string(),
         schema_name: "main".to_string(),

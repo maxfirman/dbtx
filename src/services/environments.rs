@@ -240,7 +240,7 @@ impl<'a> EnvironmentService<'a> {
                     git_branch: request.git_branch,
                     git_commit_sha: request.git_commit_sha,
                     use_latest_commit: request.use_latest_commit,
-                    auto_deploy: request.auto_deploy,
+                    auto_reconcile: request.auto_reconcile,
                     immutable: request.immutable,
                     adapter_type: Some(request.adapter_type),
                     schema_name: Some(request.schema_name),

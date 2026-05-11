@@ -211,7 +211,7 @@ pub struct EnvironmentDraftUpdateRequest {
     pub git_branch: Option<String>,
     pub git_commit_sha: Option<String>,
     pub use_latest_commit: bool,
-    pub auto_deploy: bool,
+    pub auto_reconcile: bool,
     pub immutable: bool,
     pub adapter_type: String,
     pub schema_name: String,

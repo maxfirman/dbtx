@@ -1005,7 +1005,7 @@ async fn bootstrap_remote_project_and_env(
         r#"
         INSERT INTO environments (
             project_id, slug, profile_name, target_name, git_branch, git_commit_sha,
-            use_latest_commit, auto_deploy, immutable, status, adapter_type, worker_queue,
+            use_latest_commit, auto_reconcile, immutable, status, adapter_type, worker_queue,
             schema_name, threads, profile_config, profile_secrets, metadata
         )
         VALUES ($1, $2, $3, 'dev', 'main', $4, false, true, false, 'active', 'duckdb', 'generic',
@@ -1031,7 +1031,7 @@ async fn bootstrap_remote_project_and_env(
         r#"
         INSERT INTO environment_versions (
             environment_id, project_id, reason, git_branch, git_commit_sha,
-            use_latest_commit, auto_deploy, immutable, baseline_environment_id, metadata
+            use_latest_commit, auto_reconcile, immutable, baseline_environment_id, metadata
         )
         VALUES ($1, $2, 'created', 'main', $3, false, true, false, NULL, '{}'::jsonb)
         ON CONFLICT DO NOTHING
