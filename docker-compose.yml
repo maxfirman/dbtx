@@ -29,6 +29,7 @@ services:
         condition: service_healthy
     environment:
       DBTX_DATABASE_URL: postgres://dbtx:dbtx@postgres:5432/dbtx
+      NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
       RUST_LOG: dbtx=info
     command:
       - cargo
@@ -56,6 +57,7 @@ services:
     environment:
       DBTX_DATABASE_URL: postgres://dbtx:dbtx@postgres:5432/dbtx
       DBTX_SECRET_KEY: local-dev-secret-key
+      NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
       RUST_LOG: dbtx=info
     command:
       - cargo
@@ -92,6 +94,7 @@ services:
     environment:
       DBTX_DATABASE_URL: postgres://dbtx:dbtx@postgres:5432/dbtx
       DBTX_SECRET_KEY: local-dev-secret-key
+      NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
       RUST_LOG: dbtx=info
     command:
       - cargo
@@ -119,6 +122,7 @@ services:
     environment:
       DBTX_SERVICE_URL: http://server:8585
       DBTX_DBT_PATH: /usr/local/bin/dbt
+      NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
       RUST_LOG: dbtx=info
     command:
       - cargo

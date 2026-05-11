@@ -9,6 +9,8 @@ RUN apt-get update \
         git \
         jq \
         ncat \
+        nodejs \
+        npm \
         openssh-client \
         pkg-config \
         libssl-dev \
