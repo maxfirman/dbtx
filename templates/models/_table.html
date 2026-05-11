@@ -4,6 +4,7 @@
       <tr>
         <th class="px-5 py-3 font-medium">Name</th>
         <th class="px-5 py-3 font-medium">Type</th>
+        <th class="px-5 py-3 font-medium">State</th>
         <th class="px-5 py-3 font-medium">Package</th>
         <th class="px-5 py-3 font-medium">Materialization</th>
         <th class="px-5 py-3 font-medium">Status</th>
@@ -22,6 +23,12 @@
           {% endif %}
         </td>
         <td class="px-5 py-3"><span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">{{ model.resource_type }}</span></td>
+        <td class="px-5 py-3">
+          <span class="inline-flex items-center gap-1.5">
+            <span class="inline-block h-2 w-2 rounded-full {% if model.code_state == "reconciled" %}bg-emerald-400{% else if model.code_state == "stale" %}bg-amber-400{% else %}bg-slate-300{% endif %}" title="Code: {{ model.code_tooltip }}"></span>
+            <span class="inline-block h-2 w-2 rounded-full {% if model.source_state == "reconciled" %}bg-emerald-400{% else if model.source_state == "stale" %}bg-amber-400{% else %}bg-slate-200{% endif %}" title="Source: {{ model.source_tooltip }}"></span>
+          </span>
+        </td>
         <td class="px-5 py-3 text-slate-600">{{ model.package_name }}</td>
         <td class="px-5 py-3 text-slate-600">{{ model.materialized }}</td>
         <td class="px-5 py-3"><span class="rounded-full px-2.5 py-1 text-xs font-medium {{ model.status_class }}">{{ model.status }}</span></td>

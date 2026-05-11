@@ -7,8 +7,8 @@ use crate::api::{
 use crate::db::{
     DraftStatus, EnvironmentActiveResourceRecord, EnvironmentActualStateRecord,
     EnvironmentReconcilePreparationRecord, EnvironmentRecord, EnvironmentRunPlanRecord,
-    EnvironmentVersionRecord, InvocationListFilters, NodeExecutionStatus, PlanStatus,
-    PreparationStatus, ProjectRecord,
+    EnvironmentVersionRecord, InvocationListFilters, NodeExecutionStatus, NodeReconcileState,
+    PlanStatus, PreparationStatus, ProjectRecord,
 };
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
@@ -3260,6 +3260,10 @@ struct ModelSummaryViewItem {
     finished_at: String,
     last_success_at: String,
     detail_url: String,
+    code_state: &'static str,
+    code_tooltip: String,
+    source_state: &'static str,
+    source_tooltip: String,
 }
 
 struct ModelTabView {
@@ -3593,25 +3597,42 @@ async fn models_index(
             let raw = db
                 .list_models_for_environment(project.id, env.id, &query.resource_type)
                 .await?;
+            let model_ids: Vec<String> = raw.iter().map(|m| m.unique_id.clone()).collect();
+            let reconcile_states = db
+                .load_node_reconciliation_state(project.id, env.id, &model_ids)
+                .await?;
+            let reconcile_map: std::collections::HashMap<&str, &NodeReconcileState> =
+                reconcile_states
+                    .iter()
+                    .map(|s| (s.unique_id.as_str(), s))
+                    .collect();
             models = raw
                 .iter()
-                .map(|m| ModelSummaryViewItem {
-                    name: m.node_name.clone().unwrap_or_else(|| m.unique_id.clone()),
-                    node_path: m.node_path.clone().unwrap_or_default(),
-                    resource_type: m.resource_type.clone().unwrap_or_default(),
-                    package_name: m.package_name.clone().unwrap_or_default(),
-                    materialized: m.materialized.clone().unwrap_or_default(),
-                    status: m.status.clone().unwrap_or("unknown".into()),
-                    status_class: model_status_class(m.status.as_deref().unwrap_or("")).to_string(),
-                    schema: m.relation_schema.clone().unwrap_or_default(),
-                    finished_at: fmt_opt_time(m.finished_at),
-                    last_success_at: fmt_opt_time(m.last_success_at),
-                    detail_url: format!(
-                        "/ui/catalog/{}/{}/{}",
-                        pid,
-                        slug,
-                        urlencoding::encode(&m.unique_id)
-                    ),
+                .map(|m| {
+                    let rs = reconcile_map.get(m.unique_id.as_str());
+                    ModelSummaryViewItem {
+                        name: m.node_name.clone().unwrap_or_else(|| m.unique_id.clone()),
+                        node_path: m.node_path.clone().unwrap_or_default(),
+                        resource_type: m.resource_type.clone().unwrap_or_default(),
+                        package_name: m.package_name.clone().unwrap_or_default(),
+                        materialized: m.materialized.clone().unwrap_or_default(),
+                        status: m.status.clone().unwrap_or("unknown".into()),
+                        status_class: model_status_class(m.status.as_deref().unwrap_or(""))
+                            .to_string(),
+                        schema: m.relation_schema.clone().unwrap_or_default(),
+                        finished_at: fmt_opt_time(m.finished_at),
+                        last_success_at: fmt_opt_time(m.last_success_at),
+                        detail_url: format!(
+                            "/ui/catalog/{}/{}/{}",
+                            pid,
+                            slug,
+                            urlencoding::encode(&m.unique_id)
+                        ),
+                        code_state: rs.map(|r| r.code_state.as_str()).unwrap_or("unknown"),
+                        code_tooltip: rs.map(|r| r.code_tooltip.clone()).unwrap_or_default(),
+                        source_state: rs.map(|r| r.source_state.as_str()).unwrap_or("no_sources"),
+                        source_tooltip: rs.map(|r| r.source_tooltip.clone()).unwrap_or_default(),
+                    }
                 })
                 .collect();
         }
@@ -4217,6 +4238,22 @@ async fn render_lineage_tab(
         }
     }
 
+    // Load reconciliation state for all visible nodes
+    let visible_ids: Vec<String> = lineage
+        .nodes
+        .iter()
+        .filter(|n| !test_ids.contains(n.unique_id.as_str()))
+        .map(|n| n.unique_id.clone())
+        .collect();
+    let reconcile_states = db
+        .load_node_reconciliation_state(project.id, env.id, &visible_ids)
+        .await?;
+    let reconcile_map: std::collections::HashMap<&str, &crate::db::NodeReconcileState> =
+        reconcile_states
+            .iter()
+            .map(|s| (s.unique_id.as_str(), s))
+            .collect();
+
     let nodes_json: Vec<Value> = lineage
         .nodes
         .iter()
@@ -4226,6 +4263,7 @@ async fn render_lineage_tab(
                 .get(n.unique_id.as_str())
                 .copied()
                 .unwrap_or((0, 0));
+            let reconcile = reconcile_map.get(n.unique_id.as_str());
             serde_json::json!({
                 "id": n.unique_id,
                 "data": {
@@ -4237,6 +4275,12 @@ async fn render_lineage_tab(
                     "package_name": n.package_name,
                     "testsPassing": pass,
                     "testsFailing": fail,
+                    "reconcileState": {
+                        "code": reconcile.map(|r| r.code_state.as_str()).unwrap_or("unknown"),
+                        "codeTooltip": reconcile.map(|r| r.code_tooltip.as_str()).unwrap_or(""),
+                        "source": reconcile.map(|r| r.source_state.as_str()).unwrap_or("no_sources"),
+                        "sourceTooltip": reconcile.map(|r| r.source_tooltip.as_str()).unwrap_or(""),
+                    }
                 }
             })
         })

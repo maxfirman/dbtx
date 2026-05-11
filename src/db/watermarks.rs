@@ -498,6 +498,231 @@ impl Db {
         .await?;
         Ok(())
     }
+
+    /// Load reconciliation state (code + source) for a set of nodes.
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn load_node_reconciliation_state(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        unique_ids: &[String],
+    ) -> AppResult<Vec<NodeReconcileState>> {
+        if unique_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let target_run_id: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT r.run_id
+            FROM runs r
+            JOIN manifest_snapshots ms ON ms.run_id = r.run_id
+            WHERE r.project_id = $1 AND r.environment_id = $2
+            ORDER BY r.id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(target_run_id) = target_run_id else {
+            return Ok(unique_ids
+                .iter()
+                .map(|uid| NodeReconcileState {
+                    unique_id: uid.clone(),
+                    code_state: ReconcileIndicator::Unknown,
+                    code_tooltip: "No target manifest available".to_string(),
+                    source_state: ReconcileIndicator::NoSources,
+                    source_tooltip: "No tracked sources".to_string(),
+                })
+                .collect());
+        };
+
+        // Code state: current_node_state.checksum vs manifest_nodes.checksum
+        let code_rows = sqlx::query(
+            r#"
+            SELECT
+                mn.unique_id,
+                mn.checksum AS target_checksum,
+                cns.checksum AS current_checksum
+            FROM manifest_nodes mn
+            LEFT JOIN current_node_state cns
+                ON cns.project_id = $2
+               AND cns.environment_id = $3
+               AND cns.unique_id = mn.unique_id
+            WHERE mn.run_id = $1
+              AND mn.unique_id = ANY($4)
+            "#,
+        )
+        .bind(target_run_id)
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(unique_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut code_map: BTreeMap<String, (ReconcileIndicator, String)> = BTreeMap::new();
+        for row in &code_rows {
+            let uid: String = row.get("unique_id");
+            let target: Option<String> = row.get("target_checksum");
+            let current: Option<String> = row.get("current_checksum");
+            let (state, tooltip) = match (&current, &target) {
+                (Some(c), Some(t)) if c == t => {
+                    (ReconcileIndicator::Reconciled, "Matches target".to_string())
+                }
+                (Some(_), Some(_)) => (
+                    ReconcileIndicator::Stale,
+                    "Checksum differs from target".to_string(),
+                ),
+                (None, Some(_)) => (ReconcileIndicator::Stale, "Never executed".to_string()),
+                _ => (
+                    ReconcileIndicator::Unknown,
+                    "No target checksum".to_string(),
+                ),
+            };
+            code_map.insert(uid, (state, tooltip));
+        }
+
+        // Source state: watermarks vs latest source events
+        let source_rows = sqlx::query(
+            r#"
+            SELECT
+                nas.unique_id,
+                nas.source_key,
+                nsw.watermark_event_id,
+                (SELECT MAX(sse.id) FROM source_state_events sse
+                 WHERE sse.project_id = $2
+                   AND sse.environment_id = $3
+                   AND sse.source_key = nas.source_key) AS latest_event_id
+            FROM node_ancestor_sources nas
+            LEFT JOIN node_source_watermarks nsw
+                ON nsw.project_id = $2
+               AND nsw.environment_id = $3
+               AND nsw.unique_id = nas.unique_id
+               AND nsw.source_key = nas.source_key
+            WHERE nas.run_id = $1
+              AND nas.unique_id = ANY($4)
+            "#,
+        )
+        .bind(target_run_id)
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(unique_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut source_map: BTreeMap<String, Vec<(String, Option<i64>, Option<i64>)>> =
+            BTreeMap::new();
+        for row in &source_rows {
+            let uid: String = row.get("unique_id");
+            let source_key: String = row.get("source_key");
+            let watermark: Option<i64> = row.get("watermark_event_id");
+            let latest: Option<i64> = row.get("latest_event_id");
+            source_map
+                .entry(uid)
+                .or_default()
+                .push((source_key, watermark, latest));
+        }
+
+        Ok(unique_ids
+            .iter()
+            .map(|uid| {
+                let (code_state, code_tooltip) = code_map
+                    .get(uid)
+                    .cloned()
+                    .unwrap_or((ReconcileIndicator::Unknown, "Not in manifest".to_string()));
+
+                let (source_state, source_tooltip) = match source_map.get(uid) {
+                    None => (
+                        ReconcileIndicator::NoSources,
+                        "No tracked sources".to_string(),
+                    ),
+                    Some(sources) if sources.is_empty() => (
+                        ReconcileIndicator::NoSources,
+                        "No tracked sources".to_string(),
+                    ),
+                    Some(sources) => {
+                        let total = sources.len();
+                        let stale: Vec<_> = sources
+                            .iter()
+                            .filter(|(_, watermark, latest)| match (watermark, latest) {
+                                (Some(w), Some(l)) => w < l,
+                                (None, Some(_)) => true,
+                                _ => false,
+                            })
+                            .collect();
+                        if stale.is_empty() {
+                            (
+                                ReconcileIndicator::Reconciled,
+                                format!("All {} sources current", total),
+                            )
+                        } else {
+                            let details: Vec<String> = stale
+                                .iter()
+                                .take(3)
+                                .map(|(key, w, l)| {
+                                    let behind = l.unwrap_or(0) - w.unwrap_or(0);
+                                    format!("{}: {} behind", short_source_key(key), behind)
+                                })
+                                .collect();
+                            (
+                                ReconcileIndicator::Stale,
+                                format!(
+                                    "Behind {} of {} sources\n{}",
+                                    stale.len(),
+                                    total,
+                                    details.join("\n")
+                                ),
+                            )
+                        }
+                    }
+                };
+
+                NodeReconcileState {
+                    unique_id: uid.clone(),
+                    code_state,
+                    code_tooltip,
+                    source_state,
+                    source_tooltip,
+                }
+            })
+            .collect())
+    }
+}
+
+/// Reconciliation indicator state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReconcileIndicator {
+    Reconciled,
+    Stale,
+    Unknown,
+    NoSources,
+}
+
+impl ReconcileIndicator {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Reconciled => "reconciled",
+            Self::Stale => "stale",
+            Self::Unknown => "unknown",
+            Self::NoSources => "no_sources",
+        }
+    }
+}
+
+/// Per-node reconciliation state for UI display.
+#[derive(Debug, Clone)]
+pub(crate) struct NodeReconcileState {
+    pub(crate) unique_id: String,
+    pub(crate) code_state: ReconcileIndicator,
+    pub(crate) code_tooltip: String,
+    pub(crate) source_state: ReconcileIndicator,
+    pub(crate) source_tooltip: String,
+}
+
+fn short_source_key(key: &str) -> &str {
+    key.rsplit('.').next().unwrap_or(key)
 }
 
 #[cfg(test)]

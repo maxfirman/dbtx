@@ -10,6 +10,14 @@
     fail: '#ef4444',
     skipped: '#94a3b8',
   };
+
+  const reconcileColors: Record<string, string> = {
+    reconciled: '#22c55e',
+    stale: '#f59e0b',
+    unknown: '#94a3b8',
+    no_sources: '#e2e8f0',
+  };
+
   let hovered = $state(false);
   let borderColor = $derived(data.isCurrent ? '#3b82f6' : hovered ? '#93c5fd' : '#e2e8f0');
   let borderWidth = $derived(data.isCurrent ? '2px' : '1px');
@@ -17,6 +25,11 @@
   let testsPassing = $derived((data.testsPassing as number) || 0);
   let testsFailing = $derived((data.testsFailing as number) || 0);
   let hasTests = $derived(testsPassing > 0 || testsFailing > 0);
+
+  let rs = $derived((data.reconcileState as any) || null);
+  let codeColor = $derived(rs ? (reconcileColors[rs.code] || '#94a3b8') : '#e2e8f0');
+  let sourceColor = $derived(rs ? (reconcileColors[rs.source] || '#e2e8f0') : '#e2e8f0');
+  let hasReconcileState = $derived(rs && (rs.code !== 'unknown' || rs.source !== 'no_sources'));
 </script>
 
 <Handle type="target" position={Position.Left} />
@@ -48,7 +61,7 @@
       <span>· {data.materialized}</span>
     {/if}
   </div>
-  {#if hasTests}
+  {#if hasReconcileState || hasTests}
     <div style="
       margin-top:6px;
       padding-top:5px;
@@ -59,6 +72,16 @@
       font-size:10px;
       font-weight:500;
     ">
+      {#if hasReconcileState}
+        <span style="display:flex;align-items:center;gap:3px;" title="Code: {rs?.codeTooltip || ''}">
+          <span style="width:7px;height:7px;border-radius:50%;background:{codeColor};"></span>
+          <span style="color:#64748b;font-size:9px;">C</span>
+        </span>
+        <span style="display:flex;align-items:center;gap:3px;" title="Source: {rs?.sourceTooltip || ''}">
+          <span style="width:7px;height:7px;border-radius:50%;background:{sourceColor};"></span>
+          <span style="color:#64748b;font-size:9px;">S</span>
+        </span>
+      {/if}
       {#if testsPassing > 0}
         <span style="display:flex;align-items:center;gap:2px;color:#16a34a;">
           <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M13.5 4.5L6.5 11.5L2.5 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>

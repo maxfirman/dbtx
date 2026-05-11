@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 mod records;
 pub use records::*;
+pub(crate) use watermarks::NodeReconcileState;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
