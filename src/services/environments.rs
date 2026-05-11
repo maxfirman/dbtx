@@ -118,11 +118,21 @@ impl<'a> EnvironmentService<'a> {
                 if source_event_ids.is_empty() {
                     return Ok(plan);
                 }
+                let source_keys: Vec<String> = plan
+                    .metadata
+                    .get("source_keys")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(ToString::to_string))
+                    .collect();
                 let mut metadata = plan.metadata.clone();
                 metadata["last_replanned_at"] = Value::String(chrono::Utc::now().to_rfc3339());
-                metadata["replanning_mode"] =
-                    Value::String("source_state_satisfaction".to_string());
-                let satisfied = self
+                metadata["replanning_mode"] = Value::String("watermark_stale_replan".to_string());
+
+                // Fast-path: check if the old satisfaction table already marks these satisfied
+                // (from a prior successful plan completion via mark_source_state_event_satisfied_in_tx)
+                let already_satisfied = self
                     .db
                     .are_source_state_events_satisfied(
                         plan.project_id,
@@ -130,12 +140,53 @@ impl<'a> EnvironmentService<'a> {
                         &source_event_ids,
                     )
                     .await?;
-                if satisfied {
+                if already_satisfied {
                     return self
                         .db
                         .mark_environment_run_plan_completed_noop(
                             plan.plan_id,
                             "source-triggered plan already satisfied by a successful plan",
+                            metadata,
+                        )
+                        .await;
+                }
+
+                let Some(baseline_run_id) = plan.baseline_run_id else {
+                    return Ok(plan);
+                };
+
+                // Re-query stale nodes using current watermark state
+                let stale_nodes = if !source_keys.is_empty() {
+                    self.db
+                        .list_stale_downstream_nodes(
+                            plan.project_id,
+                            plan.environment_id,
+                            &source_keys,
+                            &source_event_ids,
+                            baseline_run_id,
+                        )
+                        .await?
+                } else {
+                    plan.selected_resources.clone()
+                };
+
+                if stale_nodes.is_empty() {
+                    return self
+                        .db
+                        .mark_environment_run_plan_completed_noop(
+                            plan.plan_id,
+                            "all downstream nodes already satisfy source watermarks",
+                            metadata,
+                        )
+                        .await;
+                }
+                if stale_nodes != plan.selected_resources {
+                    return self
+                        .db
+                        .update_environment_run_plan_selection(
+                            plan.plan_id,
+                            Some("source_downstream_stale"),
+                            &stale_nodes,
                             metadata,
                         )
                         .await;
@@ -565,11 +616,14 @@ impl<'a> EnvironmentService<'a> {
                 (
                     "source_state_change",
                     input_fingerprint,
-                    Some("source_downstream".to_string()),
+                    Some("source_downstream_stale".to_string()),
                     self.db
-                        .list_downstream_manifest_node_unique_ids(
-                            source_baseline_run_id,
+                        .list_stale_downstream_nodes(
+                            environment.project_id,
+                            environment.id,
                             &source_keys,
+                            &source_event_ids,
+                            source_baseline_run_id,
                         )
                         .await?,
                     source_events.first().map(|event| event.id),
@@ -577,6 +631,7 @@ impl<'a> EnvironmentService<'a> {
                         "source_keys": source_keys,
                         "source_event_ids": source_event_ids,
                         "source_event_count": source_events.len(),
+                        "planning_mode": "watermark_stale",
                     }),
                 )
             };

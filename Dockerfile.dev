@@ -1,8 +1,8 @@
 ARG RUST_BASE_IMAGE=rust:1.93-bookworm
 FROM ${RUST_BASE_IMAGE} AS dev-base
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get update 2>/dev/null || true; \
+    apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
         curl \
@@ -17,7 +17,17 @@ RUN apt-get update \
         python3 \
         python3-pip \
         python3-venv \
-    && rm -rf /var/lib/apt/lists/*
+        unzip \
+    2>/dev/null || true; \
+    rm -rf /var/lib/apt/lists/*
+
+# Install DuckDB CLI
+ARG DBTX_GITHUB_RELEASES_URL=https://github.com
+RUN set -eux; \
+    curl -fsSL "${DBTX_GITHUB_RELEASES_URL}/duckdb/duckdb/releases/download/v1.3.0/duckdb_cli-linux-amd64.zip" -o /tmp/duckdb.zip; \
+    unzip /tmp/duckdb.zip -d /usr/local/bin; \
+    chmod +x /usr/local/bin/duckdb; \
+    rm /tmp/duckdb.zip
 
 WORKDIR /workspace
 

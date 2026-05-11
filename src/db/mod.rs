@@ -116,6 +116,7 @@ mod models;
 mod projects;
 mod reconciliation;
 mod runs;
+mod watermarks;
 
 fn null_if_empty(value: &str) -> Option<&str> {
     if value.is_empty() { None } else { Some(value) }

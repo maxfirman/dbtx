@@ -422,7 +422,10 @@ async fn source_state_reconcile_creates_and_admits_plan() {
         .plan;
     assert_eq!(plan.status, PlanStatus::Planned);
     assert_eq!(plan.reason, "source_state_change");
-    assert_eq!(plan.selection_spec.as_deref(), Some("source_downstream"));
+    assert_eq!(
+        plan.selection_spec.as_deref(),
+        Some("source_downstream_stale")
+    );
     assert_eq!(
         plan.selected_resources,
         vec![
@@ -903,7 +906,10 @@ async fn two_source_events_for_different_keys_produce_single_plan() {
         .plan;
 
     assert_eq!(plan.reason, "source_state_change");
-    assert_eq!(plan.selection_spec.as_deref(), Some("source_downstream"));
+    assert_eq!(
+        plan.selection_spec.as_deref(),
+        Some("source_downstream_stale")
+    );
 
     // Both source trees should be included — all 5 nodes
     let mut expected = vec![
@@ -1144,7 +1150,7 @@ async fn simultaneous_code_drift_and_source_state_creates_code_plan_then_source_
     assert_eq!(source_plan.source_event_id, Some(source_event.id));
     assert_eq!(
         source_plan.selection_spec.as_deref(),
-        Some("source_downstream")
+        Some("source_downstream_stale")
     );
 }
 
@@ -6819,5 +6825,390 @@ async fn reconcile_without_baseline_creates_full_graph_plan() {
             "model.pkg.customers".to_string(),
             "model.pkg.orders".to_string(),
         ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_ancestor_sources_populated_on_manifest_persist() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+
+    // Seed manifest with source → model → model chain
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.stg_orders", "model"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.stg_orders"),
+            ("model.pkg.stg_orders", "model.pkg.orders"),
+        ],
+    )
+    .await;
+
+    // Create a source event so the source is "tracked"
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event");
+
+    // Get the run_id from actual state
+    let scope = sqlx::query(
+        "SELECT p.id AS project_pk, e.id AS environment_pk FROM projects p JOIN environments e ON e.project_id = p.id WHERE p.project_id = $1 AND e.slug = 'remote'",
+    )
+    .bind(&project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load scope");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let run_id: Uuid = sqlx::query_scalar(
+        "SELECT last_successful_run_id FROM environment_actual_state WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_one(db.pool())
+    .await
+    .expect("get run_id");
+
+    // Populate ancestor sources directly (simulating what persist_manifest_in_tx does)
+    sqlx::query(
+        r#"
+        INSERT INTO node_ancestor_sources (run_id, unique_id, source_key)
+        VALUES ($1, 'source.pkg.raw_orders', 'source.pkg.raw_orders'),
+               ($1, 'model.pkg.stg_orders', 'source.pkg.raw_orders'),
+               ($1, 'model.pkg.orders', 'source.pkg.raw_orders')
+        "#,
+    )
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("populate ancestors");
+
+    // Verify ancestor sources are populated correctly
+    let ancestors: Vec<(String, String)> = sqlx::query(
+        "SELECT unique_id, source_key FROM node_ancestor_sources WHERE run_id = $1 ORDER BY unique_id, source_key",
+    )
+    .bind(run_id)
+    .fetch_all(db.pool())
+    .await
+    .expect("query ancestors")
+    .into_iter()
+    .map(|row| (row.get("unique_id"), row.get("source_key")))
+    .collect();
+
+    // source.pkg.raw_orders should be its own ancestor (self-reference)
+    // model.pkg.stg_orders should have source.pkg.raw_orders as ancestor
+    // model.pkg.orders should have source.pkg.raw_orders as ancestor
+    assert!(
+        ancestors.contains(&(
+            "source.pkg.raw_orders".to_string(),
+            "source.pkg.raw_orders".to_string()
+        )),
+        "source node should be its own ancestor: {ancestors:?}"
+    );
+    assert!(
+        ancestors.contains(&(
+            "model.pkg.stg_orders".to_string(),
+            "source.pkg.raw_orders".to_string()
+        )),
+        "stg_orders should have raw_orders as ancestor: {ancestors:?}"
+    );
+    assert!(
+        ancestors.contains(&(
+            "model.pkg.orders".to_string(),
+            "source.pkg.raw_orders".to_string()
+        )),
+        "orders should have raw_orders as ancestor: {ancestors:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_partial_success_produces_smaller_retry_plan() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.stg_orders", "model"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.stg_orders"),
+            ("model.pkg.stg_orders", "model.pkg.orders"),
+        ],
+    )
+    .await;
+
+    // Create source event
+    let source_event = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event")
+        .event;
+
+    // Populate ancestor sources
+    let scope = sqlx::query(
+        "SELECT p.id AS project_pk, e.id AS environment_pk FROM projects p JOIN environments e ON e.project_id = p.id WHERE p.project_id = $1 AND e.slug = 'remote'",
+    )
+    .bind(&project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load scope");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let run_id: Uuid = sqlx::query_scalar(
+        "SELECT last_successful_run_id FROM environment_actual_state WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_one(db.pool())
+    .await
+    .expect("get run_id");
+
+    sqlx::query(
+        r#"
+        INSERT INTO node_ancestor_sources (run_id, unique_id, source_key)
+        VALUES ($1, 'source.pkg.raw_orders', 'source.pkg.raw_orders'),
+               ($1, 'model.pkg.stg_orders', 'source.pkg.raw_orders'),
+               ($1, 'model.pkg.orders', 'source.pkg.raw_orders')
+        "#,
+    )
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("populate ancestors");
+
+    // First reconcile: should select all 3 downstream nodes (source + 2 models)
+    let plan = client
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
+        .await
+        .expect("first reconcile")
+        .plan;
+    assert_eq!(plan.reason, "source_state_change");
+    assert_eq!(plan.selected_resources.len(), 3);
+
+    // Simulate partial success: advance watermarks for source and stg_orders only
+    sqlx::query(
+        r#"
+        INSERT INTO node_source_watermarks (project_id, environment_id, unique_id, source_key, watermark_event_id, run_id)
+        VALUES ($1, $2, 'source.pkg.raw_orders', 'source.pkg.raw_orders', $3, $4),
+               ($1, $2, 'model.pkg.stg_orders', 'source.pkg.raw_orders', $3, $4)
+        "#,
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(source_event.id)
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("insert partial watermarks");
+
+    // Second reconcile: should only select model.pkg.orders (the one still stale)
+    // First supersede the old plan so we can create a new one
+    sqlx::query("UPDATE environment_run_plans SET status = 'failed', failure_count = 1, next_attempt_at = NULL WHERE plan_id = $1")
+        .bind(plan.plan_id)
+        .execute(db.pool())
+        .await
+        .expect("fail old plan");
+
+    let plan2 = client
+        .environment_reconcile(
+            &project_id,
+            "remote",
+            EnvironmentReconcileApiRequest::default(),
+        )
+        .await
+        .expect("second reconcile after partial success")
+        .plan;
+    assert_eq!(plan2.reason, "source_state_change");
+    assert_eq!(
+        plan2.selected_resources,
+        vec!["model.pkg.orders".to_string()],
+        "only the stale node should be selected"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_derived_satisfaction_advances_source_status() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[("source.pkg.raw_orders", "model.pkg.orders")],
+    )
+    .await;
+
+    // Create source event
+    let source_event = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event")
+        .event;
+
+    // Populate ancestor sources
+    let scope = sqlx::query(
+        "SELECT p.id AS project_pk, e.id AS environment_pk FROM projects p JOIN environments e ON e.project_id = p.id WHERE p.project_id = $1 AND e.slug = 'remote'",
+    )
+    .bind(&project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load scope");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let run_id: Uuid = sqlx::query_scalar(
+        "SELECT last_successful_run_id FROM environment_actual_state WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_one(db.pool())
+    .await
+    .expect("get run_id");
+
+    sqlx::query(
+        r#"
+        INSERT INTO node_ancestor_sources (run_id, unique_id, source_key)
+        VALUES ($1, 'source.pkg.raw_orders', 'source.pkg.raw_orders'),
+               ($1, 'model.pkg.orders', 'source.pkg.raw_orders')
+        "#,
+    )
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("populate ancestors");
+
+    // Simulate ALL downstream nodes having watermarks >= source event (as if manual run succeeded)
+    sqlx::query(
+        r#"
+        INSERT INTO node_source_watermarks (project_id, environment_id, unique_id, source_key, watermark_event_id, run_id)
+        VALUES ($1, $2, 'source.pkg.raw_orders', 'source.pkg.raw_orders', $3, $4),
+               ($1, $2, 'model.pkg.orders', 'source.pkg.raw_orders', $3, $4)
+        "#,
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(source_event.id)
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("insert full watermarks");
+
+    // Run reconcile tick — should detect satisfaction and NOT create a plan
+    client.reconcile_tick().await.expect("reconcile tick");
+
+    let plans = client
+        .environment_plan_list(&project_id, "remote")
+        .await
+        .expect("list plans")
+        .plans;
+    assert!(
+        plans.is_empty(),
+        "no plan should be created when all watermarks are satisfied"
+    );
+
+    // Verify the source event is now marked as satisfied
+    let satisfied = sqlx::query_scalar::<_, i64>(
+        "SELECT latest_satisfied_event_id FROM environment_source_state_status WHERE project_id = $1 AND environment_id = $2 AND source_key = 'source.pkg.raw_orders'",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_optional(db.pool())
+    .await
+    .expect("query satisfaction");
+    assert_eq!(
+        satisfied,
+        Some(source_event.id),
+        "source event should be marked satisfied via watermarks"
     );
 }

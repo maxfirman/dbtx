@@ -694,8 +694,14 @@ impl Db {
         .await?;
 
         if let Some(manifest) = finalization.manifest {
-            self.persist_manifest_in_tx(tx, finalization.run_id, manifest)
-                .await?;
+            self.persist_manifest_in_tx(
+                tx,
+                finalization.run_id,
+                finalization.project_id,
+                finalization.environment_id,
+                manifest,
+            )
+            .await?;
             if should_promote_manifest(finalization.subcommand) {
                 self.promote_manifest_state_in_tx(
                     tx,
@@ -1012,6 +1018,97 @@ impl Db {
             .bind(if promotable { node.finished_at } else { None })
             .execute(&self.pool)
             .await?;
+
+            // Watermark tracking: compute candidates on node start, commit on success
+            self.handle_node_watermark(
+                invocation_id,
+                run_id,
+                project_id,
+                environment_id,
+                &node,
+                promotable,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle watermark computation for a node execution event.
+    /// On node start: compute candidate watermarks from parents and store in staging table.
+    /// On node finish (success): commit candidates to the primary watermark table.
+    /// On node finish (failure): discard candidates.
+    async fn handle_node_watermark(
+        &self,
+        invocation_id: Option<Uuid>,
+        run_id: Uuid,
+        project_id: i64,
+        environment_id: i64,
+        node: &crate::event::NormalizedNodeEvent,
+        promotable: bool,
+    ) -> AppResult<()> {
+        let is_start = node.started_at.is_some() && node.finished_at.is_none();
+        let is_finish = node.finished_at.is_some();
+
+        if is_start {
+            // Check if this node has any tracked ancestor sources
+            let ancestor_sources = self
+                .load_node_ancestor_sources(run_id, &node.unique_id)
+                .await?;
+            if ancestor_sources.is_empty() {
+                return Ok(());
+            }
+
+            // Determine if this node is itself a source node
+            let is_source_node = node
+                .resource_type
+                .as_deref()
+                .is_some_and(|rt| rt == "source");
+
+            let candidates = if is_source_node {
+                // Source node: watermark is the latest event for this source
+                match self
+                    .load_latest_source_event_id(project_id, environment_id, &node.unique_id)
+                    .await?
+                {
+                    Some(candidate) => vec![candidate],
+                    None => Vec::new(),
+                }
+            } else {
+                // Non-source node: watermark = MIN(parent watermarks) per source
+                let parents = self.load_node_parents(run_id, &node.unique_id).await?;
+                if parents.is_empty() {
+                    return Ok(());
+                }
+                self.load_parent_watermarks_min(project_id, environment_id, &parents)
+                    .await?
+            };
+
+            if !candidates.is_empty() {
+                self.insert_watermark_candidates(run_id, &node.unique_id, &candidates)
+                    .await?;
+            }
+        } else if is_finish {
+            if promotable {
+                // Node succeeded: commit candidates to primary watermark table
+                let candidates = self
+                    .load_watermark_candidates(run_id, &node.unique_id)
+                    .await?;
+                if !candidates.is_empty() {
+                    self.commit_node_watermarks(
+                        project_id,
+                        environment_id,
+                        &node.unique_id,
+                        run_id,
+                        invocation_id,
+                        &candidates,
+                    )
+                    .await?;
+                }
+            }
+            // Always clean up candidates (success or failure)
+            self.delete_watermark_candidates(run_id, &node.unique_id)
+                .await?;
         }
 
         Ok(())
@@ -1364,6 +1461,8 @@ impl Db {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         run_id: Uuid,
+        project_id: i64,
+        environment_id: i64,
         manifest: &ManifestSnapshot,
     ) -> AppResult<()> {
         let manifest_raw = serde_json::to_vec(&manifest.raw)?;
@@ -1438,6 +1537,9 @@ impl Db {
             .execute(&mut **tx)
             .await?;
         }
+
+        self.populate_node_ancestor_sources_in_tx(tx, run_id, project_id, environment_id)
+            .await?;
 
         Ok(())
     }

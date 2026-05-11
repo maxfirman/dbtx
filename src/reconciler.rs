@@ -81,6 +81,28 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
             .db()
             .list_unsatisfied_source_state_events(environment.project_id, environment.id)
             .await?;
+
+        // Phase 4: advance source satisfaction from per-node watermarks
+        if !source_events.is_empty() {
+            advance_source_satisfaction_from_watermarks(
+                state,
+                &environment,
+                actual_state.last_successful_run_id,
+                &source_events,
+            )
+            .await?;
+        }
+
+        // Re-query after potential advancement
+        let source_events = if !source_events.is_empty() {
+            state
+                .db()
+                .list_unsatisfied_source_state_events(environment.project_id, environment.id)
+                .await?
+        } else {
+            source_events
+        };
+
         if let Some(next_attempt_at) = automatic_reconcile_backoff_until(
             state,
             &environment,
@@ -357,6 +379,52 @@ pub async fn auto_admit_blocked_plans_for_environment(
     }
 
     Ok(admitted)
+}
+
+/// Check if any unsatisfied source events are now fully satisfied by per-node watermarks.
+/// If so, advance `environment_source_state_status` for those events.
+async fn advance_source_satisfaction_from_watermarks(
+    state: &AppState,
+    environment: &EnvironmentRecord,
+    baseline_run_id: Option<Uuid>,
+    source_events: &[SourceStateEventRecord],
+) -> AppResult<()> {
+    let Some(manifest_run_id) = baseline_run_id else {
+        return Ok(());
+    };
+
+    for event in source_events {
+        let all_satisfied = state
+            .db()
+            .are_all_downstream_nodes_satisfied(
+                environment.project_id,
+                environment.id,
+                &event.source_key,
+                event.id,
+                manifest_run_id,
+            )
+            .await?;
+
+        if all_satisfied {
+            state
+                .db()
+                .advance_source_state_status_from_watermarks(
+                    environment.project_id,
+                    environment.id,
+                    event.id,
+                )
+                .await?;
+            info!(
+                project_id = %environment.project_ref,
+                environment_slug = %environment.slug,
+                source_key = %event.source_key,
+                event_id = event.id,
+                "source event satisfied via per-node watermarks"
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn should_ignore_reconcile_error(err: &AppError) -> bool {
