@@ -672,6 +672,18 @@ impl Db {
                         ReconcileIndicator::NoSources,
                         "No tracked sources".to_string(),
                     ),
+                    // Source nodes don't have upstream sources — they ARE the source
+                    Some(sources) if uid.starts_with("source.") => {
+                        let has_events = sources.iter().any(|(_, _, l)| l.is_some());
+                        if has_events {
+                            (ReconcileIndicator::Reconciled, "Source origin".to_string())
+                        } else {
+                            (
+                                ReconcileIndicator::NoSources,
+                                "No events recorded".to_string(),
+                            )
+                        }
+                    }
                     Some(sources) => {
                         let total = sources.len();
                         let stale: Vec<_> = sources
