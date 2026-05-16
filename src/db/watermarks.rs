@@ -103,7 +103,8 @@ impl Db {
     }
 
     /// Load the current watermarks for a set of parent nodes (all sources they track).
-    /// Returns (source_key, MIN watermark_event_id, MIN-corresponding observed_at) grouped by source.
+    /// For parent nodes that are source nodes without watermarks, falls back to the
+    /// latest source event ID directly (since source nodes don't execute).
     pub(crate) async fn load_parent_watermarks_min(
         &self,
         project_id: i64,
@@ -113,16 +114,45 @@ impl Db {
         if parent_unique_ids.is_empty() {
             return Ok(Vec::new());
         }
+        // Get watermarks from parent nodes that have them, PLUS
+        // fall back to source_state_events for source parents without watermarks
         let rows = sqlx::query(
             r#"
+            WITH parent_watermarks AS (
+                SELECT source_key, watermark_event_id, watermark_observed_at
+                FROM node_source_watermarks
+                WHERE project_id = $1
+                  AND environment_id = $2
+                  AND unique_id = ANY($3::TEXT[])
+            ),
+            source_parent_fallback AS (
+                SELECT
+                    sse.source_key,
+                    MAX(sse.id) AS watermark_event_id,
+                    MAX(sse.observed_at) AS watermark_observed_at
+                FROM source_state_events sse
+                WHERE sse.project_id = $1
+                  AND sse.environment_id = $2
+                  AND sse.source_key = ANY($3::TEXT[])
+                  AND NOT EXISTS (
+                      SELECT 1 FROM node_source_watermarks nsw
+                      WHERE nsw.project_id = $1
+                        AND nsw.environment_id = $2
+                        AND nsw.unique_id = sse.source_key
+                        AND nsw.source_key = sse.source_key
+                  )
+                GROUP BY sse.source_key
+            ),
+            combined AS (
+                SELECT source_key, watermark_event_id, watermark_observed_at FROM parent_watermarks
+                UNION ALL
+                SELECT source_key, watermark_event_id, watermark_observed_at FROM source_parent_fallback
+            )
             SELECT
                 source_key,
                 MIN(watermark_event_id) AS min_event_id,
                 MIN(watermark_observed_at) AS min_observed_at
-            FROM node_source_watermarks
-            WHERE project_id = $1
-              AND environment_id = $2
-              AND unique_id = ANY($3::TEXT[])
+            FROM combined
             GROUP BY source_key
             "#,
         )

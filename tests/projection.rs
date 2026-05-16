@@ -7212,3 +7212,184 @@ async fn watermark_derived_satisfaction_advances_source_status() {
         "source event should be marked satisfied via watermarks"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_advances_through_normal_execution_event_flow() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+
+    // Seed a manifest (simulating a prior successful run)
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[("source.pkg.raw_orders", "model.pkg.orders")],
+    )
+    .await;
+
+    // Create a source event so the source is tracked
+    let source_event = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event")
+        .event;
+
+    // Populate node_ancestor_sources for the existing manifest run
+    let scope = sqlx::query(
+        "SELECT p.id AS project_pk, e.id AS environment_pk FROM projects p JOIN environments e ON e.project_id = p.id WHERE p.project_id = $1 AND e.slug = 'remote'",
+    )
+    .bind(&project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load scope");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let manifest_run_id: Uuid = sqlx::query_scalar(
+        "SELECT last_successful_run_id FROM environment_actual_state WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_one(db.pool())
+    .await
+    .expect("get manifest run_id");
+
+    sqlx::query(
+        r#"
+        INSERT INTO node_ancestor_sources (run_id, unique_id, source_key)
+        VALUES ($1, 'source.pkg.raw_orders', 'source.pkg.raw_orders'),
+               ($1, 'model.pkg.orders', 'source.pkg.raw_orders')
+        "#,
+    )
+    .bind(manifest_run_id)
+    .execute(db.pool())
+    .await
+    .expect("populate ancestors");
+
+    // Verify no watermarks exist yet
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM node_source_watermarks WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_one(db.pool())
+    .await
+    .expect("count watermarks");
+    assert_eq!(count, 0, "no watermarks should exist before execution");
+
+    // Create an invocation and claim it (simulating a build)
+    let created = client
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "remote",
+            InvocationCommandApi::Build,
+        ))
+        .await
+        .expect("create invocation");
+
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim next")
+        .expect("claimed invocation");
+
+    // Send node start event for model.pkg.orders
+    let node_start_event = r#"{"info":{"name":"NodeStart","code":"Q024","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"started","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"","node_relation":{},"node_checksum":"abc123"}}}"#;
+
+    client
+        .invocation_append_events(
+            created.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                events: vec![sample_dbt_log_event(node_start_event)],
+            },
+        )
+        .await
+        .expect("append node start event");
+
+    // Verify candidates were created
+    let candidate_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM node_source_watermark_candidates WHERE unique_id = 'model.pkg.orders'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("count candidates");
+    assert_eq!(
+        candidate_count, 1,
+        "candidate should be created on node start"
+    );
+
+    // Send node finish (success) event for model.pkg.orders
+    let node_finish_event = r#"{"info":{"name":"NodeFinished","code":"Q025","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"success","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"2026-01-01T00:00:01Z","node_relation":{"database":"db","schema":"main","alias":"orders"},"node_checksum":"abc123"},"run_result":{"status":"success","execution_time":1.0}}}"#;
+
+    client
+        .invocation_append_events(
+            created.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                events: vec![sample_dbt_log_event(node_finish_event)],
+            },
+        )
+        .await
+        .expect("append node finish event");
+
+    // Verify watermark was committed
+    let watermark: Option<i64> = sqlx::query_scalar(
+        "SELECT watermark_event_id FROM node_source_watermarks WHERE project_id = $1 AND environment_id = $2 AND unique_id = 'model.pkg.orders' AND source_key = 'source.pkg.raw_orders'",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_optional(db.pool())
+    .await
+    .expect("query watermark");
+    assert_eq!(
+        watermark,
+        Some(source_event.id),
+        "watermark should be advanced to the source event ID after successful node execution"
+    );
+
+    // Verify candidates were cleaned up
+    let candidate_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM node_source_watermark_candidates WHERE unique_id = 'model.pkg.orders'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("count candidates after commit");
+    assert_eq!(
+        candidate_count, 0,
+        "candidates should be cleaned up after commit"
+    );
+}
