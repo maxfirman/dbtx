@@ -1051,9 +1051,30 @@ impl Db {
         let is_finish = node.finished_at.is_some();
 
         if is_start {
+            // Use the latest manifest run for ancestor source lookup, not the current run
+            // (the current run's manifest hasn't been persisted yet during execution)
+            let manifest_run_id: Option<Uuid> = sqlx::query_scalar(
+                r#"
+                SELECT r.run_id
+                FROM runs r
+                JOIN manifest_snapshots ms ON ms.run_id = r.run_id
+                WHERE r.project_id = $1 AND r.environment_id = $2
+                ORDER BY r.id DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(project_id)
+            .bind(environment_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            let Some(manifest_run_id) = manifest_run_id else {
+                return Ok(());
+            };
+
             // Check if this node has any tracked ancestor sources
             let ancestor_sources = self
-                .load_node_ancestor_sources(run_id, &node.unique_id)
+                .load_node_ancestor_sources(manifest_run_id, &node.unique_id)
                 .await?;
             if ancestor_sources.is_empty() {
                 return Ok(());
@@ -1076,7 +1097,9 @@ impl Db {
                 }
             } else {
                 // Non-source node: watermark = MIN(parent watermarks) per source
-                let parents = self.load_node_parents(run_id, &node.unique_id).await?;
+                let parents = self
+                    .load_node_parents(manifest_run_id, &node.unique_id)
+                    .await?;
                 if parents.is_empty() {
                     return Ok(());
                 }
