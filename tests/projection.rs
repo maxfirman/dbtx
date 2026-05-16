@@ -7393,3 +7393,369 @@ async fn watermark_advances_through_normal_execution_event_flow() {
         "candidates should be cleaned up after commit"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_does_not_advance_on_node_failure() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[("source.pkg.raw_orders", "model.pkg.orders")],
+    )
+    .await;
+
+    let _source_event = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event")
+        .event;
+
+    let scope = sqlx::query(
+        "SELECT p.id AS project_pk, e.id AS environment_pk FROM projects p JOIN environments e ON e.project_id = p.id WHERE p.project_id = $1 AND e.slug = 'remote'",
+    )
+    .bind(&project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load scope");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let manifest_run_id: Uuid = sqlx::query_scalar(
+        "SELECT last_successful_run_id FROM environment_actual_state WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_one(db.pool())
+    .await
+    .expect("get manifest run_id");
+
+    sqlx::query(
+        r#"
+        INSERT INTO node_ancestor_sources (run_id, unique_id, source_key)
+        VALUES ($1, 'source.pkg.raw_orders', 'source.pkg.raw_orders'),
+               ($1, 'model.pkg.orders', 'source.pkg.raw_orders')
+        "#,
+    )
+    .bind(manifest_run_id)
+    .execute(db.pool())
+    .await
+    .expect("populate ancestors");
+
+    // Create and claim invocation
+    let created = client
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "remote",
+            InvocationCommandApi::Build,
+        ))
+        .await
+        .expect("create invocation");
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim next")
+        .expect("claimed invocation");
+
+    // Node start
+    let node_start = r#"{"info":{"name":"NodeStart","code":"Q024","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"started","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"","node_relation":{},"node_checksum":"abc123"}}}"#;
+    client
+        .invocation_append_events(
+            created.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                events: vec![sample_dbt_log_event(node_start)],
+            },
+        )
+        .await
+        .expect("append node start");
+
+    // Node finish with ERROR status
+    let node_fail = r#"{"info":{"name":"NodeFinished","code":"Q025","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"error","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"2026-01-01T00:00:01Z","node_relation":{},"node_checksum":"abc123"},"run_result":{"status":"error","execution_time":1.0}}}"#;
+    client
+        .invocation_append_events(
+            created.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                events: vec![sample_dbt_log_event(node_fail)],
+            },
+        )
+        .await
+        .expect("append node fail");
+
+    // Verify NO watermark was written
+    let watermark: Option<i64> = sqlx::query_scalar(
+        "SELECT watermark_event_id FROM node_source_watermarks WHERE project_id = $1 AND environment_id = $2 AND unique_id = 'model.pkg.orders'",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_optional(db.pool())
+    .await
+    .expect("query watermark");
+    assert_eq!(
+        watermark, None,
+        "watermark should NOT advance on node failure"
+    );
+
+    // Verify candidates were cleaned up
+    let candidates: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM node_source_watermark_candidates WHERE unique_id = 'model.pkg.orders'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("count candidates");
+    assert_eq!(
+        candidates, 0,
+        "candidates should be cleaned up after failure"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_monotonic_guard_prevents_regression() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[("source.pkg.raw_orders", "model.pkg.orders")],
+    )
+    .await;
+
+    // Create two source events
+    let event1 = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create event 1")
+        .event;
+    let event2 = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create event 2")
+        .event;
+    assert!(event2.id > event1.id);
+
+    let scope = sqlx::query(
+        "SELECT p.id AS project_pk, e.id AS environment_pk FROM projects p JOIN environments e ON e.project_id = p.id WHERE p.project_id = $1 AND e.slug = 'remote'",
+    )
+    .bind(&project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load scope");
+    let project_pk: i64 = scope.get("project_pk");
+    let environment_pk: i64 = scope.get("environment_pk");
+    let run_id: Uuid = sqlx::query_scalar(
+        "SELECT last_successful_run_id FROM environment_actual_state WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_one(db.pool())
+    .await
+    .expect("get run_id");
+
+    // Manually insert a watermark at event2 (the higher one)
+    sqlx::query(
+        "INSERT INTO node_source_watermarks (project_id, environment_id, unique_id, source_key, watermark_event_id, run_id) VALUES ($1, $2, 'model.pkg.orders', 'source.pkg.raw_orders', $3, $4)",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(event2.id)
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("insert high watermark");
+
+    // Try to commit a LOWER watermark (simulating a slow concurrent execution)
+    sqlx::query(
+        r#"
+        INSERT INTO node_source_watermarks (project_id, environment_id, unique_id, source_key, watermark_event_id, run_id, updated_at)
+        VALUES ($1, $2, 'model.pkg.orders', 'source.pkg.raw_orders', $3, $4, NOW())
+        ON CONFLICT (project_id, environment_id, unique_id, source_key) DO UPDATE SET
+            watermark_event_id = EXCLUDED.watermark_event_id,
+            run_id = EXCLUDED.run_id,
+            updated_at = NOW()
+        WHERE node_source_watermarks.watermark_event_id < EXCLUDED.watermark_event_id
+        "#,
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(event1.id) // lower event
+    .bind(run_id)
+    .execute(db.pool())
+    .await
+    .expect("attempt lower watermark");
+
+    // Verify watermark stayed at the higher value
+    let watermark: i64 = sqlx::query_scalar(
+        "SELECT watermark_event_id FROM node_source_watermarks WHERE project_id = $1 AND environment_id = $2 AND unique_id = 'model.pkg.orders'",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_one(db.pool())
+    .await
+    .expect("query watermark");
+    assert_eq!(
+        watermark, event2.id,
+        "monotonic guard should prevent watermark regression"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn paused_environment_skipped_by_reconciler() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[("source.pkg.raw_orders", "model.pkg.orders")],
+    )
+    .await;
+
+    // Create a source event (would normally trigger reconciliation)
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event");
+
+    // Pause the environment
+    client
+        .environment_pause(&project_id, "remote")
+        .await
+        .expect("pause environment");
+
+    // Run reconcile tick — should NOT create a plan
+    client.reconcile_tick().await.expect("reconcile tick");
+
+    let plans = client
+        .environment_plan_list(&project_id, "remote")
+        .await
+        .expect("list plans")
+        .plans;
+    assert!(
+        plans.is_empty(),
+        "paused environment should not get automatic reconciliation plans"
+    );
+
+    // Resume and reconcile — now it should create a plan
+    client
+        .environment_resume(&project_id, "remote")
+        .await
+        .expect("resume environment");
+
+    client
+        .reconcile_tick()
+        .await
+        .expect("reconcile tick after resume");
+
+    let plans = client
+        .environment_plan_list(&project_id, "remote")
+        .await
+        .expect("list plans after resume")
+        .plans;
+    assert_eq!(
+        plans.len(),
+        1,
+        "resumed environment should get a reconciliation plan"
+    );
+}
