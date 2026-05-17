@@ -312,7 +312,7 @@ impl InvocationExecutionSpecApi {
 
     fn profiles_yml(&self) -> &str {
         match self {
-            Self::Local { profiles_yml, .. } | Self::Remote { profiles_yml, .. } => profiles_yml,
+            Self::Remote { profiles_yml, .. } => profiles_yml,
             Self::EnvironmentValidate { profiles_yml, .. } => profiles_yml,
             _ => "",
         }
@@ -332,7 +332,7 @@ async fn materialize_execution_project_dir(
     spec: &InvocationExecutionSpecApi,
 ) -> AppResult<PathBuf> {
     match spec {
-        InvocationExecutionSpecApi::Local { project_dir, .. } => Ok(PathBuf::from(project_dir)),
+        InvocationExecutionSpecApi::Local { .. } => Ok(std::env::current_dir()?),
         InvocationExecutionSpecApi::Remote {
             repo_url,
             commit_sha,
@@ -787,8 +787,6 @@ mod tests {
         let spec = InvocationExecutionSpecApi::Local {
             command: InvocationCommandApi::Build,
             args: vec![],
-            project_dir: "/tmp/project".to_string(),
-            profiles_yml: String::new(),
             state_manifest: None,
         };
         assert!(spec.profiles_yml().is_empty());

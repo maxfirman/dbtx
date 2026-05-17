@@ -20,8 +20,6 @@ impl LocalExecutionPrepared {
             PreparedExecutionSpec::Local(spec) => InvocationExecutionSpecApi::Local {
                 command,
                 args: os_args_to_strings(spec.args),
-                project_dir: spec.project_dir.display().to_string(),
-                profiles_yml: spec.profiles_yml,
                 state_manifest: spec.state_manifest,
             },
             PreparedExecutionSpec::Remote(spec) => InvocationExecutionSpecApi::Remote {

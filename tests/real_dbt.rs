@@ -220,7 +220,6 @@ async fn remote_worker_executes_commit_pinned_invocation_from_git_cache() {
         .invocation_create(InvocationCreateApiRequest {
             command: InvocationCommandApi::Run,
             args: vec!["--select".to_string(), "stg_customers".to_string()],
-            current_dir: None,
             project_id: Some(project.remote_project_id()),
             environment_slug: Some("remote".to_string()),
         })

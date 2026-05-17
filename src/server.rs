@@ -42,7 +42,7 @@ use crate::invocation_runtime::{
 use crate::reconciler::auto_admit_blocked_plans_for_environment;
 use crate::services::{
     EnvironmentReleaseRequest, EnvironmentRollbackRequest, EnvironmentService, InvocationCommand,
-    InvocationRequest, InvocationService, PreparedExecutionSpec, ProjectCreateRequest,
+    InvocationService, PreparedExecutionSpec, ProjectCreateRequest,
     ProjectService, ProjectUpdateRequest, SourceStateEventCreateRequest,
 };
 use axum::extract::{Path, Query, State};
@@ -55,7 +55,6 @@ use chrono::Utc;
 use futures_util::Stream;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, info_span};
 use utoipa::OpenApi;
@@ -64,6 +63,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
     db: Db,
+    #[allow(dead_code)]
     runtime_config: RuntimeConfig,
     invocations: InvocationManager,
 }
@@ -1404,6 +1404,14 @@ async fn environment_rollback(
     Ok(Json(EnvironmentResponse { environment }))
 }
 
+struct PreparedInvocation {
+    execution_spec: InvocationExecutionSpecApi,
+    persistence: Option<InvocationPersistence>,
+    worker_queue: String,
+    project_id: Option<i64>,
+    environment_id: Option<i64>,
+}
+
 #[utoipa::path(
     post,
     path = "/v1/invocations",
@@ -1424,35 +1432,29 @@ async fn invocation_create(
     info!(
         invocation_id = %invocation_id,
         command = ?request.command,
-        current_dir = request.current_dir.as_deref().unwrap_or(""),
         project_id = request.project_id.as_deref().unwrap_or(""),
         environment_slug = request.environment_slug.as_deref().unwrap_or(""),
         "starting invocation"
     );
 
-    let runtime_config = state.runtime_config.clone();
     let db = state.db.clone();
     let service = InvocationService::new(&db);
-    let derived_execution_mode = if let Some(project_id) = request.project_id.as_deref() {
-        let environment_slug = request
-            .environment_slug
-            .as_deref()
-            .ok_or(AppError::RemoteExecutionRequiresEnvironmentSlug)?;
-        let environment = db.get_environment(project_id, environment_slug).await?;
-        let project = db
-            .get_project_by_project_id(&environment.project_ref)
-            .await?;
-        match project.mode.as_str() {
-            "remote" => InvocationExecutionModeApi::Server,
-            "local" => InvocationExecutionModeApi::Local,
-            other => return Err(ApiError(AppError::InvalidProjectMode(other.to_string()))),
-        }
+    let project_id = request
+        .project_id
+        .as_deref()
+        .ok_or(AppError::RemoteExecutionRequiresProjectId)?;
+    let environment_slug = request
+        .environment_slug
+        .as_deref()
+        .ok_or(AppError::RemoteExecutionRequiresEnvironmentSlug)?;
+    let environment = db.get_environment(project_id, environment_slug).await?;
+    let project = db
+        .get_project_by_project_id(&environment.project_ref)
+        .await?;
+    let derived_execution_mode = if environment.git_commit_sha.is_some() {
+        InvocationExecutionModeApi::Server
     } else {
         InvocationExecutionModeApi::Local
-    };
-    let execution_mode = match derived_execution_mode {
-        crate::api::InvocationExecutionModeApi::Server => ExecutionMode::Server,
-        crate::api::InvocationExecutionModeApi::Local => ExecutionMode::Local,
     };
     let prepared = match derived_execution_mode {
         crate::api::InvocationExecutionModeApi::Local => {
@@ -1461,37 +1463,97 @@ async fn invocation_create(
                     "release".to_string(),
                 )));
             }
-            let current_dir =
-                request
-                    .current_dir
-                    .as_deref()
-                    .ok_or(AppError::UnsupportedLocalExecution(
-                        "local invocation requires current_dir".to_string(),
-                    ))?;
-            service
-                .prepare_local_execution(
-                    invocation_id,
-                    InvocationRequest {
-                        command: map_invocation_command(request.command),
-                        args: request.args.iter().cloned().map(Into::into).collect(),
-                        config: runtime_config,
-                        current_dir: Some(PathBuf::from(current_dir)),
-                        environment_slug: request.environment_slug.clone().unwrap_or_default(),
-                        execution_mode,
-                    },
-                )
+            let command = map_invocation_command(request.command);
+            let inject_json_logging = command.persists_state();
+            let ctx = crate::config::InvocationContext::from_args(
+                &request
+                    .args
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect::<Vec<std::ffi::OsString>>(),
+                inject_json_logging,
+            )?;
+            let run_id = invocation_id;
+            let reconstructed_manifest = db
+                .load_reconstructed_manifest(project.id, environment.id)
                 .await?
+                .or(if ctx.wants_state_modified {
+                    Some(
+                        crate::manifest::ReconstructedManifest::write_empty_state(
+                            &project.project_name,
+                            &environment.adapter_type,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                });
+            let state_manifest =
+                if let Some(reconstructed_manifest) = reconstructed_manifest.as_ref() {
+                    let path = reconstructed_manifest.temp_dir.path().join("manifest.json");
+                    let content = tokio::fs::read_to_string(path)
+                        .await
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    Some(
+                        serde_json::from_str(&content)
+                            .map_err(|e| AppError::Internal(e.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+            let mut dbt_args: Vec<std::ffi::OsString> =
+                request.args.iter().cloned().map(Into::into).collect();
+            if command.persists_state() {
+                dbt_args = crate::dbt_utils::append_invocation_id(dbt_args, run_id);
+            }
+            let persistence = if command.persists_state() {
+                let args_json = serde_json::Value::Array(
+                    dbt_args
+                        .iter()
+                        .map(|v| serde_json::Value::String(v.to_string_lossy().into_owned()))
+                        .collect(),
+                );
+                let git_state = crate::dbt_utils::read_git_state(std::path::Path::new("."));
+                db.insert_run_started(crate::db::RunStart {
+                    run_id,
+                    project: &project,
+                    environment: &environment,
+                    subcommand: command.as_str(),
+                    args_json,
+                    is_full_graph_run: ctx.is_full_graph_run,
+                    execution_mode: ExecutionMode::Local,
+                    git_state: &git_state,
+                })
+                .await?;
+                Some(InvocationPersistence {
+                    run_id,
+                    project_id: project.id,
+                    environment_id: environment.id,
+                    promote_base_manifest: ctx.is_full_graph_run,
+                    updates_actual_state: true,
+                })
+            } else {
+                None
+            };
+            let execution_spec = InvocationExecutionSpecApi::Local {
+                command: request.command,
+                args: dbt_args
+                    .into_iter()
+                    .map(|v| v.to_string_lossy().into_owned())
+                    .collect(),
+                state_manifest,
+            };
+            PreparedInvocation {
+                execution_spec,
+                persistence,
+                worker_queue: environment.worker_queue.clone(),
+                project_id: Some(project.id),
+                environment_id: Some(environment.id),
+            }
         }
         crate::api::InvocationExecutionModeApi::Server => {
-            let project_id = request
-                .project_id
-                .as_deref()
-                .ok_or(AppError::RemoteExecutionRequiresProjectId)?;
-            let environment_slug = request
-                .environment_slug
-                .as_deref()
-                .ok_or(AppError::RemoteExecutionRequiresEnvironmentSlug)?;
-            match request.command {
+            let prepared = match request.command {
                 InvocationCommandApi::Release => {
                     service
                         .prepare_release_validation(
@@ -1512,90 +1574,72 @@ async fn invocation_create(
                         )
                         .await?
                 }
+            };
+            let execution_spec = match prepared.spec {
+                PreparedExecutionSpec::Remote(spec) => InvocationExecutionSpecApi::Remote {
+                    command: request.command,
+                    args: spec
+                        .args
+                        .into_iter()
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .collect(),
+                    repo_url: spec.repo_url,
+                    commit_sha: spec.commit_sha,
+                    project_root: spec.project_root,
+                    profiles_yml: spec.profiles_yml,
+                    state_manifest: spec.state_manifest,
+                },
+                PreparedExecutionSpec::ReleaseValidation(spec) => {
+                    InvocationExecutionSpecApi::ReleaseValidation {
+                        repo_url: spec.repo_url,
+                        git_ref: spec.git_ref,
+                        git_commit_sha: spec.git_commit_sha,
+                        git_branch: spec.git_branch,
+                    }
+                }
+                _ => {
+                    return Err(ApiError(AppError::Internal(
+                        "unexpected execution spec for server mode".to_string(),
+                    )));
+                }
+            };
+            let persistence = prepared.persistence.map(|p| InvocationPersistence {
+                run_id: p.run_id,
+                project_id: p.project_id,
+                environment_id: p.environment_id,
+                promote_base_manifest: p.promote_base_manifest,
+                updates_actual_state: p.updates_actual_state,
+            });
+            PreparedInvocation {
+                execution_spec,
+                persistence,
+                worker_queue: prepared.worker_queue,
+                project_id: prepared.project_id,
+                environment_id: prepared.environment_id,
             }
         }
     };
-    let execution_spec = match prepared.spec {
-        PreparedExecutionSpec::Local(spec) => InvocationExecutionSpecApi::Local {
-            command: request.command,
-            args: spec
-                .args
-                .into_iter()
-                .map(|value| value.to_string_lossy().into_owned())
-                .collect(),
-            project_dir: spec.project_dir.display().to_string(),
-            profiles_yml: spec.profiles_yml,
-            state_manifest: spec.state_manifest,
-        },
-        PreparedExecutionSpec::Remote(spec) => InvocationExecutionSpecApi::Remote {
-            command: request.command,
-            args: spec
-                .args
-                .into_iter()
-                .map(|value| value.to_string_lossy().into_owned())
-                .collect(),
-            repo_url: spec.repo_url,
-            commit_sha: spec.commit_sha,
-            project_root: spec.project_root,
-            profiles_yml: spec.profiles_yml,
-            state_manifest: spec.state_manifest,
-        },
-        PreparedExecutionSpec::ReleaseValidation(spec) => {
-            InvocationExecutionSpecApi::ReleaseValidation {
-                repo_url: spec.repo_url,
-                git_ref: spec.git_ref,
-                git_commit_sha: spec.git_commit_sha,
-                git_branch: spec.git_branch,
-            }
-        }
-        PreparedExecutionSpec::ProjectValidation(spec) => {
-            InvocationExecutionSpecApi::ProjectValidation {
-                repo_url: spec.repo_url,
-                project_root: spec.project_root,
-            }
-        }
-        PreparedExecutionSpec::EnvironmentPrepare(spec) => {
-            InvocationExecutionSpecApi::EnvironmentPrepare {
-                repo_url: spec.repo_url,
-                selected_branch: spec.selected_branch,
-            }
-        }
-        PreparedExecutionSpec::EnvironmentValidate(spec) => {
-            InvocationExecutionSpecApi::EnvironmentValidate {
-                repo_url: spec.repo_url,
-                commit_sha: spec.commit_sha,
-                project_root: spec.project_root,
-                selected_branch: spec.selected_branch,
-                profiles_yml: spec.profiles_yml,
-            }
-        }
-    };
-    let persistence = prepared.persistence.map(|p| InvocationPersistence {
-        run_id: p.run_id,
-        project_id: p.project_id,
-        environment_id: p.environment_id,
-        promote_base_manifest: p.promote_base_manifest,
-        updates_actual_state: p.updates_actual_state,
-    });
     state
         .db
         .create_invocation(CreateInvocationInput {
             invocation_id,
             plan_id: None,
-            run_id: persistence.as_ref().map(|p| p.run_id),
+            run_id: prepared.persistence.as_ref().map(|p| p.run_id),
             project_id: prepared.project_id,
             environment_id: prepared.environment_id,
-            project_draft_id: prepared.project_draft_id,
-            environment_draft_id: prepared.environment_draft_id,
+            project_draft_id: None,
+            environment_draft_id: None,
             command: map_invocation_command(request.command).as_str().to_string(),
             execution_mode: derived_execution_mode,
             worker_queue: prepared.worker_queue.clone(),
-            execution_spec: Some(execution_spec),
-            promote_base_manifest: persistence
+            execution_spec: Some(prepared.execution_spec.clone()),
+            promote_base_manifest: prepared
+                .persistence
                 .as_ref()
                 .map(|p| p.promote_base_manifest)
                 .unwrap_or(false),
-            updates_actual_state: persistence
+            updates_actual_state: prepared
+                .persistence
                 .as_ref()
                 .map(|p| p.updates_actual_state)
                 .unwrap_or(false),
@@ -1603,7 +1647,7 @@ async fn invocation_create(
         })
         .await?;
     state
-        .bootstrap_invocation_started(invocation_id, persistence)
+        .bootstrap_invocation_started(invocation_id, prepared.persistence)
         .await?;
     info!(
         invocation_id = %invocation_id,

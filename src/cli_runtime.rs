@@ -146,7 +146,6 @@ pub async fn handle_environment_command(
                 .invocation_create(api::InvocationCreateApiRequest {
                     command: api::InvocationCommandApi::Release,
                     args: release_args,
-                    current_dir: None,
                     project_id: Some(project.clone()),
                     environment_slug: Some(slug.clone()),
                 })
@@ -437,7 +436,6 @@ async fn create_invocation(
                 .into_iter()
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect(),
-            current_dir: Some(ctx.project_dir.display().to_string()),
             project_id: None,
             environment_slug: Some(ctx.target_name.clone().unwrap_or_default()),
         })

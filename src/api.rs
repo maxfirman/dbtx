@@ -164,7 +164,6 @@ pub struct EnvironmentRollbackApiRequest {
 pub struct InvocationCreateApiRequest {
     pub command: InvocationCommandApi,
     pub args: Vec<String>,
-    pub current_dir: Option<String>,
     pub project_id: Option<String>,
     pub environment_slug: Option<String>,
 }
@@ -236,8 +235,6 @@ pub enum InvocationExecutionSpecApi {
     Local {
         command: InvocationCommandApi,
         args: Vec<String>,
-        project_dir: String,
-        profiles_yml: String,
         state_manifest: Option<serde_json::Value>,
     },
     Remote {

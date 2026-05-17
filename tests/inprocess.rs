@@ -267,8 +267,7 @@ async fn invocation_lifecycle_in_process() {
         json!({
             "command": "ls",
             "args": [],
-            "current_dir": tmp.path().to_str().unwrap(),
-            "project_id": null,
+            "project_id": "prj_local_1",
             "environment_slug": "dev"
         }),
     )
@@ -631,9 +630,11 @@ async fn invocation_claim_returns_none_when_empty() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_full_lifecycle() {
-    let (app, _pool) = test_app().await;
+    let (app, pool) = test_app().await;
 
     // Seed project + environment
+    sqlx::query("INSERT INTO projects (project_id, project_name, mode, metadata) VALUES ('prj_local_1', 'demo', 'local', '{}'::jsonb)").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, profile_config, profile_secrets, metadata) VALUES (1, 'dev', 'demo', 'dev', 'duckdb', 'generic', 'main', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)").execute(&pool).await.unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("dbt_project.yml"),
@@ -649,9 +650,8 @@ async fn invocation_full_lifecycle() {
         json!({
             "command": "ls",
             "args": [],
-            "current_dir": tmp.path().to_str().unwrap(),
-            "project_id": null,
-            "environment_slug": null
+            "project_id": "prj_local_1",
+            "environment_slug": "dev"
         }),
     )
     .await;
@@ -736,7 +736,8 @@ async fn invocation_full_lifecycle() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_cancel_unclaimed() {
-    let (app, _pool) = test_app().await;
+    let (app, pool) = test_app().await;
+    seed_local_project(&pool).await;
 
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
@@ -752,9 +753,8 @@ async fn invocation_cancel_unclaimed() {
         json!({
             "command": "ls",
             "args": [],
-            "current_dir": tmp.path().to_str().unwrap(),
-            "project_id": null,
-            "environment_slug": null
+            "project_id": "prj_local_1",
+            "environment_slug": "dev"
         }),
     )
     .await;
@@ -843,6 +843,7 @@ async fn ui_project_delete_post() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_complete_with_manifest_persists_state() {
     let (app, pool) = test_app().await;
+    seed_local_project(&pool).await;
 
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
@@ -859,9 +860,8 @@ async fn invocation_complete_with_manifest_persists_state() {
         json!({
             "command": "build",
             "args": [],
-            "current_dir": tmp.path().to_str().unwrap(),
-            "project_id": null,
-            "environment_slug": null
+            "project_id": "prj_local_1",
+            "environment_slug": "dev"
         }),
     )
     .await;
@@ -934,7 +934,8 @@ async fn invocation_complete_with_manifest_persists_state() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_with_dbt_log_events() {
-    let (app, _pool) = test_app().await;
+    let (app, pool) = test_app().await;
+    seed_local_project(&pool).await;
 
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
@@ -950,9 +951,8 @@ async fn invocation_with_dbt_log_events() {
         json!({
             "command": "build",
             "args": [],
-            "current_dir": tmp.path().to_str().unwrap(),
-            "project_id": null,
-            "environment_slug": null
+            "project_id": "prj_local_1",
+            "environment_slug": "dev"
         }),
     )
     .await;
@@ -1020,7 +1020,8 @@ async fn invocation_with_dbt_log_events() {
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
 async fn invocation_complete_failed_records_error() {
-    let (app, _pool) = test_app().await;
+    let (app, pool) = test_app().await;
+    seed_local_project(&pool).await;
 
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
@@ -1036,9 +1037,8 @@ async fn invocation_complete_failed_records_error() {
         json!({
             "command": "build",
             "args": [],
-            "current_dir": tmp.path().to_str().unwrap(),
-            "project_id": null,
-            "environment_slug": null
+            "project_id": "prj_local_1",
+            "environment_slug": "dev"
         }),
     )
     .await;
@@ -1104,6 +1104,7 @@ async fn ui_catalog_renders_with_resource_type_filter() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn manifest_backfill_populates_sources_in_current_node_state() {
     let (app, pool) = test_app().await;
+    seed_local_project(&pool).await;
 
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
@@ -1120,9 +1121,8 @@ async fn manifest_backfill_populates_sources_in_current_node_state() {
         json!({
             "command": "build",
             "args": [],
-            "current_dir": tmp.path().to_str().unwrap(),
-            "project_id": null,
-            "environment_slug": null
+            "project_id": "prj_local_1",
+            "environment_slug": "dev"
         }),
     )
     .await;
@@ -1266,9 +1266,14 @@ async fn manifest_backfill_populates_sources_in_current_node_state() {
 }
 
 /// Helper: create a local invocation, claim it, return (invocation_id, worker_id, lease_token, worker_queue).
+async fn seed_local_project(pool: &sqlx::PgPool) {
+    sqlx::query("INSERT INTO projects (project_id, project_name, mode, metadata) VALUES ('prj_local_1', 'demo', 'local', '{}'::jsonb) ON CONFLICT DO NOTHING").execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, profile_config, profile_secrets, metadata) VALUES (1, 'dev', 'demo', 'dev', 'duckdb', 'generic', 'main', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb) ON CONFLICT DO NOTHING").execute(pool).await.unwrap();
+}
+
 async fn create_and_claim(
     app: &axum::Router,
-    project_dir: &std::path::Path,
+    _project_dir: &std::path::Path,
 ) -> (String, String, String, String) {
     let (_, body) = post_json(
         app,
@@ -1276,9 +1281,8 @@ async fn create_and_claim(
         json!({
             "command": "build",
             "args": [],
-            "current_dir": project_dir.to_str().unwrap(),
-            "project_id": null,
-            "environment_slug": null
+            "project_id": "prj_local_1",
+            "environment_slug": "dev"
         }),
     )
     .await;
@@ -1404,6 +1408,7 @@ fn temp_dbt_project() -> tempfile::TempDir {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn rebuild_populates_correct_field_values_after_successful_run() {
     let (app, pool) = test_app().await;
+    seed_local_project(&pool).await;
     let tmp = temp_dbt_project();
     let (inv_id, worker_id, lease_token, _) = create_and_claim(&app, tmp.path()).await;
 
@@ -1481,6 +1486,7 @@ async fn rebuild_populates_correct_field_values_after_successful_run() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn rebuild_preserves_prior_success_state_after_failed_run() {
     let (app, pool) = test_app().await;
+    seed_local_project(&pool).await;
     let tmp = temp_dbt_project();
 
     // --- Run 1: successful ---
@@ -1566,6 +1572,7 @@ async fn rebuild_preserves_prior_success_state_after_failed_run() {
 #[ignore = "requires docker for postgres testcontainer"]
 async fn rebuild_accumulates_state_across_multiple_runs_with_different_nodes() {
     let (app, pool) = test_app().await;
+    seed_local_project(&pool).await;
     let tmp = temp_dbt_project();
 
     // --- Run 1: build orders ---

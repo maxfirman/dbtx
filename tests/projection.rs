@@ -38,11 +38,13 @@ async fn remote_invocation_requires_remote_project_mode() {
     let repo = TempProjectRepo::new("proj");
     let client = db.client().clone();
 
+    bootstrap_project_and_env(db.pool(), &repo, "dev").await;
+
     client
         .invocation_create(local_invocation_request(
             repo.project_dir(),
             InvocationCommandApi::Ls,
-            Some("remote"),
+            Some("dev"),
         ))
         .await
         .expect("create local invocation");
@@ -77,16 +79,17 @@ async fn remote_invocation_requires_commit_pinned_immutable_environment() {
     )
     .await;
 
-    assert!(
-        client
-            .invocation_create(remote_invocation_request(
-                &project_id,
-                "mutable",
-                InvocationCommandApi::Ls,
-            ))
-            .await
-            .is_err()
-    );
+    // Environment without git_commit_sha is treated as local mode
+    let result = client
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            project_id: Some(project_id.clone()),
+            environment_slug: Some("mutable".to_string()),
+        })
+        .await
+        .expect("local invocation against env without commit should succeed");
+    assert_eq!(result.execution_mode, InvocationExecutionModeApi::Local);
 }
 
 #[tokio::test]
@@ -96,13 +99,15 @@ async fn lease_tokens_enforce_invocation_ownership() {
     let repo = TempProjectRepo::new("proj");
     let client = db.client().clone();
 
-    bootstrap_project_and_env(db.pool(), &repo, "dev").await;
+    bootstrap_project_with_local_env(db.pool(), &repo, "dev", "local-dev").await;
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
     let created = client
-        .invocation_create(local_invocation_request(
-            repo.project_dir(),
-            InvocationCommandApi::Ls,
-            Some("dev"),
-        ))
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            project_id: Some(project_id),
+            environment_slug: Some("local-dev".to_string()),
+        })
         .await
         .expect("create invocation");
     let local_queue = created.worker_queue.clone();
@@ -4765,12 +4770,23 @@ async fn local_invocations_use_shorter_claim_deadlines_than_server_invocations()
     bootstrap_project_and_env(db.pool(), &repo, "dev").await;
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
+    // Create a local environment (no git_commit_sha → local execution mode)
+    let project_pk: i64 = sqlx::query_scalar("SELECT id FROM projects WHERE project_id = $1")
+        .bind(&project_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, profile_config, profile_secrets, metadata) VALUES ($1, 'local-dev', 'proj', 'dev', 'duckdb', 'local-test', 'main', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb) ON CONFLICT DO NOTHING"
+    ).bind(project_pk).execute(db.pool()).await.unwrap();
+
     let local = client
-        .invocation_create(local_invocation_request(
-            repo.project_dir(),
-            InvocationCommandApi::Ls,
-            Some("dev"),
-        ))
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            project_id: Some(project_id.clone()),
+            environment_slug: Some("local-dev".to_string()),
+        })
         .await
         .expect("create local invocation");
     let server = client
@@ -4844,15 +4860,16 @@ async fn local_heartbeat_timeout_is_shorter_than_server_timeout() {
     let repo = TempProjectRepo::new("proj");
     let client = db.client().clone();
 
-    bootstrap_project_and_env(db.pool(), &repo, "dev").await;
+    bootstrap_project_with_local_env(db.pool(), &repo, "dev", "local-dev").await;
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     let local = client
-        .invocation_create(local_invocation_request(
-            repo.project_dir(),
-            InvocationCommandApi::Ls,
-            Some("dev"),
-        ))
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            project_id: Some(project_id.clone()),
+            environment_slug: Some("local-dev".to_string()),
+        })
         .await
         .expect("create local invocation");
     let local_queue = local.worker_queue.clone();
@@ -5030,7 +5047,7 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
     let repo = TempProjectRepo::new("proj");
     let client = db.client().clone();
 
-    bootstrap_project_and_env(db.pool(), &repo, "dev").await;
+    bootstrap_project_with_local_env(db.pool(), &repo, "dev", "local-dev").await;
     let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
 
     let _server_generic_1 = client
@@ -5050,11 +5067,12 @@ async fn worker_and_queue_views_aggregate_running_invocations() {
         .await
         .expect("create server invocation 2");
     let local_isolated = client
-        .invocation_create(local_invocation_request(
-            repo.project_dir(),
-            InvocationCommandApi::Ls,
-            Some("dev"),
-        ))
+        .invocation_create(InvocationCreateApiRequest {
+            command: InvocationCommandApi::Ls,
+            args: vec![],
+            project_id: Some(project_id.clone()),
+            environment_slug: Some("local-dev".to_string()),
+        })
         .await
         .expect("create local invocation");
     let local_queue = local_isolated.worker_queue.clone();
@@ -5835,6 +5853,25 @@ async fn bootstrap_project_and_env(pool: &PgPool, repo: &TempProjectRepo, slug: 
     .await;
 }
 
+/// Bootstrap a project with both a remote environment and a local environment (no git_commit_sha).
+async fn bootstrap_project_with_local_env(
+    pool: &PgPool,
+    repo: &TempProjectRepo,
+    remote_slug: &str,
+    local_slug: &str,
+) {
+    bootstrap_project_and_env(pool, repo, remote_slug).await;
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let project_pk: i64 = sqlx::query_scalar("SELECT id FROM projects WHERE project_id = $1")
+        .bind(&project_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, profile_config, profile_secrets, metadata) VALUES ($1, $2, 'proj', 'dev', 'duckdb', 'local-test', 'main', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb) ON CONFLICT DO NOTHING"
+    ).bind(project_pk).bind(local_slug).execute(pool).await.unwrap();
+}
+
 async fn bootstrap_remote_project_only(pool: &PgPool, project_dir: &Path, project_id: &str) {
     let project_name = read_dbt_project_name(project_dir);
     let project_root = dbtx::services::relative_project_root(
@@ -6511,11 +6548,11 @@ fn local_invocation_request(
     command: InvocationCommandApi,
     environment_slug: Option<&str>,
 ) -> InvocationCreateApiRequest {
+    let project_id = read_project_id_from_dbt_project(project_dir, true);
     InvocationCreateApiRequest {
         command,
         args: vec![],
-        current_dir: Some(project_dir.display().to_string()),
-        project_id: None,
+        project_id: Some(project_id),
         environment_slug: environment_slug.map(ToString::to_string),
     }
 }
@@ -6593,7 +6630,6 @@ fn remote_invocation_request(
     InvocationCreateApiRequest {
         command,
         args: vec![],
-        current_dir: None,
         project_id: Some(project_id.to_string()),
         environment_slug: Some(environment_slug.to_string()),
     }
