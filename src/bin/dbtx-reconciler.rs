@@ -3,7 +3,7 @@ use dbtx::config::{RuntimeConfig, resolve_database_url};
 use dbtx::db::Db;
 use dbtx::error::AppResult;
 use dbtx::process_state::ProcessState;
-use dbtx::reconciler;
+use dbtx::reconciler::{self, ReconcilerConfig};
 use std::sync::Once;
 use tracing_subscriber::EnvFilter;
 
@@ -32,7 +32,7 @@ async fn run() -> AppResult<()> {
         Some(&current_dir),
     )?);
     let db = Db::connect(&config.database_url).await?;
-    reconciler::run(ProcessState::new(db, config)).await
+    reconciler::run(ProcessState::new(db, config), ReconcilerConfig::from_env()).await
 }
 
 fn init_service_logging() {

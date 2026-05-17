@@ -13,20 +13,29 @@ use std::time::Duration;
 use tracing::{error, info};
 use uuid::Uuid;
 
-fn reconcile_interval() -> Duration {
-    parse_interval_ms(
-        std::env::var("DBTX_RECONCILE_INTERVAL_MS").ok().as_deref(),
-        Duration::from_secs(5),
-    )
+/// Configuration for the reconciler daemon, resolved at startup.
+#[derive(Debug, Clone)]
+pub struct ReconcilerConfig {
+    pub reconcile_interval: Duration,
+    pub blocked_plan_sweep_interval: Duration,
 }
 
-fn blocked_plan_sweep_interval() -> Duration {
-    parse_interval_ms(
-        std::env::var("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS")
-            .ok()
-            .as_deref(),
-        Duration::from_secs(2),
-    )
+impl ReconcilerConfig {
+    /// Build config from environment variables, falling back to defaults.
+    pub fn from_env() -> Self {
+        Self {
+            reconcile_interval: parse_interval_ms(
+                std::env::var("DBTX_RECONCILE_INTERVAL_MS").ok().as_deref(),
+                Duration::from_secs(5),
+            ),
+            blocked_plan_sweep_interval: parse_interval_ms(
+                std::env::var("DBTX_BLOCKED_PLAN_SWEEP_INTERVAL_MS")
+                    .ok()
+                    .as_deref(),
+                Duration::from_secs(2),
+            ),
+        }
+    }
 }
 
 fn parse_interval_ms(value: Option<&str>, default: Duration) -> Duration {
@@ -37,17 +46,15 @@ fn parse_interval_ms(value: Option<&str>, default: Duration) -> Duration {
         .unwrap_or(default)
 }
 
-pub async fn run(state: ProcessState) -> AppResult<()> {
-    let reconcile_interval_duration = reconcile_interval();
-    let blocked_interval_duration = blocked_plan_sweep_interval();
+pub async fn run(state: ProcessState, config: ReconcilerConfig) -> AppResult<()> {
     info!(
-        reconcile_interval_ms = reconcile_interval_duration.as_millis() as u64,
-        blocked_plan_sweep_interval_ms = blocked_interval_duration.as_millis() as u64,
+        reconcile_interval_ms = config.reconcile_interval.as_millis() as u64,
+        blocked_plan_sweep_interval_ms = config.blocked_plan_sweep_interval.as_millis() as u64,
         "starting dbtx reconciler"
     );
-    let mut reconcile_interval = tokio::time::interval(reconcile_interval_duration);
+    let mut reconcile_interval = tokio::time::interval(config.reconcile_interval);
     reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut blocked_interval = tokio::time::interval(blocked_interval_duration);
+    let mut blocked_interval = tokio::time::interval(config.blocked_plan_sweep_interval);
     blocked_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
