@@ -1,4 +1,6 @@
 //! Server-rendered operator UI: HTMX handlers, Askama templates, and view models.
+mod read_models;
+
 use crate::api::{
     EnvironmentActiveResourcePhaseApi, InvocationCommandApi, InvocationExecutionModeApi,
     InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
@@ -1624,7 +1626,7 @@ async fn environment_detail(
     headers: HeaderMap,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Html<String>, UiError> {
-    let panel = load_environment_panel(&state, &project_id, &slug).await?;
+    let panel = read_models::load_environment_panel(&state, &project_id, &slug).await?;
 
     if is_htmx(&headers) {
         return render_template(&panel);
@@ -1644,7 +1646,7 @@ async fn environment_detail_panel(
     State(state): State<AppState>,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Html<String>, UiError> {
-    let panel = load_environment_panel(&state, &project_id, &slug).await?;
+    let panel = read_models::load_environment_panel(&state, &project_id, &slug).await?;
     render_template(&panel)
 }
 
@@ -1791,71 +1793,6 @@ async fn environment_rollback(
     }
 
     Ok(Redirect::to(&format!("/ui/projects/{project_id}/environments/{slug}")).into_response())
-}
-
-async fn load_environment_panel(
-    state: &AppState,
-    project_id: &str,
-    slug: &str,
-) -> Result<EnvironmentPanelTemplate, UiError> {
-    let db = state.db();
-    db.require_current_schema().await?;
-    let project = db.get_project_by_project_id(project_id).await?;
-    let environment = db
-        .list_environments(&project.project_id)
-        .await?
-        .into_iter()
-        .find(|environment| environment.slug == slug)
-        .ok_or_else(|| {
-            UiError(AppError::EnvironmentNotFound(
-                project.project_id.clone(),
-                slug.to_string(),
-            ))
-        })?;
-    let history = db
-        .list_environment_versions(&project.project_id, slug)
-        .await?;
-    let actual_state = db
-        .get_environment_actual_state(&project.project_id, slug)
-        .await?;
-    let preparation = db
-        .get_environment_reconcile_preparation(&project.project_id, slug)
-        .await?;
-    let active_resources = db
-        .list_active_environment_resources(&project.project_id, slug, None)
-        .await?;
-    let plans = db
-        .list_environment_run_plans(&project.project_id, slug)
-        .await?;
-    let plan_views =
-        build_environment_run_plan_views(db, &project.project_id, slug, &plans).await?;
-
-    Ok(EnvironmentPanelTemplate {
-        project: project_summary_view(&project),
-        environment: environment_detail_view(&environment),
-        summary: environment_reconciliation_summary_view(
-            &environment,
-            &actual_state,
-            preparation.as_ref(),
-            &plans,
-            active_resources.len(),
-        ),
-        actual_state: environment_actual_state_view(&actual_state),
-        preparation: preparation
-            .as_ref()
-            .map(environment_reconcile_preparation_view),
-        active_resources: active_resources
-            .iter()
-            .map(environment_active_resource_view)
-            .collect(),
-        plans: plan_views,
-        versions: history.iter().map(environment_version_view).collect(),
-        is_remote: project.mode == "remote",
-        panel_url: format!("/ui/projects/{project_id}/environments/{slug}/panel"),
-        reconcile_url: format!("/ui/projects/{project_id}/environments/{slug}/reconcile"),
-        pause_url: format!("/ui/projects/{project_id}/environments/{slug}/pause"),
-        resume_url: format!("/ui/projects/{project_id}/environments/{slug}/resume"),
-    })
 }
 
 async fn build_environment_run_plan_views(
@@ -3563,119 +3500,8 @@ async fn models_index(
     RawQuery(raw_query): RawQuery,
 ) -> Result<impl IntoResponse, UiError> {
     let query = parse_catalog_filter_query(raw_query.as_deref());
-    let db = state.db();
-    db.require_current_schema().await?;
-    let projects = db.list_projects().await?;
-
-    // Auto-select first project if none specified
-    let resolved_pid = query
-        .project_id
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .or_else(|| projects.first().map(|p| p.project_id.as_str()))
-        .map(String::from);
-
-    let mut environments = Vec::new();
-    let mut models = Vec::new();
-    let mut resolved_env_slug: Option<String> = None;
-
-    if let Some(ref pid) = resolved_pid {
-        environments = db.list_environments(pid).await?;
-
-        // Auto-select first environment if none specified or specified one doesn't exist
-        resolved_env_slug = query
-            .environment_slug
-            .as_deref()
-            .filter(|s| !s.is_empty() && environments.iter().any(|e| e.slug == *s))
-            .or_else(|| environments.first().map(|e| e.slug.as_str()))
-            .map(String::from);
-
-        if let Some(ref slug) = resolved_env_slug
-            && let Some(env) = environments.iter().find(|e| &e.slug == slug)
-            && let Some(project) = projects.iter().find(|p| &p.project_id == pid)
-        {
-            let raw = db
-                .list_models_for_environment(project.id, env.id, &query.resource_type)
-                .await?;
-            let model_ids: Vec<String> = raw.iter().map(|m| m.unique_id.clone()).collect();
-            let reconcile_states = db
-                .load_node_reconciliation_state(project.id, env.id, &model_ids)
-                .await?;
-            let reconcile_map: std::collections::HashMap<&str, &NodeReconcileState> =
-                reconcile_states
-                    .iter()
-                    .map(|s| (s.unique_id.as_str(), s))
-                    .collect();
-            models = raw
-                .iter()
-                .map(|m| {
-                    let rs = reconcile_map.get(m.unique_id.as_str());
-                    ModelSummaryViewItem {
-                        name: m.node_name.clone().unwrap_or_else(|| m.unique_id.clone()),
-                        node_path: m.node_path.clone().unwrap_or_default(),
-                        resource_type: m.resource_type.clone().unwrap_or_default(),
-                        package_name: m.package_name.clone().unwrap_or_default(),
-                        materialized: m.materialized.clone().unwrap_or_default(),
-                        status: m.status.clone().unwrap_or("unknown".into()),
-                        status_class: model_status_class(m.status.as_deref().unwrap_or(""))
-                            .to_string(),
-                        schema: m.relation_schema.clone().unwrap_or_default(),
-                        finished_at: fmt_opt_time(m.finished_at),
-                        last_success_at: fmt_opt_time(m.last_success_at),
-                        detail_url: format!(
-                            "/ui/catalog/{}/{}/{}",
-                            pid,
-                            slug,
-                            urlencoding::encode(&m.unique_id)
-                        ),
-                        code_state: rs.map(|r| r.code_state.as_str()).unwrap_or("unknown"),
-                        code_tooltip: rs.map(|r| r.code_tooltip.clone()).unwrap_or_default(),
-                        source_state: rs.map(|r| r.source_state.as_str()).unwrap_or("no_sources"),
-                        source_tooltip: rs.map(|r| r.source_tooltip.clone()).unwrap_or_default(),
-                    }
-                })
-                .collect();
-        }
-    }
-
-    let needs_selection = projects.is_empty();
-
-    const CATALOG_RESOURCE_TYPES: &[&str] = &["model", "source", "seed", "test", "snapshot"];
-
-    let filters = ModelFiltersView {
-        projects: projects
-            .iter()
-            .map(|p| ModelFilterSelectView {
-                selected: resolved_pid.as_deref() == Some(&p.project_id),
-                value: p.project_id.clone(),
-                label: p.project_name.clone(),
-            })
-            .collect(),
-        environments: environments
-            .iter()
-            .map(|e| ModelFilterSelectView {
-                selected: resolved_env_slug.as_deref() == Some(&e.slug),
-                value: e.slug.clone(),
-                label: e.slug.clone(),
-            })
-            .collect(),
-        resource_types: CATALOG_RESOURCE_TYPES
-            .iter()
-            .map(|&rt| ModelFilterSelectView {
-                selected: query.resource_type.contains(&rt.to_string()),
-                value: rt.to_string(),
-                label: rt.to_string(),
-            })
-            .collect(),
-    };
-
-    render_template(&ModelsPageTemplate {
-        title: "Catalog",
-        filters,
-        models,
-        needs_selection,
-    })
-    .map(|html| html.into_response())
+    let page = read_models::load_catalog_page(&state, query).await?;
+    render_template(&page).map(|html| html.into_response())
 
     // Note: HTMX requests also get the full page; the template uses
     // hx-select to extract the section content for cascading filter updates.
