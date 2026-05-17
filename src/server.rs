@@ -2294,4 +2294,15 @@ mod tests {
         let resp = ApiError(AppError::Internal("something broke".to_string())).into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
+
+    #[test]
+    fn schema_out_of_date_maps_to_precondition_failed() {
+        use super::ApiError;
+        use crate::error::AppError;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let resp = ApiError(AppError::SchemaOutOfDate).into_response();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+    }
 }

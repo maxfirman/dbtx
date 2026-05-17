@@ -705,6 +705,120 @@ mod tests {
         let ids = plan_source_event_ids(Some(99), &metadata);
         assert_eq!(ids, vec![10]);
     }
+
+    use super::derive_source_state_change_plan;
+    use crate::db::{EnvironmentRecord, EnvironmentStatus, SourceStateEventRecord};
+    use crate::error::AppResult;
+    use crate::services::StalenessOracle;
+    use uuid::Uuid;
+
+    /// Mock oracle that returns a fixed set of stale nodes.
+    struct MockOracle(Vec<String>);
+
+    impl StalenessOracle for MockOracle {
+        async fn list_stale_downstream_nodes(
+            &self,
+            _project_id: i64,
+            _environment_id: i64,
+            _source_keys: &[String],
+            _target_event_ids: &[i64],
+            _manifest_run_id: Uuid,
+        ) -> AppResult<Vec<String>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn test_environment() -> EnvironmentRecord {
+        EnvironmentRecord {
+            id: 1,
+            project_id: 10,
+            project_ref: "prj_test".to_string(),
+            project_name: "test".to_string(),
+            slug: "prod".to_string(),
+            profile_name: "test".to_string(),
+            target_name: "prod".to_string(),
+            baseline_environment_id: None,
+            baseline_environment_slug: None,
+            git_branch: Some("main".to_string()),
+            git_commit_sha: Some("abc123".to_string()),
+            use_latest_commit: false,
+            auto_reconcile: true,
+            immutable: false,
+            pr_number: None,
+            status: EnvironmentStatus::Active,
+            adapter_type: "duckdb".to_string(),
+            worker_queue: "generic".to_string(),
+            schema_name: "main".to_string(),
+            threads: None,
+            profile_config: serde_json::json!({}),
+            profile_secrets: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn test_source_event(id: i64, source_key: &str) -> SourceStateEventRecord {
+        SourceStateEventRecord {
+            id,
+            project_id: 10,
+            environment_id: Some(1),
+            source_key: source_key.to_string(),
+            provider: "test".to_string(),
+            state_version: None,
+            payload: serde_json::json!({}),
+            observed_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn derive_source_plan_uses_oracle_for_stale_nodes() {
+        let oracle = MockOracle(vec![
+            "model.pkg.orders".to_string(),
+            "model.pkg.customers".to_string(),
+        ]);
+        let env = test_environment();
+        let events = vec![test_source_event(1, "source.raw.events")];
+        let baseline = Some(Uuid::new_v4());
+
+        let draft = derive_source_state_change_plan(&oracle, &env, &events, baseline)
+            .await
+            .unwrap();
+
+        assert_eq!(draft.reason, "source_state_change");
+        assert_eq!(
+            draft.selected_resources,
+            vec!["model.pkg.orders", "model.pkg.customers"]
+        );
+        assert_eq!(
+            draft.selection_spec,
+            Some("source_downstream_stale".to_string())
+        );
+        assert_eq!(draft.source_event_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn derive_source_plan_returns_empty_when_oracle_finds_no_stale_nodes() {
+        let oracle = MockOracle(Vec::new());
+        let env = test_environment();
+        let events = vec![test_source_event(5, "source.raw.clicks")];
+        let baseline = Some(Uuid::new_v4());
+
+        let draft = derive_source_state_change_plan(&oracle, &env, &events, baseline)
+            .await
+            .unwrap();
+
+        assert!(draft.selected_resources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn derive_source_plan_requires_baseline() {
+        let oracle = MockOracle(Vec::new());
+        let env = test_environment();
+        let events = vec![test_source_event(1, "source.raw.events")];
+
+        let result = derive_source_state_change_plan(&oracle, &env, &events, None).await;
+        assert!(result.is_err());
+    }
 }
 
 #[cfg(test)]
