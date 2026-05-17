@@ -3,6 +3,7 @@ pub mod cli;
 pub mod cli_entry;
 pub mod cli_output;
 pub mod cli_runtime;
+pub(crate) mod cli_workflow;
 pub mod client;
 pub mod config;
 pub mod db;

@@ -14,6 +14,7 @@ use crate::cli_output::{
     print_release_start, print_release_success, print_worker, render_invocation_event,
     render_project_validation_event, render_release_event,
 };
+use crate::cli_workflow::{stream_and_wait_for_invocation, wait_for_invocation_completion};
 use crate::client;
 use crate::config::{self, resolve_service_url};
 use crate::error::{AppError, AppResult};
@@ -42,10 +43,12 @@ pub async fn handle_project_command(
                 .await?
                 .draft;
             let validation = client.project_draft_validate(draft.id).await?;
-            client
-                .stream_invocation_events(validation.invocation_id, render_project_validation_event)
-                .await?;
-            let status = wait_for_invocation_completion(&client, validation.invocation_id).await?;
+            let status = stream_and_wait_for_invocation(
+                &client,
+                validation.invocation_id,
+                render_project_validation_event,
+            )
+            .await?;
             if !matches!(status.status, api::InvocationLifecycleStatus::Succeeded) {
                 eprintln!(
                     "project validation failed: {}",
@@ -148,10 +151,12 @@ pub async fn handle_environment_command(
                     environment_slug: Some(slug.clone()),
                 })
                 .await?;
-            client
-                .stream_invocation_events(response.invocation_id, render_release_event)
-                .await?;
-            let status = wait_for_invocation_completion(&client, response.invocation_id).await?;
+            let status = stream_and_wait_for_invocation(
+                &client,
+                response.invocation_id,
+                render_release_event,
+            )
+            .await?;
             if !matches!(status.status, api::InvocationLifecycleStatus::Succeeded) {
                 print_release_failure(
                     &project,
@@ -327,10 +332,9 @@ pub async fn invoke_via_daemon(
     }
     let response = create_invocation(service_url.clone(), command, args, ctx).await?;
     let client = client::DaemonClient::new(service_url.clone());
-    client
-        .stream_invocation_events(response.invocation_id, render_invocation_event)
-        .await?;
-    let status = wait_for_invocation_completion(&client, response.invocation_id).await?;
+    let status =
+        stream_and_wait_for_invocation(&client, response.invocation_id, render_invocation_event)
+            .await?;
     match status.exit_code.unwrap_or(1) {
         0 => Ok(()),
         code => {
@@ -350,19 +354,6 @@ fn daemon_client(
     let service_url = resolve_service_url(service_url_override, Some(current_dir))?
         .ok_or(AppError::MissingServiceUrl)?;
     Ok(client::DaemonClient::new(service_url))
-}
-
-async fn wait_for_invocation_completion(
-    client: &client::DaemonClient,
-    invocation_id: uuid::Uuid,
-) -> AppResult<api::InvocationStatusResponse> {
-    loop {
-        let status = client.invocation_status(invocation_id).await?;
-        if !matches!(status.status, api::InvocationLifecycleStatus::Running) {
-            return Ok(status);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
 }
 
 async fn invoke_via_local_worker(
