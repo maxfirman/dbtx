@@ -23,6 +23,8 @@ use uuid::Uuid;
 mod records;
 pub use records::*;
 pub(crate) use watermarks::NodeReconcileState;
+mod test_seeding;
+pub use test_seeding::SeedDeploymentInput;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -81,6 +83,11 @@ impl Db {
             .connect(database_url)
             .await?;
         Ok(Self { pool })
+    }
+
+    /// Create a Db from an existing connection pool (useful for tests).
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
     }
 
     pub async fn require_current_schema(&self) -> AppResult<()> {

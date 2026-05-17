@@ -12,7 +12,7 @@ use dbtx::api::{
     InvocationListApiRequest, ProjectDraftCreateApiRequest, SourceStateEventCreateApiRequest,
 };
 use dbtx::config::RuntimeConfig;
-use dbtx::db::{DraftStatus, PlanStatus};
+use dbtx::db::{Db, DraftStatus, PlanStatus, SeedDeploymentInput};
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use dbtx::process_state::ProcessState;
 use dbtx::server::router;
@@ -5908,160 +5908,14 @@ async fn seed_environment_actual_state_with_manifest(
     nodes: &[(&str, &str)],
     edges: &[(&str, &str)],
 ) {
-    let scope = sqlx::query(
-        r#"
-        SELECT p.id AS project_pk, p.project_name, p.project_root, p.git_repo_url, e.id AS environment_pk
-        FROM projects p
-        JOIN environments e ON e.project_id = p.id
-        WHERE p.project_id = $1 AND e.slug = $2
-        "#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_one(pool)
-    .await
-    .expect("load project/environment scope");
-    let project_pk: i64 = scope.get("project_pk");
-    let environment_pk: i64 = scope.get("environment_pk");
-    let project_name: String = scope.get("project_name");
-    let project_root: Option<String> = scope.get("project_root");
-    let git_repo_url: Option<String> = scope.get("git_repo_url");
-    let run_id = Uuid::new_v4();
-    let successful_at = chrono::Utc::now() - chrono::Duration::hours(1);
-
-    sqlx::query(
-        r#"
-        INSERT INTO runs (
-            run_id, project_id, environment_id, command, args, is_full_graph_run, execution_mode,
-            git_branch, git_commit_sha, git_repo_url, project_root, project_name, project_ref,
-            started_at, finished_at, exit_code, terminal_status
-        )
-        VALUES (
-            $1, $2, $3, 'build', '[]'::jsonb, true, 'server',
-            'main', $4, $5, $6, $7, $8,
-            $9, $10, 0, 'succeeded'
-        )
-        "#,
-    )
-    .bind(run_id)
-    .bind(project_pk)
-    .bind(environment_pk)
-    .bind(commit_sha)
-    .bind(git_repo_url)
-    .bind(project_root)
-    .bind(&project_name)
-    .bind(project_id)
-    .bind(successful_at)
-    .bind(successful_at)
-    .execute(pool)
-    .await
-    .expect("insert baseline run");
-
-    sqlx::query(
-        r#"
-        INSERT INTO manifest_snapshots (run_id, manifest, manifest_size_bytes, checksum)
-        VALUES ($1, '{}'::jsonb, 2, 'fixture-checksum')
-        "#,
-    )
-    .bind(run_id)
-    .execute(pool)
-    .await
-    .expect("insert manifest snapshot");
-
-    for (unique_id, resource_type) in nodes {
-        let name = unique_id.rsplit('.').next().expect("node name");
-        sqlx::query(
-            r#"
-            INSERT INTO manifest_nodes (
-                run_id, unique_id, resource_type, name, package_name, original_file_path,
-                tags, fqn, config, checksum, database_name, schema_name, alias, relation_name
-            )
-            VALUES (
-                $1, $2, $3, $4, 'pkg', '', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
-                NULL, NULL, NULL, NULL, NULL
-            )
-            "#,
-        )
-        .bind(run_id)
-        .bind(unique_id)
-        .bind(resource_type)
-        .bind(name)
-        .execute(pool)
-        .await
-        .expect("insert manifest node");
-
-        sqlx::query(
-            r#"
-            INSERT INTO current_node_state (
-                project_id, environment_id, unique_id, last_run_id, status, resource_type,
-                node_name, checksum, finished_at, last_success_at, updated_at
-            )
-            VALUES (
-                $1, $2, $3, $4, 'succeeded', $5,
-                $6, NULL, $7, $7, NOW()
-            )
-            ON CONFLICT (project_id, environment_id, unique_id) DO UPDATE
-            SET last_run_id = EXCLUDED.last_run_id,
-                status = EXCLUDED.status,
-                resource_type = EXCLUDED.resource_type,
-                node_name = EXCLUDED.node_name,
-                finished_at = EXCLUDED.finished_at,
-                last_success_at = EXCLUDED.last_success_at,
-                updated_at = NOW()
-            "#,
-        )
-        .bind(project_pk)
-        .bind(environment_pk)
-        .bind(unique_id)
-        .bind(run_id)
-        .bind(resource_type)
-        .bind(name)
-        .bind(successful_at)
-        .execute(pool)
-        .await
-        .expect("seed current node state");
-    }
-
-    for (parent_unique_id, child_unique_id) in edges {
-        sqlx::query(
-            r#"
-            INSERT INTO manifest_edges (run_id, parent_unique_id, child_unique_id)
-            VALUES ($1, $2, $3)
-            "#,
-        )
-        .bind(run_id)
-        .bind(parent_unique_id)
-        .bind(child_unique_id)
-        .execute(pool)
-        .await
-        .expect("insert manifest edge");
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO environment_actual_state (
-            project_id, environment_id,
-            last_attempted_run_id, last_attempted_commit_sha, last_attempted_at,
-            last_successful_run_id, last_successful_commit_sha, last_successful_at,
-            updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $3, $4, $5, $5)
-        ON CONFLICT (project_id, environment_id) DO UPDATE
-        SET last_attempted_run_id = EXCLUDED.last_attempted_run_id,
-            last_attempted_commit_sha = EXCLUDED.last_attempted_commit_sha,
-            last_attempted_at = EXCLUDED.last_attempted_at,
-            last_successful_run_id = EXCLUDED.last_successful_run_id,
-            last_successful_commit_sha = EXCLUDED.last_successful_commit_sha,
-            last_successful_at = EXCLUDED.last_successful_at,
-            updated_at = EXCLUDED.updated_at
-        "#,
-    )
-    .bind(project_pk)
-    .bind(environment_pk)
-    .bind(run_id)
-    .bind(commit_sha)
-    .bind(successful_at)
-    .execute(pool)
+    let db = Db::from_pool(pool.clone());
+    db.seed_successful_deployment(SeedDeploymentInput {
+        project_id,
+        environment_slug: slug,
+        commit_sha,
+        nodes,
+        edges,
+    })
     .await
     .expect("seed environment actual state");
 }
