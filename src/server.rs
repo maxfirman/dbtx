@@ -2071,6 +2071,11 @@ impl IntoResponse for ApiError {
             | AppError::ReconciliationEmptyPlan => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::SchemaOutOfDate => StatusCode::PRECONDITION_FAILED,
             AppError::InvalidDatabaseValue(_, _) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::NotFound(_) => StatusCode::NOT_FOUND,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            AppError::RequestTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             AppError::Io(ref err) if err.kind() == std::io::ErrorKind::NotFound => {
                 StatusCode::NOT_FOUND
             }

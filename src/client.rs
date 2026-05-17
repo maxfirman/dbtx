@@ -598,13 +598,18 @@ pub fn error_from_response_body(status: StatusCode, body: &str) -> AppError {
         .unwrap_or_else(|| body.to_string());
     match status {
         StatusCode::PRECONDITION_FAILED => AppError::SchemaOutOfDate,
+        StatusCode::NOT_FOUND => AppError::NotFound(message),
+        StatusCode::CONFLICT => AppError::Conflict(message),
+        StatusCode::BAD_REQUEST => AppError::BadRequest(message),
+        StatusCode::SERVICE_UNAVAILABLE => AppError::ServiceUnavailable(message),
+        StatusCode::UNPROCESSABLE_ENTITY => AppError::BadRequest(message),
         _ => AppError::Internal(message),
     }
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> AppError {
     if error.is_timeout() {
-        AppError::Internal(format!("request timed out: {error}"))
+        AppError::RequestTimeout(error.to_string())
     } else {
         AppError::Internal(error.to_string())
     }
@@ -641,7 +646,10 @@ mod tests {
 
         let client = super::DaemonClient::new(mock_server.uri());
         let err = client.project_list().await.expect_err("should fail");
-        assert!(err.to_string().contains("project not found"));
+        assert!(
+            matches!(err, crate::error::AppError::NotFound(ref msg) if msg.contains("project not found")),
+            "expected NotFound, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -687,7 +695,10 @@ mod tests {
             )
             .await
             .expect_err("should fail");
-        assert!(err.to_string().contains("already reconciled"));
+        assert!(
+            matches!(err, crate::error::AppError::Conflict(ref msg) if msg.contains("already reconciled")),
+            "expected Conflict, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -708,8 +719,8 @@ mod tests {
         let client = super::DaemonClient::with_http(mock_server.uri(), http);
         let err = client.project_list().await.expect_err("should time out");
         assert!(
-            matches!(err, crate::error::AppError::Internal(ref message) if message.contains("timed out")),
-            "expected timeout-style internal error, got: {err}"
+            matches!(err, crate::error::AppError::RequestTimeout(_)),
+            "expected RequestTimeout error, got: {err}"
         );
     }
 

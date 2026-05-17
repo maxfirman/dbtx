@@ -169,6 +169,16 @@ pub enum AppError {
     GitTargetNotFound(String),
     #[error("{0}")]
     Internal(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
+    #[error("bad request: {0}")]
+    BadRequest(String),
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+    #[error("request timed out: {0}")]
+    RequestTimeout(String),
 }
 
 pub type AppResult<T> = Result<T, AppError>;
