@@ -1,17 +1,19 @@
 //! Worker execution runtime: dbt process management, git worktree materialization, and event streaming.
 
+mod dbt_execution;
 pub(crate) mod git;
 mod session;
 mod validation;
 
 use crate::api::{
     InvocationClaimResponse, InvocationCommandApi, InvocationExecutionModeApi,
-    InvocationExecutionSpecApi, InvocationLifecycleStatus,
+    InvocationExecutionSpecApi,
 };
 use crate::client::DaemonClient;
 use crate::db::validate_remote_project_root;
 use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
+use dbt_execution::complete_worker_dbt_invocation;
 use git::{ensure_git_worktree, git_cache_root, short_hash};
 use serde_yaml::Value as YamlValue;
 use session::WorkerInvocationSession;
@@ -197,11 +199,6 @@ pub async fn execute_claimed_invocation(
         .await?;
     }
 
-    let exit_code = if cancel_requested {
-        130
-    } else {
-        result.exit_code
-    };
     let manifest = if persists_state(command_name) {
         let manifest_path = project_dir.join("target").join("manifest.json");
         std::fs::read_to_string(&manifest_path)
@@ -210,39 +207,16 @@ pub async fn execute_claimed_invocation(
     } else {
         None
     };
+    let terminal = complete_worker_dbt_invocation(result, cancel_requested, dbt_version, manifest);
+    let app_result = terminal.as_result();
+    let exit_code = terminal.exit_code;
 
     WorkerInvocationSession::new(client, &claim)
-        .complete(crate::execution::ExecutionCompletion {
-            status: if cancel_requested {
-                InvocationLifecycleStatus::Canceled
-            } else if exit_code != 0 {
-                InvocationLifecycleStatus::Failed
-            } else {
-                InvocationLifecycleStatus::Succeeded
-            },
-            exit_code,
-            error: if cancel_requested {
-                Some("invocation canceled".to_string())
-            } else if exit_code == 0 {
-                None
-            } else {
-                Some(format!("dbt invocation failed with exit code {exit_code}"))
-            },
-            dbt_version,
-            manifest,
-            result: None,
-        })
+        .complete(terminal.completion)
         .await?;
 
     info!(invocation_id = %claim.invocation_id, worker_id = %claim.worker_id, exit_code, canceled = cancel_requested, "finished claimed invocation execution");
-
-    if cancel_requested {
-        Err(AppError::InvocationCanceled)
-    } else if exit_code == 0 {
-        Ok(())
-    } else {
-        Err(AppError::DbtFailed(exit_code))
-    }
+    app_result
 }
 
 async fn report_setup_failure(

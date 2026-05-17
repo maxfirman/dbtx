@@ -146,104 +146,41 @@ pub async fn start_prepared_invocation(
     plan_id: Option<Uuid>,
     prepared: crate::services::LocalExecutionPrepared,
 ) -> AppResult<Uuid> {
-    let execution_spec = match prepared.spec {
-        crate::services::PreparedExecutionSpec::Local(spec) => InvocationExecutionSpecApi::Local {
-            command,
-            args: spec
-                .args
-                .into_iter()
-                .map(|value| value.to_string_lossy().into_owned())
-                .collect(),
-            project_dir: spec.project_dir.display().to_string(),
-            profiles_yml: spec.profiles_yml,
-            state_manifest: spec.state_manifest,
-        },
-        crate::services::PreparedExecutionSpec::Remote(spec) => {
-            InvocationExecutionSpecApi::Remote {
-                command,
-                args: spec
-                    .args
-                    .into_iter()
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .collect(),
-                repo_url: spec.repo_url,
-                commit_sha: spec.commit_sha,
-                project_root: spec.project_root,
-                profiles_yml: spec.profiles_yml,
-                state_manifest: spec.state_manifest,
-            }
-        }
-        crate::services::PreparedExecutionSpec::ReleaseValidation(spec) => {
-            InvocationExecutionSpecApi::ReleaseValidation {
-                repo_url: spec.repo_url,
-                git_ref: spec.git_ref,
-                git_commit_sha: spec.git_commit_sha,
-                git_branch: spec.git_branch,
-            }
-        }
-        crate::services::PreparedExecutionSpec::ProjectValidation(spec) => {
-            InvocationExecutionSpecApi::ProjectValidation {
-                repo_url: spec.repo_url,
-                project_root: spec.project_root,
-            }
-        }
-        crate::services::PreparedExecutionSpec::EnvironmentPrepare(spec) => {
-            InvocationExecutionSpecApi::EnvironmentPrepare {
-                repo_url: spec.repo_url,
-                selected_branch: spec.selected_branch,
-            }
-        }
-        crate::services::PreparedExecutionSpec::EnvironmentValidate(spec) => {
-            InvocationExecutionSpecApi::EnvironmentValidate {
-                repo_url: spec.repo_url,
-                commit_sha: spec.commit_sha,
-                project_root: spec.project_root,
-                selected_branch: spec.selected_branch,
-                profiles_yml: spec.profiles_yml,
-            }
-        }
-    };
-    let execution_mode = match &execution_spec {
-        InvocationExecutionSpecApi::Local { .. } => InvocationExecutionModeApi::Local,
-        _ => InvocationExecutionModeApi::Server,
-    };
-    let persistence =
-        prepared
-            .persistence
-            .map(|p| crate::invocation_runtime::InvocationPersistence {
-                run_id: p.run_id,
-                project_id: p.project_id,
-                environment_id: p.environment_id,
-                promote_base_manifest: p.promote_base_manifest,
-                updates_actual_state: p.updates_actual_state,
-            });
+    let project_id = prepared.project_id;
+    let environment_id = prepared.environment_id;
+    let project_draft_id = prepared.project_draft_id;
+    let environment_draft_id = prepared.environment_draft_id;
+    let worker_queue = prepared.worker_queue.clone();
+    let start = prepared.into_invocation_start(command);
     state
         .db()
         .create_invocation(CreateInvocationInput {
             invocation_id,
             plan_id,
-            run_id: persistence.as_ref().map(|p| p.run_id),
-            project_id: prepared.project_id,
-            environment_id: prepared.environment_id,
-            project_draft_id: prepared.project_draft_id,
-            environment_draft_id: prepared.environment_draft_id,
+            run_id: start.persistence.as_ref().map(|p| p.run_id),
+            project_id,
+            environment_id,
+            project_draft_id,
+            environment_draft_id,
             command: map_command_to_service(command).as_str().to_string(),
-            execution_mode,
-            worker_queue: prepared.worker_queue.clone(),
-            execution_spec: Some(execution_spec),
-            promote_base_manifest: persistence
+            execution_mode: start.execution_mode,
+            worker_queue,
+            execution_spec: Some(start.execution_spec),
+            promote_base_manifest: start
+                .persistence
                 .as_ref()
                 .map(|p| p.promote_base_manifest)
                 .unwrap_or(false),
-            updates_actual_state: persistence
+            updates_actual_state: start
+                .persistence
                 .as_ref()
                 .map(|p| p.updates_actual_state)
                 .unwrap_or(false),
-            claim_deadline_at: Some(invocation_claim_deadline_at(execution_mode)),
+            claim_deadline_at: Some(invocation_claim_deadline_at(start.execution_mode)),
         })
         .await?;
     state
-        .bootstrap_invocation_started(invocation_id, persistence)
+        .bootstrap_invocation_started(invocation_id, start.persistence)
         .await?;
     Ok(invocation_id)
 }

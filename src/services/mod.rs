@@ -279,6 +279,7 @@ pub struct InferredProjectInput {
 mod environments;
 mod invocations;
 mod planning;
+mod prepared_execution;
 mod projects;
 pub(crate) mod source_state;
 
