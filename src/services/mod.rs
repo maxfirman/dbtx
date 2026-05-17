@@ -257,6 +257,24 @@ pub trait InvocationStarter: Send + Sync {
     ) -> impl std::future::Future<Output = AppResult<Uuid>> + Send;
 }
 
+/// Capability trait for querying node staleness relative to source watermarks.
+///
+/// Planning logic uses this to determine which downstream nodes need
+/// re-execution after source state changes, without reaching into the
+/// DB layer directly.
+pub trait StalenessOracle: Send + Sync {
+    /// Return unique_ids of downstream nodes that are stale relative to the
+    /// given source events.
+    fn list_stale_downstream_nodes(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        source_keys: &[String],
+        target_event_ids: &[i64],
+        manifest_run_id: Uuid,
+    ) -> impl std::future::Future<Output = AppResult<Vec<String>>> + Send;
+}
+
 #[derive(Debug, Clone)]
 struct ReleaseTargetRequest {
     git_branch: Option<String>,

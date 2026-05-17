@@ -320,7 +320,7 @@ async fn derive_code_change_plan(
 }
 
 async fn derive_source_state_change_plan(
-    db: &Db,
+    staleness: &(impl super::StalenessOracle + ?Sized),
     environment: &EnvironmentRecord,
     source_events: &[SourceStateEventRecord],
     baseline_run_id: Option<Uuid>,
@@ -338,7 +338,7 @@ async fn derive_source_state_change_plan(
         input_fingerprint,
         baseline_run_id,
         selection_spec: Some("source_downstream_stale".to_string()),
-        selected_resources: db
+        selected_resources: staleness
             .list_stale_downstream_nodes(
                 environment.project_id,
                 environment.id,
@@ -368,7 +368,7 @@ pub(super) async fn replan_pending_plan(
 
     match plan.reason.as_str() {
         "code_change" => replan_code_change_plan(db, plan, baseline_run_id).await,
-        "source_state_change" => replan_source_state_change_plan(db, plan, baseline_run_id).await,
+        "source_state_change" => replan_source_state_change_plan(db, db, plan, baseline_run_id).await,
         _ => Ok(plan),
     }
 }
@@ -446,6 +446,7 @@ async fn replan_code_change_plan(
 
 async fn replan_source_state_change_plan(
     db: &Db,
+    staleness: &(impl super::StalenessOracle + ?Sized),
     plan: EnvironmentRunPlanRecord,
     baseline_run_id: Uuid,
 ) -> AppResult<EnvironmentRunPlanRecord> {
@@ -479,14 +480,15 @@ async fn replan_source_state_change_plan(
     }
 
     let stale_nodes = if !source_keys.is_empty() {
-        db.list_stale_downstream_nodes(
-            plan.project_id,
-            plan.environment_id,
-            &source_keys,
-            &source_event_ids,
-            baseline_run_id,
-        )
-        .await?
+        staleness
+            .list_stale_downstream_nodes(
+                plan.project_id,
+                plan.environment_id,
+                &source_keys,
+                &source_event_ids,
+                baseline_run_id,
+            )
+            .await?
     } else {
         plan.selected_resources.clone()
     };

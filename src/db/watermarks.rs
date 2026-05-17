@@ -861,6 +861,26 @@ fn short_source_key(key: &str) -> &str {
     key.rsplit('.').next().unwrap_or(key)
 }
 
+impl crate::services::StalenessOracle for Db {
+    async fn list_stale_downstream_nodes(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        source_keys: &[String],
+        target_event_ids: &[i64],
+        manifest_run_id: Uuid,
+    ) -> AppResult<Vec<String>> {
+        self.list_stale_downstream_nodes(
+            project_id,
+            environment_id,
+            source_keys,
+            target_event_ids,
+            manifest_run_id,
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::WatermarkCandidate;
