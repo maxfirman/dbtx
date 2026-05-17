@@ -142,6 +142,203 @@ pub(super) async fn load_catalog_page(
     })
 }
 
+pub(super) async fn load_invocation_detail_page(
+    state: &AppState,
+    invocation_id: Uuid,
+    tab: Option<&str>,
+) -> Result<InvocationDetailTemplate, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let invocation = db.get_invocation_status(invocation_id).await?;
+    let tab = normalized_invocation_tab(tab);
+    let base = format!("/ui/invocations/{invocation_id}");
+    let tab_content_html = render_invocation_tab_content_for_db(db, invocation_id, tab).await?;
+
+    let tabs = ["timeline", "lineage", "logs"]
+        .iter()
+        .map(|&candidate| InvocationTabView {
+            label: match candidate {
+                "timeline" => "Timeline",
+                "lineage" => "Lineage",
+                "logs" => "Logs",
+                _ => candidate,
+            },
+            url: format!("{base}?tab={candidate}"),
+            partial_url: format!("{base}/tab?tab={candidate}"),
+            active: candidate == tab,
+        })
+        .collect();
+
+    Ok(InvocationDetailTemplate {
+        title: "Invocation",
+        invocation: invocation_detail_view(&invocation),
+        panel_url: format!("{base}/panel"),
+        tabs,
+        tab_content_html,
+    })
+}
+
+pub(super) async fn load_invocation_detail_panel(
+    state: &AppState,
+    invocation_id: Uuid,
+) -> Result<InvocationDetailPanelTemplate, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    let invocation = db.get_invocation_status(invocation_id).await?;
+    Ok(InvocationDetailPanelTemplate {
+        invocation: invocation_detail_view(&invocation),
+        panel_url: format!("/ui/invocations/{invocation_id}/panel"),
+    })
+}
+
+pub(super) async fn render_invocation_tab_content(
+    state: &AppState,
+    invocation_id: Uuid,
+    tab: Option<&str>,
+) -> Result<String, UiError> {
+    let db = state.db();
+    db.require_current_schema().await?;
+    render_invocation_tab_content_for_db(db, invocation_id, normalized_invocation_tab(tab)).await
+}
+
+async fn render_invocation_tab_content_for_db(
+    db: &crate::db::Db,
+    invocation_id: Uuid,
+    tab: &str,
+) -> Result<String, UiError> {
+    let sse_url = format!("/v1/invocations/{invocation_id}/events");
+    match tab {
+        "lineage" => render_invocation_lineage_tab(db, invocation_id).await,
+        "logs" => {
+            let events = db.load_invocation_events_since(invocation_id, 0).await?;
+            let initial_log_sequence = events.last().map(|(seq, _)| *seq).unwrap_or(0);
+            let lines = events
+                .into_iter()
+                .filter_map(|(_, event)| render_invocation_log_html(&event))
+                .collect();
+            InvocationLogsTabTemplate {
+                sse_url,
+                initial_log_lines: lines,
+                initial_log_sequence,
+            }
+            .render()
+            .map_err(|err| UiError(AppError::Internal(err.to_string())))
+        }
+        _ => InvocationTimelineTabTemplate {
+            sse_url,
+            timeline_api_url: format!("/v1/invocations/{invocation_id}/timeline"),
+        }
+        .render()
+        .map_err(|err| UiError(AppError::Internal(err.to_string()))),
+    }
+}
+
+async fn render_invocation_lineage_tab(
+    db: &crate::db::Db,
+    invocation_id: Uuid,
+) -> Result<String, UiError> {
+    let lineage = db.get_invocation_lineage(invocation_id).await?;
+
+    let mut base_url = String::new();
+    if let Ok(persistence) = db
+        .get_invocation_persistence(invocation_id, None, None)
+        .await
+        && let Some(environment_id) = persistence.environment_id
+        && let Ok(environment) = db.get_environment_by_id(environment_id).await
+    {
+        base_url = format!(
+            "/ui/catalog/{}/{}",
+            environment.project_ref, environment.slug
+        );
+    }
+
+    let test_ids: HashSet<&str> = lineage
+        .nodes
+        .iter()
+        .filter(|node| node.resource_type.as_deref() == Some("test"))
+        .map(|node| node.unique_id.as_str())
+        .collect();
+    let mut test_counts: HashMap<&str, (u32, u32)> = HashMap::new();
+    for (parent, child) in &lineage.edges {
+        if test_ids.contains(child.as_str())
+            && let Some(test_node) = lineage.nodes.iter().find(|node| node.unique_id == *child)
+        {
+            let counts = test_counts.entry(parent.as_str()).or_insert((0, 0));
+            match test_node
+                .status
+                .as_deref()
+                .and_then(NodeExecutionStatus::parse)
+            {
+                Some(NodeExecutionStatus::Pass | NodeExecutionStatus::Success) => counts.0 += 1,
+                Some(NodeExecutionStatus::Fail | NodeExecutionStatus::Error) => counts.1 += 1,
+                _ => {}
+            }
+        }
+    }
+
+    let nodes_json: Vec<Value> = lineage
+        .nodes
+        .iter()
+        .filter(|node| !test_ids.contains(node.unique_id.as_str()))
+        .map(|node| {
+            let (pass, fail) = test_counts
+                .get(node.unique_id.as_str())
+                .copied()
+                .unwrap_or((0, 0));
+            serde_json::json!({
+                "id": node.unique_id,
+                "data": {
+                    "label": node.name.as_deref().unwrap_or(&node.unique_id),
+                    "name": node.name,
+                    "resource_type": node.resource_type,
+                    "status": node.status,
+                    "materialized": node.materialized,
+                    "package_name": node.package_name,
+                    "testsPassing": pass,
+                    "testsFailing": fail,
+                }
+            })
+        })
+        .collect();
+
+    let edges_json: Vec<Value> = lineage
+        .edges
+        .iter()
+        .filter(|(source, target)| {
+            !test_ids.contains(source.as_str()) && !test_ids.contains(target.as_str())
+        })
+        .map(|(source, target)| {
+            serde_json::json!({
+                "id": format!("{source}->{target}"),
+                "source": source,
+                "target": target,
+            })
+        })
+        .collect();
+
+    let lineage_data = serde_json::json!({
+        "nodes": nodes_json,
+        "edges": edges_json,
+        "currentNodeId": "",
+        "baseUrl": base_url,
+        "depth": 1,
+        "direction": "both",
+    });
+
+    InvocationLineageTabTemplate {
+        lineage_json: lineage_data.to_string(),
+    }
+    .render()
+    .map_err(|err| UiError(AppError::Internal(err.to_string())))
+}
+
+fn normalized_invocation_tab(tab: Option<&str>) -> &str {
+    match tab {
+        Some(tab @ ("timeline" | "lineage" | "logs")) => tab,
+        _ => "timeline",
+    }
+}
+
 async fn load_catalog_models(
     db: &crate::db::Db,
     project: &ProjectRecord,
