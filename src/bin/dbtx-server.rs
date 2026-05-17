@@ -2,6 +2,7 @@ use clap::Parser;
 use dbtx::config::{RuntimeConfig, resolve_database_url};
 use dbtx::db::Db;
 use dbtx::error::AppResult;
+use dbtx::process_state::ProcessState;
 use dbtx::server;
 use std::sync::Once;
 use tracing_subscriber::EnvFilter;
@@ -33,7 +34,7 @@ async fn run() -> AppResult<()> {
         Some(&current_dir),
     )?);
     let db = Db::connect(&config.database_url).await?;
-    server::serve(&cli.listen, server::AppState::new(db, config)).await
+    server::serve(&cli.listen, ProcessState::new(db, config)).await
 }
 
 fn init_service_logging() {

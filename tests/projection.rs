@@ -14,7 +14,8 @@ use dbtx::api::{
 use dbtx::config::RuntimeConfig;
 use dbtx::db::{DraftStatus, PlanStatus};
 use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
-use dbtx::server::{AppState, router};
+use dbtx::process_state::ProcessState;
+use dbtx::server::router;
 use dbtx::services::{
     code_change_input_fingerprint, infer_local_project_defaults, infer_remote_project_defaults,
     source_state_change_input_fingerprint, target_manifest_input_fingerprint,
@@ -5639,7 +5640,7 @@ impl TestDatabase {
 
         let db = connect_db_with_retry(&test_url, "connect app db").await;
         let config = RuntimeConfig::from_database_url(test_url.clone());
-        let state = AppState::new(db, config);
+        let state = ProcessState::new(db, config);
         let client = InProcessClient::new(router(state));
         let pool = connect_test_pool(&test_url, "connect test db").await;
 

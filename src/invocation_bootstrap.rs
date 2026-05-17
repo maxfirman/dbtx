@@ -2,7 +2,7 @@
 use crate::api::{InvocationCommandApi, InvocationExecutionModeApi, InvocationExecutionSpecApi};
 use crate::db::{CreateInvocationInput, PreparationStatus};
 use crate::error::{AppError, AppResult};
-use crate::server::AppState;
+use crate::process_state::ProcessState;
 use crate::services::{
     InvocationCommand, InvocationService, code_change_input_fingerprint_for_baseline,
     target_manifest_input_fingerprint,
@@ -20,7 +20,7 @@ pub fn invocation_claim_deadline_at(
 }
 
 pub async fn start_project_draft_validation_invocation(
-    state: &AppState,
+    state: &ProcessState,
     prepared: crate::services::ProjectDraftValidationPrepared,
 ) -> AppResult<Uuid> {
     start_draft_invocation(
@@ -38,7 +38,7 @@ pub async fn start_project_draft_validation_invocation(
 }
 
 pub async fn start_environment_draft_prepare_invocation(
-    state: &AppState,
+    state: &ProcessState,
     prepared: crate::services::EnvironmentDraftCreatePrepared,
 ) -> AppResult<Uuid> {
     start_draft_invocation(
@@ -56,7 +56,7 @@ pub async fn start_environment_draft_prepare_invocation(
 }
 
 pub async fn start_environment_draft_validation_invocation(
-    state: &AppState,
+    state: &ProcessState,
     prepared: crate::services::EnvironmentDraftValidationPrepared,
 ) -> AppResult<Uuid> {
     start_draft_invocation(
@@ -82,7 +82,7 @@ enum DraftAttachment {
 }
 
 async fn start_draft_invocation(
-    state: &AppState,
+    state: &ProcessState,
     invocation_id: Uuid,
     command: InvocationCommand,
     worker_queue: String,
@@ -135,7 +135,7 @@ async fn start_draft_invocation(
 }
 
 pub async fn start_prepared_invocation(
-    state: &AppState,
+    state: &ProcessState,
     invocation_id: Uuid,
     command: InvocationCommandApi,
     plan_id: Option<Uuid>,
@@ -185,7 +185,7 @@ fn map_command_to_service(command: InvocationCommandApi) -> InvocationCommand {
 }
 
 pub async fn ensure_target_manifest_for_reconcile(
-    state: &AppState,
+    state: &ProcessState,
     project_id: &str,
     environment_slug: &str,
 ) -> AppResult<()> {
@@ -304,7 +304,7 @@ pub async fn ensure_target_manifest_for_reconcile(
 }
 
 async fn wait_for_terminal_invocation(
-    state: &AppState,
+    state: &ProcessState,
     invocation_id: Uuid,
     timeout: std::time::Duration,
 ) -> AppResult<()> {

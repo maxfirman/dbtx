@@ -7,7 +7,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{connect_db_with_retry, connect_test_pool, register_testcontainer_cleanup};
 use dbtx::config::RuntimeConfig;
-use dbtx::server::{AppState, router};
+use dbtx::process_state::ProcessState;
+use dbtx::server::router;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -82,7 +83,7 @@ async fn test_app() -> (axum::Router, PgPool) {
     let pool = connect_test_pool(&test_url, "connect test db").await;
     let db = connect_db_with_retry(&test_url, "connect app db").await;
     let config = RuntimeConfig::from_database_url(test_url);
-    let state = AppState::new(db, config);
+    let state = ProcessState::new(db, config);
     let app = router(state);
     (app, pool)
 }
