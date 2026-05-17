@@ -1,6 +1,55 @@
 //! Application error types and result aliases.
 use std::io;
 
+/// Reconciliation-specific errors.
+///
+/// These are produced by the reconciler and planning logic. The reconciler
+/// uses pattern matching on these to decide which errors to ignore vs propagate.
+#[derive(Debug, thiserror::Error)]
+pub enum ReconcileError {
+    #[error("environment is already reconciled to known desired state")]
+    AlreadyReconciled,
+    #[error("environment reconciliation is already in progress")]
+    InProgress,
+    #[error("plan {0} is not admissible from status {1}")]
+    PlanNotAdmissible(String, String),
+    #[error("reconciliation requires a successful baseline run")]
+    RequiresBaseline,
+    #[error("reconciliation requires a desired git commit sha")]
+    RequiresCommitSha,
+    #[error("reconciliation plan resolved to no selected resources")]
+    EmptyPlan,
+}
+
+/// Profile and encryption errors.
+///
+/// Produced during profile validation, encryption, and generation.
+#[derive(Debug, thiserror::Error)]
+pub enum ProfileError {
+    #[error("missing DBTX_SECRET_KEY for encrypted profile secrets")]
+    MissingSecretKey,
+    #[error("dbt project is missing a profile name")]
+    MissingDbtProfile,
+    #[error("profiles.yml was not found at {0}")]
+    FileNotFound(String),
+    #[error("dbt profile '{0}' was not found in profiles.yml")]
+    NotFound(String),
+    #[error("dbt profile '{0}' target '{1}' was not found in profiles.yml")]
+    TargetNotFound(String, String),
+    #[error("profile adapter type is missing")]
+    MissingAdapterType,
+    #[error("unsupported dbt adapter '{0}'")]
+    UnsupportedAdapter(String),
+    #[error("invalid profile config: {0}")]
+    InvalidConfig(String),
+    #[error("invalid profile secrets: {0}")]
+    InvalidSecret(String),
+    #[error("failed to encrypt secret data: {0}")]
+    Encryption(String),
+    #[error("invalid encrypted secret payload: {0}")]
+    InvalidEncryptedSecret(String),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("")]
@@ -19,6 +68,8 @@ pub enum AppError {
     TomlDe(#[from] toml::de::Error),
     #[error("toml serialization error: {0}")]
     TomlSer(#[from] toml::ser::Error),
+
+    // --- Profile errors (kept as flat variants for backward compat) ---
     #[error("missing DBTX_SECRET_KEY for encrypted profile secrets")]
     MissingSecretKey,
     #[error("dbt project is missing a profile name")]
@@ -41,6 +92,8 @@ pub enum AppError {
     Encryption(String),
     #[error("invalid encrypted secret payload: {0}")]
     InvalidEncryptedSecret(String),
+
+    // --- Invocation errors ---
     #[error("local execution is not supported for command '{0}' yet")]
     UnsupportedLocalExecution(String),
     #[error("invocation '{0}' is not claimable")]
@@ -49,6 +102,14 @@ pub enum AppError {
     InvocationAlreadyClaimed(String),
     #[error("dbt invocation failed with exit code {0}")]
     DbtFailed(i32),
+    #[error("invocation was canceled")]
+    InvocationCanceled,
+    #[error("invocation is owned by a different worker or is not running")]
+    InvocationOwnershipMismatch,
+    #[error("invocation '{0}' was not found")]
+    InvocationNotFound(String),
+
+    // --- Project/environment lookup errors ---
     #[error("missing manifest at {0}")]
     MissingManifest(String),
     #[error("current directory is not a dbt project root: missing dbt_project.yml")]
@@ -61,6 +122,26 @@ pub enum AppError {
     ProjectIdAlreadyConfigured(String),
     #[error("dbtx project id is missing from dbtx.toml.")]
     ProjectIdMissing,
+    #[error("project id '{0}' was not found in the database.")]
+    ProjectIdNotFound(String),
+    #[error(
+        "no project found for repo '{0}' with root '{1}'. Create one with `dbtx project create`."
+    )]
+    ProjectNotFoundByRepo(String, String),
+    #[error("environment '{1}' for project '{0}' was not found.")]
+    EnvironmentNotFound(String, String),
+    #[error("environment '{1}' for project '{0}' already exists")]
+    EnvironmentAlreadyExists(String, String),
+    #[error("environment version '{2}' for environment '{1}' in project '{0}' was not found")]
+    EnvironmentVersionNotFound(String, String, i64),
+    #[error("plan '{0}' was not found")]
+    PlanNotFound(String),
+    #[error("project draft '{0}' was not found")]
+    ProjectDraftNotFound(String),
+    #[error("environment draft '{0}' was not found")]
+    EnvironmentDraftNotFound(String),
+
+    // --- Remote execution precondition errors ---
     #[error("remote execution requires --project or project_id")]
     RemoteExecutionRequiresProjectId,
     #[error("remote execution requires an environment slug")]
@@ -79,32 +160,8 @@ pub enum AppError {
         "environment '{1}' for project '{0}' is missing git_commit_sha required for remote execution"
     )]
     RemoteExecutionRequiresCommitSha(String, String),
-    #[error(
-        "database url is not configured. Set --database-url or DBTX_DATABASE_URL for dbtx-server."
-    )]
-    MissingDatabaseUrl,
-    #[error(
-        "dbtx service url is not configured. Start `dbtx-server` and set --service-url, DBTX_SERVICE_URL, or service.url in dbtx.toml."
-    )]
-    MissingServiceUrl,
-    #[error(
-        "database schema is not up to date. Run `dbtx state migrate` before invoking other commands."
-    )]
-    SchemaOutOfDate,
-    #[error("project id '{0}' was not found in the database.")]
-    ProjectIdNotFound(String),
-    #[error(
-        "no project found for repo '{0}' with root '{1}'. Create one with `dbtx project create`."
-    )]
-    ProjectNotFoundByRepo(String, String),
-    #[error("environment '{1}' for project '{0}' was not found.")]
-    EnvironmentNotFound(String, String),
-    #[error("environment '{1}' for project '{0}' already exists")]
-    EnvironmentAlreadyExists(String, String),
-    #[error("environment version '{2}' for environment '{1}' in project '{0}' was not found")]
-    EnvironmentVersionNotFound(String, String, i64),
-    #[error("plan '{0}' was not found")]
-    PlanNotFound(String),
+
+    // --- Validation errors ---
     #[error("invalid project mode '{0}'")]
     InvalidProjectMode(String),
     #[error("invalid environment status '{0}'")]
@@ -135,6 +192,12 @@ pub enum AppError {
         "dbtx manages warehouse profiles internally; remove the user-supplied --profiles-dir argument"
     )]
     UserProfilesDirNotAllowed,
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+    #[error("environment '{0}' is immutable and cannot be modified")]
+    ImmutableEnvironment(String),
+
+    // --- Reconciliation errors ---
     #[error("environment is already reconciled to known desired state")]
     EnvironmentAlreadyReconciled,
     #[error("environment reconciliation is already in progress")]
@@ -147,26 +210,30 @@ pub enum AppError {
     ReconciliationRequiresCommitSha,
     #[error("reconciliation plan resolved to no selected resources")]
     ReconciliationEmptyPlan,
-    #[error("invocation was canceled")]
-    InvocationCanceled,
-    #[error("invocation is owned by a different worker or is not running")]
-    InvocationOwnershipMismatch,
-    #[error("invocation '{0}' was not found")]
-    InvocationNotFound(String),
-    #[error("project draft '{0}' was not found")]
-    ProjectDraftNotFound(String),
-    #[error("environment draft '{0}' was not found")]
-    EnvironmentDraftNotFound(String),
-    #[error("environment '{0}' is immutable and cannot be modified")]
-    ImmutableEnvironment(String),
+
+    // --- Config errors ---
+    #[error(
+        "database url is not configured. Set --database-url or DBTX_DATABASE_URL for dbtx-server."
+    )]
+    MissingDatabaseUrl,
+    #[error(
+        "dbtx service url is not configured. Start `dbtx-server` and set --service-url, DBTX_SERVICE_URL, or service.url in dbtx.toml."
+    )]
+    MissingServiceUrl,
+    #[error(
+        "database schema is not up to date. Run `dbtx state migrate` before invoking other commands."
+    )]
+    SchemaOutOfDate,
+
+    // --- Worker/execution errors ---
     #[error("timed out: {0}")]
     TimedOut(String),
-    #[error("invalid input: {0}")]
-    InvalidInput(String),
     #[error("worker setup failed: {0}")]
     WorkerSetupFailed(String),
     #[error("git target not found: {0}")]
     GitTargetNotFound(String),
+
+    // --- HTTP client errors ---
     #[error("{0}")]
     Internal(String),
     #[error("not found: {0}")]
@@ -179,6 +246,41 @@ pub enum AppError {
     ServiceUnavailable(String),
     #[error("request timed out: {0}")]
     RequestTimeout(String),
+}
+
+impl From<ReconcileError> for AppError {
+    fn from(err: ReconcileError) -> Self {
+        match err {
+            ReconcileError::AlreadyReconciled => Self::EnvironmentAlreadyReconciled,
+            ReconcileError::InProgress => Self::ReconciliationInProgress,
+            ReconcileError::PlanNotAdmissible(plan, status) => {
+                Self::PlanNotAdmissible(plan, status)
+            }
+            ReconcileError::RequiresBaseline => Self::ReconciliationRequiresBaseline,
+            ReconcileError::RequiresCommitSha => Self::ReconciliationRequiresCommitSha,
+            ReconcileError::EmptyPlan => Self::ReconciliationEmptyPlan,
+        }
+    }
+}
+
+impl From<ProfileError> for AppError {
+    fn from(err: ProfileError) -> Self {
+        match err {
+            ProfileError::MissingSecretKey => Self::MissingSecretKey,
+            ProfileError::MissingDbtProfile => Self::MissingDbtProfile,
+            ProfileError::FileNotFound(path) => Self::ProfilesFileNotFound(path),
+            ProfileError::NotFound(name) => Self::ProfileNotFound(name),
+            ProfileError::TargetNotFound(profile, target) => {
+                Self::ProfileTargetNotFound(profile, target)
+            }
+            ProfileError::MissingAdapterType => Self::MissingAdapterType,
+            ProfileError::UnsupportedAdapter(adapter) => Self::UnsupportedAdapter(adapter),
+            ProfileError::InvalidConfig(msg) => Self::InvalidProfileConfig(msg),
+            ProfileError::InvalidSecret(msg) => Self::InvalidProfileSecret(msg),
+            ProfileError::Encryption(msg) => Self::Encryption(msg),
+            ProfileError::InvalidEncryptedSecret(msg) => Self::InvalidEncryptedSecret(msg),
+        }
+    }
 }
 
 pub type AppResult<T> = Result<T, AppError>;
