@@ -780,4 +780,67 @@ mod tests {
         assert_eq!(root, std::path::PathBuf::from("/tmp/test-git-cache"));
         unsafe { std::env::remove_var("DBTX_GIT_CACHE_DIR") };
     }
+
+    #[test]
+    fn local_spec_profiles_yml_is_empty() {
+        use crate::api::{InvocationCommandApi, InvocationExecutionSpecApi};
+        let spec = InvocationExecutionSpecApi::Local {
+            command: InvocationCommandApi::Build,
+            args: vec![],
+            project_dir: "/tmp/project".to_string(),
+            profiles_yml: String::new(),
+            state_manifest: None,
+        };
+        assert!(spec.profiles_yml().is_empty());
+        assert!(matches!(spec, InvocationExecutionSpecApi::Local { .. }));
+    }
+
+    #[test]
+    fn remote_spec_profiles_yml_is_populated() {
+        use crate::api::{InvocationCommandApi, InvocationExecutionSpecApi};
+        let spec = InvocationExecutionSpecApi::Remote {
+            command: InvocationCommandApi::Build,
+            args: vec![],
+            repo_url: "git@github.com:org/repo.git".to_string(),
+            commit_sha: "abc123".to_string(),
+            project_root: ".".to_string(),
+            profiles_yml: "dbtx:\n  target: prod\n".to_string(),
+            state_manifest: None,
+        };
+        assert!(!spec.profiles_yml().is_empty());
+        assert!(!matches!(spec, InvocationExecutionSpecApi::Local { .. }));
+    }
+
+    #[test]
+    fn prepare_runtime_project_patches_local_spec() {
+        use super::patch_local_runtime_project;
+
+        let project = TempDir::new().expect("project dir");
+        std::fs::write(
+            project.path().join("dbt_project.yml"),
+            "name: test_project\n",
+        )
+        .expect("write dbt_project.yml");
+
+        let guard = patch_local_runtime_project(project.path()).expect("patch");
+        let patched =
+            std::fs::read_to_string(project.path().join("dbt_project.yml")).expect("read");
+        assert!(patched.contains(DBTX_SELECTED_RESOURCES_HOOK));
+
+        // Macro file exists
+        assert!(
+            project
+                .path()
+                .join("macros")
+                .join(DBTX_SELECTED_RESOURCES_MACRO_FILE)
+                .is_file()
+        );
+
+        drop(guard);
+
+        // Restored
+        let restored =
+            std::fs::read_to_string(project.path().join("dbt_project.yml")).expect("read");
+        assert_eq!(restored, "name: test_project\n");
+    }
 }
