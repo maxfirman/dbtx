@@ -71,13 +71,21 @@ impl InvocationCommand {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct LocalExecutionSpec {
-    pub command: InvocationCommand,
-    pub args: Vec<OsString>,
-    pub project_dir: PathBuf,
-    pub profiles_yml: String,
-    pub state_manifest: Option<Value>,
+impl From<crate::api::InvocationCommandApi> for InvocationCommand {
+    fn from(command: crate::api::InvocationCommandApi) -> Self {
+        match command {
+            crate::api::InvocationCommandApi::Build => Self::Build,
+            crate::api::InvocationCommandApi::Run => Self::Run,
+            crate::api::InvocationCommandApi::Ls => Self::Ls,
+            crate::api::InvocationCommandApi::Test => Self::Test,
+            crate::api::InvocationCommandApi::Seed => Self::Seed,
+            crate::api::InvocationCommandApi::Release => Self::Release,
+            crate::api::InvocationCommandApi::ProjectValidate => Self::ProjectValidate,
+            crate::api::InvocationCommandApi::EnvironmentPrepare => Self::EnvironmentPrepare,
+            crate::api::InvocationCommandApi::EnvironmentValidate => Self::EnvironmentValidate,
+            crate::api::InvocationCommandApi::ManifestPrepare => Self::ManifestPrepare,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -122,7 +130,6 @@ pub struct EnvironmentValidationSpec {
 
 #[derive(Debug, Clone)]
 pub enum PreparedExecutionSpec {
-    Local(LocalExecutionSpec),
     Remote(RemoteExecutionSpec),
     ReleaseValidation(ReleaseValidationSpec),
     ProjectValidation(ProjectValidationSpec),
@@ -292,11 +299,6 @@ pub fn infer_local_project_defaults(
     })
 }
 
-pub fn infer_local_worker_queue(current_dir: &Path) -> AppResult<String> {
-    let project_name = read_dbt_project_name_from_root(current_dir)?;
-    let identity_hash = infer_local_identity_hash(current_dir, &project_name)?;
-    Ok(format!("local-{identity_hash}"))
-}
 
 pub fn infer_remote_project_defaults(
     current_dir: &Path,

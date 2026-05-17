@@ -181,18 +181,7 @@ pub async fn start_prepared_invocation(
 }
 
 fn map_command_to_service(command: InvocationCommandApi) -> InvocationCommand {
-    match command {
-        InvocationCommandApi::Build => InvocationCommand::Build,
-        InvocationCommandApi::Run => InvocationCommand::Run,
-        InvocationCommandApi::Ls => InvocationCommand::Ls,
-        InvocationCommandApi::Test => InvocationCommand::Test,
-        InvocationCommandApi::Seed => InvocationCommand::Seed,
-        InvocationCommandApi::Release => InvocationCommand::Release,
-        InvocationCommandApi::ProjectValidate => InvocationCommand::ProjectValidate,
-        InvocationCommandApi::EnvironmentPrepare => InvocationCommand::EnvironmentPrepare,
-        InvocationCommandApi::EnvironmentValidate => InvocationCommand::EnvironmentValidate,
-        InvocationCommandApi::ManifestPrepare => InvocationCommand::ManifestPrepare,
-    }
+    command.into()
 }
 
 pub async fn ensure_target_manifest_for_reconcile(

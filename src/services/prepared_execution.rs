@@ -17,11 +17,6 @@ impl LocalExecutionPrepared {
         command: InvocationCommandApi,
     ) -> PreparedInvocationStart {
         let execution_spec = match self.spec {
-            PreparedExecutionSpec::Local(spec) => InvocationExecutionSpecApi::Local {
-                command,
-                args: os_args_to_strings(spec.args),
-                state_manifest: spec.state_manifest,
-            },
             PreparedExecutionSpec::Remote(spec) => InvocationExecutionSpecApi::Remote {
                 command,
                 args: os_args_to_strings(spec.args),
@@ -61,10 +56,7 @@ impl LocalExecutionPrepared {
                 }
             }
         };
-        let execution_mode = match &execution_spec {
-            InvocationExecutionSpecApi::Local { .. } => InvocationExecutionModeApi::Local,
-            _ => InvocationExecutionModeApi::Server,
-        };
+        let execution_mode = InvocationExecutionModeApi::Server;
         let persistence = self.persistence.map(|p| InvocationPersistence {
             run_id: p.run_id,
             project_id: p.project_id,

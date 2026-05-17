@@ -244,12 +244,7 @@ async fn invocation_lifecycle_in_process() {
     let (app, pool) = test_app().await;
 
     // Seed project + environment
-    sqlx::query(
-        "INSERT INTO projects (project_id, project_name, mode, metadata) VALUES ('prj_local_1', 'demo', 'local', '{}'::jsonb)"
-    ).execute(&pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, profile_config, profile_secrets, metadata) VALUES (1, 'dev', 'demo', 'dev', 'duckdb', 'generic', 'main', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)"
-    ).execute(&pool).await.unwrap();
+    seed_local_project(&pool).await;
 
     // Create a temp dbt project
     let tmp = tempfile::TempDir::new().unwrap();
@@ -633,8 +628,7 @@ async fn invocation_full_lifecycle() {
     let (app, pool) = test_app().await;
 
     // Seed project + environment
-    sqlx::query("INSERT INTO projects (project_id, project_name, mode, metadata) VALUES ('prj_local_1', 'demo', 'local', '{}'::jsonb)").execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, profile_config, profile_secrets, metadata) VALUES (1, 'dev', 'demo', 'dev', 'duckdb', 'generic', 'main', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)").execute(&pool).await.unwrap();
+    seed_local_project(&pool).await;
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("dbt_project.yml"),
@@ -1725,4 +1719,123 @@ async fn reconcile_nonexistent_environment_returns_error() {
         status == StatusCode::NOT_FOUND || status == StatusCode::INTERNAL_SERVER_ERROR,
         "expected error status, got {status}"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn project_resolve_returns_project_by_repo_url() {
+    let (app, pool) = test_app().await;
+    sqlx::query(
+        "INSERT INTO projects (project_id, project_name, mode, git_repo_url, project_root, metadata) VALUES ('prj_remote_abc', 'analytics', 'remote', 'git@github.com:org/repo.git', 'analytics', '{}'::jsonb)"
+    ).execute(&pool).await.unwrap();
+
+    let (status, body) = get_json(
+        &app,
+        "/v1/projects/resolve?git_repo_url=git%40github.com%3Aorg%2Frepo.git&project_root=analytics",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resolve: {body}");
+    assert_eq!(body["project"]["project"]["project_id"], "prj_remote_abc");
+    assert_eq!(body["project"]["project"]["project_name"], "analytics");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn project_resolve_returns_404_for_unknown_repo() {
+    let (app, _pool) = test_app().await;
+
+    let (status, _body) = get_json(
+        &app,
+        "/v1/projects/resolve?git_repo_url=git%40github.com%3Aunknown%2Frepo.git&project_root=.",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn local_environment_upsert_creates_and_returns_environment() {
+    let (app, pool) = test_app().await;
+    sqlx::query(
+        "INSERT INTO projects (project_id, project_name, mode, git_repo_url, project_root, metadata) VALUES ('prj_remote_xyz', 'demo', 'remote', 'https://example.com/repo.git', '.', '{}'::jsonb)"
+    ).execute(&pool).await.unwrap();
+
+    let (status, body) = post_json(
+        &app,
+        "/v1/projects/prj_remote_xyz/environments/local",
+        serde_json::json!({
+            "target_name": "dev",
+            "machine_id": "laptop-123",
+            "adapter_type": "duckdb",
+            "schema_name": "main"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "upsert: {body}");
+    assert_eq!(body["environment_slug"], "local-laptop-123-dev");
+    assert_eq!(body["worker_queue"], "local-laptop-123");
+
+    // Calling again is idempotent
+    let (status2, body2) = post_json(
+        &app,
+        "/v1/projects/prj_remote_xyz/environments/local",
+        serde_json::json!({
+            "target_name": "dev",
+            "machine_id": "laptop-123",
+            "adapter_type": "postgres",
+            "schema_name": "public"
+        }),
+    )
+    .await;
+    assert_eq!(status2, StatusCode::OK);
+    assert_eq!(body2["environment_slug"], "local-laptop-123-dev");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn execution_mode_derived_from_environment_commit_sha() {
+    let (app, pool) = test_app().await;
+    sqlx::query(
+        "INSERT INTO projects (project_id, project_name, mode, git_repo_url, project_root, metadata) VALUES ('prj_mode_test', 'demo', 'remote', 'https://example.com/repo.git', '.', '{}'::jsonb)"
+    ).execute(&pool).await.unwrap();
+
+    // Environment WITH git_commit_sha → server mode
+    sqlx::query(
+        "INSERT INTO environments (project_id, slug, profile_name, target_name, git_branch, git_commit_sha, adapter_type, worker_queue, schema_name, profile_config, profile_secrets, metadata) VALUES (1, 'prod', 'demo', 'prod', 'main', 'abc123def456', 'duckdb', 'generic', 'main', '{\"path\":\"warehouse.duckdb\"}'::jsonb, '{}'::jsonb, '{}'::jsonb)"
+    ).execute(&pool).await.unwrap();
+
+    // Environment WITHOUT git_commit_sha → local mode
+    sqlx::query(
+        "INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, profile_config, profile_secrets, metadata) VALUES (1, 'local-dev', 'demo', 'dev', 'duckdb', 'local-test', 'main', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)"
+    ).execute(&pool).await.unwrap();
+
+    // Server mode invocation
+    let (status, body) = post_json(
+        &app,
+        "/v1/invocations",
+        serde_json::json!({
+            "command": "ls",
+            "args": [],
+            "project_id": "prj_mode_test",
+            "environment_slug": "prod"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "server invocation: {body}");
+    assert_eq!(body["execution_mode"], "server");
+
+    // Local mode invocation
+    let (status, body) = post_json(
+        &app,
+        "/v1/invocations",
+        serde_json::json!({
+            "command": "ls",
+            "args": [],
+            "project_id": "prj_mode_test",
+            "environment_slug": "local-dev"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "local invocation: {body}");
+    assert_eq!(body["execution_mode"], "local");
 }

@@ -2056,18 +2056,7 @@ async fn invocation_events(
 }
 
 fn map_invocation_command(command: InvocationCommandApi) -> InvocationCommand {
-    match command {
-        InvocationCommandApi::Build => InvocationCommand::Build,
-        InvocationCommandApi::Run => InvocationCommand::Run,
-        InvocationCommandApi::Ls => InvocationCommand::Ls,
-        InvocationCommandApi::Test => InvocationCommand::Test,
-        InvocationCommandApi::Seed => InvocationCommand::Seed,
-        InvocationCommandApi::Release => InvocationCommand::Release,
-        InvocationCommandApi::ProjectValidate => InvocationCommand::ProjectValidate,
-        InvocationCommandApi::EnvironmentPrepare => InvocationCommand::EnvironmentPrepare,
-        InvocationCommandApi::EnvironmentValidate => InvocationCommand::EnvironmentValidate,
-        InvocationCommandApi::ManifestPrepare => InvocationCommand::ManifestPrepare,
-    }
+    command.into()
 }
 
 struct ApiError(AppError);

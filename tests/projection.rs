@@ -64,7 +64,7 @@ async fn remote_invocation_requires_remote_project_mode() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
-async fn remote_invocation_requires_commit_pinned_immutable_environment() {
+async fn environment_without_commit_sha_creates_local_invocation() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = db.client().clone();
