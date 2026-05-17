@@ -98,6 +98,41 @@ impl AppState {
         runtime.push_event(sequence, started_event).await;
         Ok(())
     }
+
+    /// Complete an invocation and apply all post-terminal reactions:
+    /// persist completion, auto-admit blocked plans, schedule cleanup.
+    pub(crate) async fn complete_invocation(
+        &self,
+        invocation_id: Uuid,
+        worker_id: &str,
+        lease_token: Uuid,
+        completion: ExecutionCompletion,
+    ) -> AppResult<()> {
+        let persistence = self
+            .db
+            .get_invocation_persistence(invocation_id, Some(worker_id), Some(lease_token))
+            .await?;
+        let runtime = self.invocations.get_or_create(invocation_id, None).await;
+        let recorder = InvocationRecorder::new(self.db.clone(), invocation_id, runtime);
+        recorder.complete(worker_id, lease_token, completion).await?;
+        if let (Some(project_id), Some(environment_id)) =
+            (persistence.project_id, persistence.environment_id)
+        {
+            let admitted =
+                auto_admit_blocked_plans_for_environment(self, project_id, environment_id).await?;
+            if admitted > 0 {
+                info!(
+                    invocation_id = %invocation_id,
+                    project_id,
+                    environment_id,
+                    admitted,
+                    "auto-admitted blocked reconciliation plans"
+                );
+            }
+        }
+        self.invocations.schedule_cleanup(invocation_id);
+        Ok(())
+    }
 }
 
 impl crate::services::InvocationStarter for AppState {
@@ -2004,31 +2039,9 @@ async fn invocation_complete(
     Json(request): Json<InvocationCompleteApiRequest>,
 ) -> Result<StatusCode, ApiError> {
     reconcile_timed_out_invocations(&state).await?;
-    let runtime = state.invocations.get_or_create(id, None).await;
-    let recorder = InvocationRecorder::new(state.db.clone(), id, runtime);
-    let persistence = state
-        .db
-        .get_invocation_persistence(id, Some(&request.worker_id), Some(request.lease_token))
+    state
+        .complete_invocation(id, &request.worker_id, request.lease_token, request.completion)
         .await?;
-    recorder
-        .complete(&request.worker_id, request.lease_token, request.completion)
-        .await?;
-    if let (Some(project_id), Some(environment_id)) =
-        (persistence.project_id, persistence.environment_id)
-    {
-        let admitted =
-            auto_admit_blocked_plans_for_environment(&state, project_id, environment_id).await?;
-        if admitted > 0 {
-            info!(
-                invocation_id = %id,
-                project_id,
-                environment_id,
-                admitted,
-                "auto-admitted blocked reconciliation plans"
-            );
-        }
-    }
-    state.invocations.schedule_cleanup(id);
     info!(invocation_id = %id, "completed invocation via api");
     Ok(StatusCode::NO_CONTENT)
 }
