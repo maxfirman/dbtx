@@ -78,17 +78,25 @@ pub async fn execute_claimed_invocation(
         project_dir = %project_dir.display(),
         "starting claimed invocation execution"
     );
-    if let Err(err) = prepare_runtime_project_for_execution(&spec, command_name, &project_dir).await
+    let _runtime_guard = match prepare_runtime_project_for_execution(&spec, command_name, &project_dir).await
     {
-        report_setup_failure(client, &claim, &err.to_string()).await?;
-        return Err(err);
-    }
-    let profiles_dir = match write_profiles_dir(spec.profiles_yml()) {
-        Ok(profiles_dir) => profiles_dir,
+        Ok(guard) => guard,
         Err(err) => {
             report_setup_failure(client, &claim, &err.to_string()).await?;
             return Err(err);
         }
+    };
+    let is_local = matches!(spec, InvocationExecutionSpecApi::Local { .. });
+    let profiles_dir = if !is_local {
+        match write_profiles_dir(spec.profiles_yml()) {
+            Ok(profiles_dir) => Some(profiles_dir),
+            Err(err) => {
+                report_setup_failure(client, &claim, &err.to_string()).await?;
+                return Err(err);
+            }
+        }
+    } else {
+        None
     };
     let state_dir = match write_state_dir(spec.state_manifest()) {
         Ok(state_dir) => state_dir,
@@ -104,8 +112,10 @@ pub async fn execute_claimed_invocation(
         dbt_args.push("--state".into());
         dbt_args.push(state_dir.path().as_os_str().to_os_string());
     }
-    dbt_args.push("--profiles-dir".into());
-    dbt_args.push(profiles_dir.path().as_os_str().to_os_string());
+    if let Some(profiles_dir) = profiles_dir.as_ref() {
+        dbt_args.push("--profiles-dir".into());
+        dbt_args.push(profiles_dir.path().as_os_str().to_os_string());
+    }
 
     let command = map_command(command_name);
     let dbt_path = std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
@@ -360,14 +370,52 @@ async fn prepare_runtime_project_for_execution(
     spec: &InvocationExecutionSpecApi,
     command: InvocationCommandApi,
     project_dir: &Path,
-) -> AppResult<()> {
+) -> AppResult<Option<RuntimeProjectGuard>> {
     if !persists_state(command) {
-        return Ok(());
+        return Ok(None);
     }
-    let InvocationExecutionSpecApi::Remote { repo_url, .. } = spec else {
-        return Ok(());
-    };
-    patch_remote_runtime_project(repo_url, project_dir).await
+    match spec {
+        InvocationExecutionSpecApi::Remote { repo_url, .. } => {
+            patch_remote_runtime_project(repo_url, project_dir).await?;
+            Ok(None)
+        }
+        InvocationExecutionSpecApi::Local { .. } => {
+            let guard = patch_local_runtime_project(project_dir)?;
+            Ok(Some(guard))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Guard that restores the original `dbt_project.yml` and removes the macro file on drop.
+pub(crate) struct RuntimeProjectGuard {
+    project_path: PathBuf,
+    original_content: String,
+    macro_file: PathBuf,
+}
+
+impl Drop for RuntimeProjectGuard {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::write(&self.project_path, &self.original_content) {
+            warn!(path = %self.project_path.display(), error = %err, "failed to restore dbt_project.yml");
+        }
+        let _ = std::fs::remove_file(&self.macro_file);
+    }
+}
+
+fn patch_local_runtime_project(project_dir: &Path) -> AppResult<RuntimeProjectGuard> {
+    let project_path = project_dir.join("dbt_project.yml");
+    let original_content = std::fs::read_to_string(&project_path)?;
+    let mut project_yaml: YamlValue = serde_yaml::from_str(&original_content)?;
+    ensure_on_run_start_hook(&mut project_yaml)?;
+    let macro_file = ensure_selected_resources_macro_file(project_dir, &project_yaml)?;
+    std::fs::write(&project_path, serde_yaml::to_string(&project_yaml)?)?;
+    std::fs::write(&macro_file, DBTX_SELECTED_RESOURCES_MACRO)?;
+    Ok(RuntimeProjectGuard {
+        project_path,
+        original_content,
+        macro_file,
+    })
 }
 
 async fn patch_remote_runtime_project(repo_url: &str, project_dir: &Path) -> AppResult<()> {
@@ -612,6 +660,43 @@ mod tests {
                 .join("custom_macros")
                 .join(DBTX_SELECTED_RESOURCES_MACRO_FILE)
                 .is_file()
+        );
+    }
+
+    #[test]
+    fn local_runtime_project_guard_restores_on_drop() {
+        use super::patch_local_runtime_project;
+
+        let project = TempDir::new().expect("project dir");
+        let original = "name: demo\n";
+        std::fs::write(project.path().join("dbt_project.yml"), original).expect("dbt project");
+
+        {
+            let guard = patch_local_runtime_project(project.path()).expect("patch local project");
+            // While guard is alive, file is patched
+            let patched = std::fs::read_to_string(project.path().join("dbt_project.yml"))
+                .expect("read patched");
+            assert!(patched.contains(DBTX_SELECTED_RESOURCES_HOOK));
+            assert!(
+                project
+                    .path()
+                    .join("macros")
+                    .join(DBTX_SELECTED_RESOURCES_MACRO_FILE)
+                    .is_file()
+            );
+            drop(guard);
+        }
+
+        // After guard drops, file is restored
+        let restored =
+            std::fs::read_to_string(project.path().join("dbt_project.yml")).expect("read restored");
+        assert_eq!(restored, original);
+        assert!(
+            !project
+                .path()
+                .join("macros")
+                .join(DBTX_SELECTED_RESOURCES_MACRO_FILE)
+                .exists()
         );
     }
 
