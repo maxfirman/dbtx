@@ -198,7 +198,6 @@ fn is_htmx(headers: &HeaderMap) -> bool {
 
 async fn dashboard(State(state): State<AppState>) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let projects = db.list_projects().await?;
     let invocations = db
         .list_invocations(InvocationListApiRequest {
@@ -242,7 +241,6 @@ async fn dashboard(State(state): State<AppState>) -> Result<Html<String>, UiErro
 
 async fn dashboard_summary(State(state): State<AppState>) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let project_count = db.list_projects().await?.len() as i64;
     let raw_workers = db.list_workers().await?;
     let workers = filter_workers(
@@ -293,7 +291,6 @@ async fn dashboard_recent_invocations(
     State(state): State<AppState>,
 ) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let invocations = db
         .list_invocations(InvocationListApiRequest {
             limit: Some(10),
@@ -307,7 +304,6 @@ async fn dashboard_recent_invocations(
 
 async fn dashboard_workers(State(state): State<AppState>) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let workers = filter_workers(
         db.list_workers()
             .await?
@@ -321,7 +317,6 @@ async fn dashboard_workers(State(state): State<AppState>) -> Result<Html<String>
 
 async fn dashboard_queues(State(state): State<AppState>) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let raw_workers = db.list_workers().await?;
     let configured_queues = configured_queue_keys(db).await?;
     let (non_stale_worker_queues, stale_worker_queues) = worker_queue_health_sets(&raw_workers);
@@ -341,7 +336,6 @@ async fn dashboard_queues(State(state): State<AppState>) -> Result<Html<String>,
 
 async fn projects_index(State(state): State<AppState>) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let projects = db.list_projects().await?;
     let mut views = Vec::with_capacity(projects.len());
     for project in projects {
@@ -1016,7 +1010,6 @@ async fn load_invocation_rows(
     ),
     UiError,
 > {
-    db.require_current_schema().await?;
     let normalized = normalized_invocation_filters(query).map_err(UiError::from)?;
     let requested_page = parse_page_number(query.page).map_err(UiError::from)?;
     let total_count = db
@@ -1112,7 +1105,6 @@ async fn invocation_cancel(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let invocation_id = parse_uuid(&id)?;
     db.request_cancel_invocation(invocation_id).await?;
     Ok(Redirect::to(&format!("/ui/invocations/{invocation_id}")))
@@ -1308,7 +1300,6 @@ fn filter_queues(
 
 async fn workers_index_inner(state: AppState, show_stale: bool) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let workers = filter_workers(
         db.list_workers()
             .await?
@@ -1338,7 +1329,6 @@ async fn workers_table(
     Query(query): Query<StaleVisibilityQuery>,
 ) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let show_stale = show_stale_enabled(&query);
     let workers = filter_workers(
         db.list_workers()
@@ -1357,7 +1347,6 @@ async fn workers_table(
 
 async fn queues_index_inner(state: AppState, show_stale: bool) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let raw_workers = db.list_workers().await?;
     let configured_queues = configured_queue_keys(db).await?;
     let (non_stale_worker_queues, stale_worker_queues) = worker_queue_health_sets(&raw_workers);
@@ -1393,7 +1382,6 @@ async fn queues_table(
     Query(query): Query<StaleVisibilityQuery>,
 ) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let show_stale = show_stale_enabled(&query);
     let raw_workers = db.list_workers().await?;
     let configured_queues = configured_queue_keys(db).await?;
@@ -3157,7 +3145,6 @@ async fn model_detail(
     Query(query): Query<ModelTabQuery>,
 ) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let project = db.get_project_by_project_id(&project_id).await?;
     let env = db.get_environment(&project.project_id, &env_slug).await?;
     let unique_id = urlencoding::decode(&unique_id)
@@ -3258,7 +3245,6 @@ async fn model_tab(
     Query(query): Query<ModelTabQuery>,
 ) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let project = db.get_project_by_project_id(&project_id).await?;
     let env = db.get_environment(&project.project_id, &env_slug).await?;
     let unique_id = urlencoding::decode(&unique_id)
@@ -3857,7 +3843,6 @@ async fn model_test_history(
     )>,
 ) -> Result<Html<String>, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let project = db.get_project_by_project_id(&project_id).await?;
     let env = db.get_environment(&project.project_id, &env_slug).await?;
     let test_uid = urlencoding::decode(&test_unique_id)

@@ -49,7 +49,6 @@ impl<'a> InvocationService<'a> {
         project_id: &str,
         environment_slug: &str,
     ) -> AppResult<LocalExecutionPrepared> {
-        self.db.require_current_schema().await?;
         let project = self.db.get_project_by_project_id(project_id).await?;
         let environment = self
             .db
@@ -199,7 +198,6 @@ impl<'a> InvocationService<'a> {
         project_id: &str,
         environment_slug: &str,
     ) -> AppResult<LocalExecutionPrepared> {
-        self.db.require_current_schema().await?;
         let project = self.db.get_project_by_project_id(project_id).await?;
         let environment = self
             .db

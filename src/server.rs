@@ -101,13 +101,20 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let schema_checked_routes = Router::new()
         .merge(crate::ui::router())
-        .merge(system_routes())
         .merge(project_routes())
         .merge(environment_routes())
         .merge(invocation_routes())
         .merge(operator_routes())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_current_schema_middleware,
+        ));
+
+    Router::new()
+        .merge(schema_checked_routes)
+        .merge(system_routes())
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
                 let request_id = request
@@ -149,6 +156,23 @@ async fn request_id_middleware(
         response.headers_mut().insert("x-request-id", value);
     }
     response
+}
+
+async fn require_current_schema_middleware(
+    State(state): State<AppState>,
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Err(_err) = state.db.require_current_schema().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorResponse {
+                error: "schema out of date — run migrations".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 fn system_routes() -> Router<AppState> {

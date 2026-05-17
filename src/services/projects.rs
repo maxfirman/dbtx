@@ -15,7 +15,6 @@ impl<'a> ProjectService<'a> {
         &self,
         request: ProjectCreateRequest,
     ) -> AppResult<ProjectDraftRecord> {
-        self.db.require_current_schema().await?;
         self.db
             .create_project_draft(CreateProjectDraftInput {
                 git_repo_url: request.git_repo_url,
@@ -28,7 +27,6 @@ impl<'a> ProjectService<'a> {
         &self,
         draft_id: Uuid,
     ) -> AppResult<ProjectDraftValidationPrepared> {
-        self.db.require_current_schema().await?;
         let invocation_id = Uuid::new_v4();
         let draft = self.db.mark_project_draft_validating(draft_id).await?;
         Ok(ProjectDraftValidationPrepared {
@@ -43,17 +41,14 @@ impl<'a> ProjectService<'a> {
     }
 
     pub async fn get_draft(&self, draft_id: Uuid) -> AppResult<ProjectDraftRecord> {
-        self.db.require_current_schema().await?;
         self.db.get_project_draft(draft_id).await
     }
 
     pub async fn confirm_draft(&self, draft_id: Uuid) -> AppResult<ProjectRecord> {
-        self.db.require_current_schema().await?;
         self.db.confirm_project_draft(draft_id).await
     }
 
     pub async fn update(&self, request: ProjectUpdateRequest) -> AppResult<ProjectRecord> {
-        self.db.require_current_schema().await?;
         let existing = self.db.get_project_by_project_id(&request.project).await?;
         if existing.mode != "remote" {
             return Err(AppError::RemoteExecutionRequiresRemoteProject(
@@ -81,17 +76,14 @@ impl<'a> ProjectService<'a> {
     }
 
     pub async fn list(&self) -> AppResult<Vec<ProjectRecord>> {
-        self.db.require_current_schema().await?;
         self.db.list_projects().await
     }
 
     pub async fn show(&self, project: String) -> AppResult<ProjectRecord> {
-        self.db.require_current_schema().await?;
         self.db.get_project_by_project_id(&project).await
     }
 
     pub async fn delete(&self, project: String) -> AppResult<()> {
-        self.db.require_current_schema().await?;
         self.db.delete_project(&project).await
     }
 }

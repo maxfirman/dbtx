@@ -8,7 +8,6 @@ pub(super) async fn load_environment_panel(
     slug: &str,
 ) -> Result<EnvironmentPanelTemplate, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let project = db.get_project_by_project_id(project_id).await?;
     let environment = db
         .list_environments(&project.project_id)
@@ -72,7 +71,6 @@ pub(super) async fn load_catalog_page(
     query: ModelListQuery,
 ) -> Result<ModelsPageTemplate, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let projects = db.list_projects().await?;
 
     let resolved_project_id = query
@@ -148,7 +146,6 @@ pub(super) async fn load_invocation_detail_page(
     tab: Option<&str>,
 ) -> Result<InvocationDetailTemplate, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let invocation = db.get_invocation_status(invocation_id).await?;
     let tab = normalized_invocation_tab(tab);
     let base = format!("/ui/invocations/{invocation_id}");
@@ -183,7 +180,6 @@ pub(super) async fn load_invocation_detail_panel(
     invocation_id: Uuid,
 ) -> Result<InvocationDetailPanelTemplate, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     let invocation = db.get_invocation_status(invocation_id).await?;
     Ok(InvocationDetailPanelTemplate {
         invocation: invocation_detail_view(&invocation),
@@ -197,7 +193,6 @@ pub(super) async fn render_invocation_tab_content(
     tab: Option<&str>,
 ) -> Result<String, UiError> {
     let db = state.db();
-    db.require_current_schema().await?;
     render_invocation_tab_content_for_db(db, invocation_id, normalized_invocation_tab(tab)).await
 }
 

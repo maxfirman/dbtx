@@ -31,7 +31,6 @@ impl<'a> EnvironmentService<'a> {
     }
 
     pub async fn create_draft(&self, project: String) -> AppResult<EnvironmentDraftRecord> {
-        self.db.require_current_schema().await?;
         let project = self.db.get_project_by_project_id(&project).await?;
         if project.mode != "remote" {
             return Err(AppError::RemoteExecutionRequiresRemoteProject(
@@ -48,7 +47,6 @@ impl<'a> EnvironmentService<'a> {
     }
 
     pub async fn get_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentDraftRecord> {
-        self.db.require_current_schema().await?;
         self.db.get_environment_draft(draft_id).await
     }
 
@@ -57,7 +55,6 @@ impl<'a> EnvironmentService<'a> {
         draft_id: Uuid,
         request: EnvironmentDraftUpdateRequest,
     ) -> AppResult<EnvironmentDraftRecord> {
-        self.db.require_current_schema().await?;
         self.db
             .update_environment_draft(
                 draft_id,
@@ -82,7 +79,6 @@ impl<'a> EnvironmentService<'a> {
         &self,
         draft_id: Uuid,
     ) -> AppResult<EnvironmentDraftCreatePrepared> {
-        self.db.require_current_schema().await?;
         let invocation_id = Uuid::new_v4();
         let draft = self.db.mark_environment_draft_loading_git(draft_id).await?;
         let project = self.db.get_project_by_id(draft.project_id).await?;
@@ -184,7 +180,6 @@ impl<'a> EnvironmentService<'a> {
     }
 
     pub async fn confirm_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentRecord> {
-        self.db.require_current_schema().await?;
         self.db.confirm_environment_draft(draft_id).await
     }
 
@@ -192,7 +187,6 @@ impl<'a> EnvironmentService<'a> {
         &self,
         request: EnvironmentReleaseRequest,
     ) -> AppResult<EnvironmentRecord> {
-        self.db.require_current_schema().await?;
         let project = self.db.get_project_by_project_id(&request.project).await?;
         if project.mode != "remote" {
             return Err(AppError::RemoteExecutionRequiresRemoteProject(
@@ -221,7 +215,6 @@ impl<'a> EnvironmentService<'a> {
         project: String,
         slug: String,
     ) -> AppResult<Vec<EnvironmentVersionRecord>> {
-        self.db.require_current_schema().await?;
         self.db.list_environment_versions(&project, &slug).await
     }
 
@@ -229,7 +222,6 @@ impl<'a> EnvironmentService<'a> {
         &self,
         request: EnvironmentRollbackRequest,
     ) -> AppResult<EnvironmentRecord> {
-        self.db.require_current_schema().await?;
         let project = self.db.get_project_by_project_id(&request.project).await?;
         if project.mode != "remote" {
             return Err(AppError::RemoteExecutionRequiresRemoteProject(
@@ -243,12 +235,10 @@ impl<'a> EnvironmentService<'a> {
     }
 
     pub async fn list(&self, project: String) -> AppResult<Vec<EnvironmentRecord>> {
-        self.db.require_current_schema().await?;
         self.db.list_environments(&project).await
     }
 
     pub async fn show(&self, project: String, slug: String) -> AppResult<EnvironmentRecord> {
-        self.db.require_current_schema().await?;
         self.db.get_environment(&project, &slug).await
     }
 
@@ -257,7 +247,6 @@ impl<'a> EnvironmentService<'a> {
         project: String,
         slug: String,
     ) -> AppResult<EnvironmentActualStateRecord> {
-        self.db.require_current_schema().await?;
         self.db.get_environment_actual_state(&project, &slug).await
     }
 
@@ -265,7 +254,6 @@ impl<'a> EnvironmentService<'a> {
         &self,
         request: SourceStateEventCreateRequest,
     ) -> AppResult<SourceStateEventRecord> {
-        self.db.require_current_schema().await?;
         self.db
             .create_source_state_event(SourceStateEventCreateInput {
                 project: request.project,
@@ -284,12 +272,10 @@ impl<'a> EnvironmentService<'a> {
         project: String,
         slug: String,
     ) -> AppResult<Vec<EnvironmentRunPlanRecord>> {
-        self.db.require_current_schema().await?;
         self.db.list_environment_run_plans(&project, &slug).await
     }
 
     pub async fn get_plan(&self, plan_id: Uuid) -> AppResult<EnvironmentRunPlanRecord> {
-        self.db.require_current_schema().await?;
         self.db.get_environment_run_plan(plan_id).await
     }
 
@@ -298,7 +284,6 @@ impl<'a> EnvironmentService<'a> {
         project: String,
         slug: String,
     ) -> AppResult<EnvironmentRunPlanRecord> {
-        self.db.require_current_schema().await?;
         let environment = self.db.get_environment(&project, &slug).await?;
         let lease_owner = format!("reconcile:{}", Uuid::new_v4());
         self.acquire_reconcile_lease(environment.id, &lease_owner)
@@ -387,7 +372,6 @@ impl<'a> EnvironmentService<'a> {
         invocation_id: Uuid,
         plan_id: Uuid,
     ) -> AppResult<EnvironmentPlanAdmitPrepared> {
-        self.db.require_current_schema().await?;
         let plan = self.db.get_environment_run_plan(plan_id).await?;
         let environment_id = plan.environment_id;
         let lease_owner = format!("admit:{}", invocation_id);
