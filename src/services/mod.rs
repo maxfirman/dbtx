@@ -5,17 +5,16 @@ use crate::db::{
     CreateProjectInput, CurrentNodeStatePlanningRecord, Db, EnvironmentActualStateRecord,
     EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput, EnvironmentRunPlanRecord,
     EnvironmentVersionRecord, EquivalentPlanLookup, GitState, LocalEnvironmentUpsertInput,
-    PlanStatus, PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord, RunFinalization,
+    PlanStatus, PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord,
     RunStart, SourceStateEventCreateInput, SourceStateEventRecord, UpdateEnvironmentDraftInput,
 };
 use crate::dbt_utils::{
-    append_invocation_id, append_profiles_dir, append_state_dir, build_generated_profiles,
+    append_invocation_id, build_generated_profiles,
     git_repo_root, read_dbt_project_name, read_git_state,
 };
 use crate::error::{AppError, AppResult};
-use crate::event::LogEvent;
 use crate::execution::ExecutionMode;
-use crate::manifest::{ManifestSnapshot, ReconstructedManifest};
+use crate::manifest::ReconstructedManifest;
 use crate::profile::{
     EnvironmentProfileRecord, LocalTargetProfile, resolve_runtime_profile,
     validate_environment_profile,
@@ -29,12 +28,6 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const RECONCILE_LEASE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
-
-pub trait InvocationObserver {
-    fn stdout_line(&mut self, line: &str);
-    fn stderr_line(&mut self, line: &str);
-    fn dbt_log(&mut self, _event: &LogEvent, _rendered: Option<&str>) {}
-}
 
 #[derive(Debug, Clone, Copy)]
 pub enum InvocationCommand {
@@ -86,12 +79,6 @@ pub struct InvocationRequest {
     pub current_dir: Option<PathBuf>,
     pub environment_slug: String,
     pub execution_mode: ExecutionMode,
-}
-
-#[derive(Debug, Clone)]
-#[must_use]
-pub struct InvocationResult {
-    pub exit_code: i32,
 }
 
 #[derive(Debug, Clone)]

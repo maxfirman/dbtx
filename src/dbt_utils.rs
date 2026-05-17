@@ -4,7 +4,6 @@
 
 use crate::db::{EnvironmentRecord, GitState};
 use crate::error::{AppError, AppResult};
-use crate::manifest::ReconstructedManifest;
 use crate::profile::{EnvironmentProfileRecord, GeneratedProfiles, resolve_runtime_profile};
 use std::ffi::OsString;
 use std::path::Path;
@@ -13,38 +12,6 @@ use uuid::Uuid;
 pub(crate) fn append_invocation_id(mut args: Vec<OsString>, run_id: Uuid) -> Vec<OsString> {
     args.push("--invocation-id".into());
     args.push(run_id.to_string().into());
-    args
-}
-
-pub(crate) fn append_state_dir(
-    mut args: Vec<OsString>,
-    reconstructed_manifest: Option<&ReconstructedManifest>,
-) -> Vec<OsString> {
-    if let Some(reconstructed_manifest) = reconstructed_manifest {
-        args.push("--state".into());
-        args.push(
-            reconstructed_manifest
-                .temp_dir
-                .path()
-                .as_os_str()
-                .to_os_string(),
-        );
-    }
-    args
-}
-
-pub(crate) fn append_profiles_dir(
-    mut args: Vec<OsString>,
-    generated_profiles: &GeneratedProfiles,
-) -> Vec<OsString> {
-    args.push("--profiles-dir".into());
-    args.push(
-        generated_profiles
-            .temp_dir
-            .path()
-            .as_os_str()
-            .to_os_string(),
-    );
     args
 }
 

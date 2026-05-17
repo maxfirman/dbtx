@@ -208,13 +208,6 @@ impl Db {
         self.get_environment_by_id(environment_id).await
     }
 
-    pub(crate) async fn finalize_run(&self, finalization: RunFinalization<'_>) -> AppResult<()> {
-        let mut tx = self.pool.begin().await?;
-        self.finalize_run_in_tx(&mut tx, finalization).await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
     pub(super) async fn finalize_run_in_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -302,32 +295,6 @@ impl Db {
             "environment_metadata": environment.metadata,
         })))
         .execute(&mut **tx)
-        .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn mark_run_finished(
-        &self,
-        run_id: Uuid,
-        dbt_version: Option<&str>,
-        exit_code: i32,
-        terminal_status: &str,
-    ) -> AppResult<()> {
-        sqlx::query(
-            r#"
-            UPDATE runs
-            SET dbt_version = COALESCE($2, dbt_version),
-                finished_at = NOW(),
-                exit_code = $3,
-                terminal_status = $4
-            WHERE run_id = $1
-            "#,
-        )
-        .bind(run_id)
-        .bind(dbt_version)
-        .bind(exit_code)
-        .bind(terminal_status)
-        .execute(&self.pool)
         .await?;
         Ok(())
     }
