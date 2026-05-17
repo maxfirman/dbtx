@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Plan reason indicating the invocation was triggered by a source state change.
+/// For source-triggered plans, the baseline manifest (not the target) is the correct
+/// watermark graph since the code has not changed, only the data freshness has.
+const PLAN_REASON_SOURCE_STATE_CHANGE: &str = "source_state_change";
+
 impl Db {
     pub(crate) async fn create_invocation(
         &self,
@@ -70,7 +75,7 @@ impl Db {
             if let Some(row) = row {
                 let reason: String = row.get("reason");
                 let baseline_run_id: Option<Uuid> = row.get("baseline_run_id");
-                if reason == "source_state_change" {
+                if reason == PLAN_REASON_SOURCE_STATE_CHANGE {
                     return Ok(baseline_run_id);
                 }
                 let metadata = row
@@ -1155,6 +1160,37 @@ impl Db {
     }
 }
 
+/// Commands that produce node executions which should advance source watermarks.
+/// Matches on the first token to tolerate legacy rows that may include dbt args.
 fn is_watermarkable_command(command: &str) -> bool {
-    matches!(command, "build" | "run" | "test" | "seed")
+    matches!(
+        command.split_whitespace().next().unwrap_or(""),
+        "build" | "run" | "test" | "seed"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_watermarkable_command;
+
+    #[test]
+    fn is_watermarkable_command_accepts_data_commands() {
+        for command in ["build", "run", "test", "seed"] {
+            assert!(is_watermarkable_command(command));
+        }
+    }
+
+    #[test]
+    fn is_watermarkable_command_uses_first_token() {
+        assert!(is_watermarkable_command("build --select orders+"));
+        assert!(is_watermarkable_command("run --full-refresh"));
+        assert!(!is_watermarkable_command("ls --select orders+"));
+    }
+
+    #[test]
+    fn is_watermarkable_command_rejects_non_data_commands() {
+        for command in ["", "ls", "release", "environment-validate"] {
+            assert!(!is_watermarkable_command(command));
+        }
+    }
 }

@@ -1047,6 +1047,7 @@ impl Db {
     /// On node start: compute candidate watermarks from parents and store in staging table.
     /// On node finish (success): commit candidates to the primary watermark table.
     /// On node finish (failure): discard candidates.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_node_watermark(
         &self,
         invocation_id: Option<Uuid>,

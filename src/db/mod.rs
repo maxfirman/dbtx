@@ -438,25 +438,6 @@ fn automatic_retry_backoff(failure_count: i32) -> chrono::Duration {
     chrono::Duration::seconds(seconds)
 }
 
-#[cfg(test)]
-fn plan_source_event_ids(source_event_id: Option<i64>, metadata: &Value) -> Vec<i64> {
-    let mut event_ids = metadata
-        .get("source_event_ids")
-        .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|value| value.as_i64())
-        .collect::<Vec<_>>();
-    if event_ids.is_empty()
-        && let Some(source_event_id) = source_event_id
-    {
-        event_ids.push(source_event_id);
-    }
-    event_ids.sort_unstable();
-    event_ids.dedup();
-    event_ids
-}
-
 fn active_environment_resource_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> EnvironmentActiveResourceRecord {
@@ -754,28 +735,6 @@ mod tests {
                 Err(AppError::InvalidDatabaseValue(_, value)) if value == "bogus"
             ));
         }
-    }
-
-    #[test]
-    fn plan_source_event_ids_extracts_from_metadata() {
-        use super::plan_source_event_ids;
-        let metadata = json!({"source_event_ids": [3, 1, 2, 1]});
-        let ids = plan_source_event_ids(None, &metadata);
-        assert_eq!(ids, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn plan_source_event_ids_falls_back_to_source_event_id() {
-        use super::plan_source_event_ids;
-        let ids = plan_source_event_ids(Some(42), &json!({}));
-        assert_eq!(ids, vec![42]);
-    }
-
-    #[test]
-    fn plan_source_event_ids_returns_empty_when_no_source() {
-        use super::plan_source_event_ids;
-        let ids = plan_source_event_ids(None, &json!({}));
-        assert!(ids.is_empty());
     }
 
     #[test]
