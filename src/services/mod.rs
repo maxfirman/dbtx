@@ -4,7 +4,7 @@ use crate::db::{
     CreateEnvironmentDraftInput, CreateEnvironmentRunPlanInput, CreateProjectDraftInput,
     CreateProjectInput, CurrentNodeStatePlanningRecord, Db, EnvironmentActualStateRecord,
     EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput, EnvironmentRunPlanRecord,
-    EnvironmentVersionRecord, EquivalentPlanLookup, GitState, PlanStatus,
+    EquivalentPlanLookup, GitState, PlanStatus,
     PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord, RunStart,
     SourceStateEventCreateInput, SourceStateEventRecord, UpdateEnvironmentDraftInput,
 };

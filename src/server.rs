@@ -644,9 +644,7 @@ async fn project_delete(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
 ) -> Result<Json<ProjectDeleteResponse>, ApiError> {
-    ProjectService::new(&state.db)
-        .delete(project_id.clone())
-        .await?;
+    state.db.delete_project(&project_id).await?;
     info!(project_id = %project_id, "deleted project");
     Ok(Json(ProjectDeleteResponse {
         deleted_project_id: project_id,
@@ -695,7 +693,7 @@ async fn project_draft_get(
     State(state): State<AppState>,
     Path(draft_id): Path<Uuid>,
 ) -> Result<Json<ProjectDraftResponse>, ApiError> {
-    let draft = ProjectService::new(&state.db).get_draft(draft_id).await?;
+    let draft = state.db.get_project_draft(draft_id).await?;
     Ok(Json(ProjectDraftResponse { draft }))
 }
 
@@ -721,7 +719,7 @@ async fn project_draft_validate(
         .await?;
     let invocation_id = start_project_draft_validation_invocation(&state, prepared).await?;
     Ok(Json(ProjectDraftValidateResponse {
-        draft: ProjectService::new(&state.db).get_draft(draft_id).await?,
+        draft: state.db.get_project_draft(draft_id).await?,
         invocation_id,
     }))
 }
@@ -744,9 +742,7 @@ async fn project_draft_confirm(
     State(state): State<AppState>,
     Path(draft_id): Path<Uuid>,
 ) -> Result<Json<ProjectResponse>, ApiError> {
-    let project = ProjectService::new(&state.db)
-        .confirm_draft(draft_id)
-        .await?;
+    let project = state.db.confirm_project_draft(draft_id).await?;
     Ok(Json(ProjectResponse { project }))
 }
 
@@ -802,7 +798,7 @@ async fn environment_draft_create(
     let draft = service.create_draft(project_id).await?;
     let prepared = service.prepare_draft_git_metadata(draft.id).await?;
     let invocation_id = start_environment_draft_prepare_invocation(&state, prepared).await?;
-    let draft = service.get_draft(draft.id).await?;
+    let draft = state.db.get_environment_draft(draft.id).await?;
     Ok(Json(EnvironmentDraftStartResponse {
         draft,
         invocation_id,
@@ -826,9 +822,7 @@ async fn environment_draft_get(
     State(state): State<AppState>,
     Path(draft_id): Path<Uuid>,
 ) -> Result<Json<EnvironmentDraftResponse>, ApiError> {
-    let draft = EnvironmentService::new(&state.db)
-        .get_draft(draft_id)
-        .await?;
+    let draft = state.db.get_environment_draft(draft_id).await?;
     Ok(Json(EnvironmentDraftResponse { draft }))
 }
 
@@ -856,7 +850,7 @@ async fn environment_draft_branch_refresh(
         .refresh_draft_branch(draft_id, environment_draft_update_request(request))
         .await?;
     let invocation_id = start_environment_draft_prepare_invocation(&state, prepared).await?;
-    let draft = service.get_draft(draft_id).await?;
+    let draft = state.db.get_environment_draft(draft_id).await?;
     Ok(Json(EnvironmentDraftStartResponse {
         draft,
         invocation_id,
@@ -887,7 +881,7 @@ async fn environment_draft_validate(
         .prepare_draft_validation(draft_id, environment_draft_update_request(request))
         .await?;
     let invocation_id = start_environment_draft_validation_invocation(&state, prepared).await?;
-    let draft = service.get_draft(draft_id).await?;
+    let draft = state.db.get_environment_draft(draft_id).await?;
     Ok(Json(EnvironmentDraftStartResponse {
         draft,
         invocation_id,
@@ -911,9 +905,7 @@ async fn environment_draft_confirm(
     State(state): State<AppState>,
     Path(draft_id): Path<Uuid>,
 ) -> Result<Json<EnvironmentResponse>, ApiError> {
-    let environment = EnvironmentService::new(&state.db)
-        .confirm_draft(draft_id)
-        .await?;
+    let environment = state.db.confirm_environment_draft(draft_id).await?;
     Ok(Json(EnvironmentResponse { environment }))
 }
 
@@ -946,8 +938,7 @@ fn environment_draft_update_request(
     )
 )]
 async fn projects_list(State(state): State<AppState>) -> Result<Json<ProjectsResponse>, ApiError> {
-    let service = ProjectService::new(&state.db);
-    let projects = service.list().await?;
+    let projects = state.db.list_projects().await?;
     info!(count = projects.len(), "listed projects");
     Ok(Json(ProjectsResponse { projects }))
 }
@@ -1004,8 +995,7 @@ async fn environment_list(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
 ) -> Result<Json<EnvironmentsResponse>, ApiError> {
-    let service = EnvironmentService::new(&state.db);
-    let environments = service.list(project_id).await?;
+    let environments = state.db.list_environments(&project_id).await?;
     info!(count = environments.len(), "listed environments");
     Ok(Json(EnvironmentsResponse { environments }))
 }
@@ -1028,8 +1018,7 @@ async fn environment_get(
     State(state): State<AppState>,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Json<EnvironmentResponse>, ApiError> {
-    let service = EnvironmentService::new(&state.db);
-    let environment = service.show(project_id, slug).await?;
+    let environment = state.db.get_environment(&project_id, &slug).await?;
     info!(
         project_id = %environment.project_ref,
         environment = %environment.slug,
@@ -1056,8 +1045,7 @@ async fn environment_actual_state(
     State(state): State<AppState>,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Json<EnvironmentActualStateResponse>, ApiError> {
-    let service = EnvironmentService::new(&state.db);
-    let actual_state = service.actual_state(project_id, slug).await?;
+    let actual_state = state.db.get_environment_actual_state(&project_id, &slug).await?;
     Ok(Json(EnvironmentActualStateResponse { actual_state }))
 }
 
@@ -1177,8 +1165,7 @@ async fn environment_history(
     State(state): State<AppState>,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Json<EnvironmentVersionsResponse>, ApiError> {
-    let service = EnvironmentService::new(&state.db);
-    let versions = service.history(project_id, slug).await?;
+    let versions = state.db.list_environment_versions(&project_id, &slug).await?;
     Ok(Json(EnvironmentVersionsResponse { versions }))
 }
 
@@ -1262,8 +1249,7 @@ async fn environment_plan_list(
     State(state): State<AppState>,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Json<EnvironmentRunPlansResponse>, ApiError> {
-    let service = EnvironmentService::new(&state.db);
-    let plans = service.list_plans(project_id, slug).await?;
+    let plans = state.db.list_environment_run_plans(&project_id, &slug).await?;
     Ok(Json(EnvironmentRunPlansResponse { plans }))
 }
 
@@ -1284,8 +1270,7 @@ async fn environment_plan_get(
     State(state): State<AppState>,
     Path(plan_id): Path<Uuid>,
 ) -> Result<Json<EnvironmentRunPlanResponse>, ApiError> {
-    let service = EnvironmentService::new(&state.db);
-    let plan = service.get_plan(plan_id).await?;
+    let plan = state.db.get_environment_run_plan(plan_id).await?;
     Ok(Json(EnvironmentRunPlanResponse { plan }))
 }
 

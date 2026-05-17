@@ -46,10 +46,6 @@ impl<'a> EnvironmentService<'a> {
             .await
     }
 
-    pub async fn get_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentDraftRecord> {
-        self.db.get_environment_draft(draft_id).await
-    }
-
     pub async fn update_draft(
         &self,
         draft_id: Uuid,
@@ -179,10 +175,6 @@ impl<'a> EnvironmentService<'a> {
         })
     }
 
-    pub async fn confirm_draft(&self, draft_id: Uuid) -> AppResult<EnvironmentRecord> {
-        self.db.confirm_environment_draft(draft_id).await
-    }
-
     pub async fn release(
         &self,
         request: EnvironmentReleaseRequest,
@@ -210,14 +202,6 @@ impl<'a> EnvironmentService<'a> {
             .await
     }
 
-    pub async fn history(
-        &self,
-        project: String,
-        slug: String,
-    ) -> AppResult<Vec<EnvironmentVersionRecord>> {
-        self.db.list_environment_versions(&project, &slug).await
-    }
-
     pub async fn rollback(
         &self,
         request: EnvironmentRollbackRequest,
@@ -232,22 +216,6 @@ impl<'a> EnvironmentService<'a> {
         self.db
             .rollback_environment_to_version(&project.project_id, &request.slug, request.version_id)
             .await
-    }
-
-    pub async fn list(&self, project: String) -> AppResult<Vec<EnvironmentRecord>> {
-        self.db.list_environments(&project).await
-    }
-
-    pub async fn show(&self, project: String, slug: String) -> AppResult<EnvironmentRecord> {
-        self.db.get_environment(&project, &slug).await
-    }
-
-    pub async fn actual_state(
-        &self,
-        project: String,
-        slug: String,
-    ) -> AppResult<EnvironmentActualStateRecord> {
-        self.db.get_environment_actual_state(&project, &slug).await
     }
 
     pub async fn create_source_state_event(
@@ -265,18 +233,6 @@ impl<'a> EnvironmentService<'a> {
                 payload: request.payload,
             })
             .await
-    }
-
-    pub async fn list_plans(
-        &self,
-        project: String,
-        slug: String,
-    ) -> AppResult<Vec<EnvironmentRunPlanRecord>> {
-        self.db.list_environment_run_plans(&project, &slug).await
-    }
-
-    pub async fn get_plan(&self, plan_id: Uuid) -> AppResult<EnvironmentRunPlanRecord> {
-        self.db.get_environment_run_plan(plan_id).await
     }
 
     pub async fn reconcile(

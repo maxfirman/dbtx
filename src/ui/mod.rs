@@ -419,14 +419,14 @@ async fn environment_create_modal(
     let service = EnvironmentService::new(state.db());
     let draft = service.create_draft(project_id).await?;
     start_environment_draft_prepare(&state, draft.id).await?;
-    render_environment_draft_modal(state.db(), &service.get_draft(draft.id).await?).await
+    render_environment_draft_modal(state.db(), &state.db().get_environment_draft(draft.id).await?).await
 }
 
 async fn project_delete_modal(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
 ) -> Result<Html<String>, UiError> {
-    let project = ProjectService::new(state.db()).show(project_id).await?;
+    let project = state.db().get_project_by_project_id(&project_id).await?;
     render_template(&ProjectDeleteModalTemplate {
         project: project_summary_view(&project),
         error: None,
@@ -439,9 +439,7 @@ async fn environment_draft_status(
 ) -> Result<Html<String>, UiError> {
     render_environment_draft_modal(
         state.db(),
-        &EnvironmentService::new(state.db())
-            .get_draft(draft_id)
-            .await?,
+        &state.db().get_environment_draft(draft_id).await?,
     )
     .await
 }
@@ -464,7 +462,7 @@ async fn environment_draft_branch_refresh(
         }
     };
     start_environment_draft_prepared(&state, prepared).await?;
-    render_environment_draft_modal(state.db(), &service.get_draft(draft_id).await?).await
+    render_environment_draft_modal(state.db(), &state.db().get_environment_draft(draft_id).await?).await
 }
 
 async fn environment_draft_validate(
@@ -485,7 +483,7 @@ async fn environment_draft_validate(
         }
     };
     start_environment_draft_validation(&state, prepared).await?;
-    render_environment_draft_modal(state.db(), &service.get_draft(draft_id).await?).await
+    render_environment_draft_modal(state.db(), &state.db().get_environment_draft(draft_id).await?).await
 }
 
 async fn environment_draft_confirm(
@@ -493,9 +491,7 @@ async fn environment_draft_confirm(
     headers: HeaderMap,
     Path(draft_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, UiError> {
-    let environment = EnvironmentService::new(state.db())
-        .confirm_draft(draft_id)
-        .await?;
+    let environment = state.db().confirm_environment_draft(draft_id).await?;
     let redirect = format!(
         "/ui/projects/{}/environments/{}",
         environment.project_ref, environment.slug
@@ -536,7 +532,7 @@ async fn project_draft_create(
             error: err.0.to_string(),
         });
     }
-    let draft = service.get_draft(draft.id).await?;
+    let draft = state.db().get_project_draft(draft.id).await?;
     render_project_draft_fragment(&draft, None, true)
 }
 
@@ -544,7 +540,7 @@ async fn project_draft_status(
     State(state): State<AppState>,
     Path(draft_id): Path<Uuid>,
 ) -> Result<Html<String>, UiError> {
-    let draft = ProjectService::new(state.db()).get_draft(draft_id).await?;
+    let draft = state.db().get_project_draft(draft_id).await?;
     render_project_draft_fragment(
         &draft,
         None,
@@ -557,9 +553,7 @@ async fn project_draft_confirm(
     headers: HeaderMap,
     Path(draft_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, UiError> {
-    ProjectService::new(state.db())
-        .confirm_draft(draft_id)
-        .await?;
+    state.db().confirm_project_draft(draft_id).await?;
     if is_htmx(&headers) {
         let mut response = Html(String::new()).into_response();
         response
@@ -576,9 +570,8 @@ async fn project_delete(
     headers: HeaderMap,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, UiError> {
-    let service = ProjectService::new(state.db());
-    if let Err(err) = service.delete(project_id.clone()).await {
-        let project = service.show(project_id).await?;
+    if let Err(err) = state.db().delete_project(&project_id).await {
+        let project = state.db().get_project_by_project_id(&project_id).await?;
         return Ok(render_template(&ProjectDeleteModalTemplate {
             project: project_summary_view(&project),
             error: Some(err.to_string()),

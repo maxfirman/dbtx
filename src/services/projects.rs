@@ -40,10 +40,6 @@ impl<'a> ProjectService<'a> {
         })
     }
 
-    pub async fn get_draft(&self, draft_id: Uuid) -> AppResult<ProjectDraftRecord> {
-        self.db.get_project_draft(draft_id).await
-    }
-
     pub async fn confirm_draft(&self, draft_id: Uuid) -> AppResult<ProjectRecord> {
         self.db.confirm_project_draft(draft_id).await
     }
@@ -75,15 +71,4 @@ impl<'a> ProjectService<'a> {
             .await
     }
 
-    pub async fn list(&self) -> AppResult<Vec<ProjectRecord>> {
-        self.db.list_projects().await
-    }
-
-    pub async fn show(&self, project: String) -> AppResult<ProjectRecord> {
-        self.db.get_project_by_project_id(&project).await
-    }
-
-    pub async fn delete(&self, project: String) -> AppResult<()> {
-        self.db.delete_project(&project).await
-    }
 }
