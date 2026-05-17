@@ -4,16 +4,16 @@ use super::git::{
     ensure_git_worktree, list_recent_branch_commits, list_remote_branches,
     resolve_remote_default_branch, resolve_remote_git_target,
 };
-use super::{emit_stream_output, report_setup_failure, send_event, write_profiles_dir};
-use crate::api::{
-    InvocationClaimResponse, InvocationCompleteApiRequest, InvocationExecutionModeApi,
-    InvocationExecutionSpecApi, InvocationLifecycleStatus,
+use super::{
+    emit_stream_output, report_setup_failure, send_event, session::WorkerInvocationSession,
+    write_profiles_dir,
 };
+use crate::api::{InvocationClaimResponse, InvocationExecutionModeApi, InvocationExecutionSpecApi};
 use crate::client::DaemonClient;
 use crate::db::validate_remote_project_root;
 use crate::error::{AppError, AppResult};
 use crate::services::read_dbt_project_name_from_root;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::path::Path;
 use tokio::process::Command as TokioCommand;
 
@@ -75,26 +75,15 @@ pub(super) async fn execute_release_validation(
         format!("Resolved release target to commit {resolved_commit_sha}"),
     )
     .await?;
-    client
-        .invocation_complete(
-            claim.invocation_id,
-            InvocationCompleteApiRequest {
-                worker_id: claim.worker_id.clone(),
-                lease_token: claim.lease_token,
-                completion: crate::execution::ExecutionCompletion {
-                    status: InvocationLifecycleStatus::Succeeded,
-                    exit_code: 0,
-                    error: None,
-                    dbt_version: None,
-                    manifest: None,
-                    result: Some(json!({
-                        "resolved_commit_sha": resolved_commit_sha,
-                        "git_branch": git_branch,
-                    })),
-                },
-            },
-        )
-        .await?;
+    complete_success(
+        client,
+        &claim,
+        Some(json!({
+            "resolved_commit_sha": resolved_commit_sha,
+            "git_branch": git_branch,
+        })),
+    )
+    .await?;
     Ok(())
 }
 
@@ -174,26 +163,15 @@ pub(super) async fn execute_project_validation(
     )
     .await?;
 
-    client
-        .invocation_complete(
-            claim.invocation_id,
-            InvocationCompleteApiRequest {
-                worker_id: claim.worker_id.clone(),
-                lease_token: claim.lease_token,
-                completion: crate::execution::ExecutionCompletion {
-                    status: InvocationLifecycleStatus::Succeeded,
-                    exit_code: 0,
-                    error: None,
-                    dbt_version: None,
-                    manifest: None,
-                    result: Some(json!({
-                        "project_name": project_name,
-                        "default_branch": default_branch,
-                    })),
-                },
-            },
-        )
-        .await?;
+    complete_success(
+        client,
+        &claim,
+        Some(json!({
+            "project_name": project_name,
+            "default_branch": default_branch,
+        })),
+    )
+    .await?;
     Ok(())
 }
 
@@ -262,29 +240,18 @@ pub(super) async fn execute_environment_prepare(
         }
     };
 
-    client
-        .invocation_complete(
-            claim.invocation_id,
-            InvocationCompleteApiRequest {
-                worker_id: claim.worker_id.clone(),
-                lease_token: claim.lease_token,
-                completion: crate::execution::ExecutionCompletion {
-                    status: InvocationLifecycleStatus::Succeeded,
-                    exit_code: 0,
-                    error: None,
-                    dbt_version: None,
-                    manifest: None,
-                    result: Some(json!({
-                        "default_branch": default_branch,
-                        "selected_branch": active_branch,
-                        "latest_commit_sha": latest_commit_sha,
-                        "branches": branches,
-                        "commits": commits,
-                    })),
-                },
-            },
-        )
-        .await?;
+    complete_success(
+        client,
+        &claim,
+        Some(json!({
+            "default_branch": default_branch,
+            "selected_branch": active_branch,
+            "latest_commit_sha": latest_commit_sha,
+            "branches": branches,
+            "commits": commits,
+        })),
+    )
+    .await?;
     Ok(())
 }
 
@@ -344,26 +311,15 @@ pub(super) async fn execute_environment_validation(
     run_validation_command(client, &claim, &project_dir, profiles_dir.path(), "debug").await?;
     run_validation_command(client, &claim, &project_dir, profiles_dir.path(), "compile").await?;
 
-    client
-        .invocation_complete(
-            claim.invocation_id,
-            InvocationCompleteApiRequest {
-                worker_id: claim.worker_id.clone(),
-                lease_token: claim.lease_token,
-                completion: crate::execution::ExecutionCompletion {
-                    status: InvocationLifecycleStatus::Succeeded,
-                    exit_code: 0,
-                    error: None,
-                    dbt_version: None,
-                    manifest: None,
-                    result: Some(json!({
-                        "resolved_commit_sha": commit_sha,
-                        "selected_branch": selected_branch,
-                    })),
-                },
-            },
-        )
-        .await?;
+    complete_success(
+        client,
+        &claim,
+        Some(json!({
+            "resolved_commit_sha": commit_sha,
+            "selected_branch": selected_branch,
+        })),
+    )
+    .await?;
     Ok(())
 }
 
@@ -416,6 +372,23 @@ async fn run_validation_command(
         return Err(err);
     }
     Ok(())
+}
+
+async fn complete_success(
+    client: &DaemonClient,
+    claim: &InvocationClaimResponse,
+    result: Option<Value>,
+) -> AppResult<()> {
+    WorkerInvocationSession::new(client, claim)
+        .complete(crate::execution::ExecutionCompletion {
+            status: crate::api::InvocationLifecycleStatus::Succeeded,
+            exit_code: 0,
+            error: None,
+            dbt_version: None,
+            manifest: None,
+            result,
+        })
+        .await
 }
 
 async fn send_worker_event(

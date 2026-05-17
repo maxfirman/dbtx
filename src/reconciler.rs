@@ -3,6 +3,7 @@ use crate::api::InvocationCommandApi;
 use crate::db::{EnvironmentRecord, PlanStatus, PreparationStatus, SourceStateEventRecord};
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::start_prepared_invocation;
+use crate::plan_admission::admit_and_start_plan;
 use crate::server::AppState;
 use crate::services::{
     EnvironmentService, InvocationService, code_change_input_fingerprint_for_baseline,
@@ -77,31 +78,13 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
             .db()
             .get_environment_actual_state(&environment.project_ref, &environment.slug)
             .await?;
-        let source_events = state
-            .db()
-            .list_unsatisfied_source_state_events(environment.project_id, environment.id)
-            .await?;
-
-        // Phase 4: advance source satisfaction from per-node watermarks
-        if !source_events.is_empty() {
-            advance_source_satisfaction_from_watermarks(
-                state,
+        let source_events =
+            crate::services::source_state::advance_and_load_unsatisfied_source_events(
+                state.db(),
                 &environment,
                 actual_state.last_successful_run_id,
-                &source_events,
             )
             .await?;
-        }
-
-        // Re-query after potential advancement
-        let source_events = if !source_events.is_empty() {
-            state
-                .db()
-                .list_unsatisfied_source_state_events(environment.project_id, environment.id)
-                .await?
-        } else {
-            source_events
-        };
 
         if let Some(next_attempt_at) = automatic_reconcile_backoff_until(
             state,
@@ -144,7 +127,6 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
             }
         };
         planned += 1;
-        let invocation_id = Uuid::new_v4();
         info!(
             project_id = %environment.project_ref,
             environment_slug = %environment.slug,
@@ -153,8 +135,8 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
             resource_count = plan.resource_count,
             "created reconciliation plan"
         );
-        let prepared = match service.admit_plan(invocation_id, plan.plan_id).await {
-            Ok(prepared) => prepared,
+        let admission = match admit_and_start_plan(state, plan.plan_id).await {
+            Ok(admission) => admission,
             Err(err) if should_ignore_reconcile_error(&err) => continue,
             Err(err) => {
                 error!(
@@ -167,21 +149,9 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
                 continue;
             }
         };
-        let Some(prepared_invocation) = prepared.prepared else {
+        if admission.invocation_id.is_none() {
             continue;
-        };
-        start_prepared_invocation(
-            state,
-            invocation_id,
-            InvocationCommandApi::Build,
-            Some(plan.plan_id),
-            prepared_invocation,
-        )
-        .await?;
-        state
-            .db()
-            .mark_environment_run_plan_admitted(plan.plan_id, invocation_id)
-            .await?;
+        }
     }
     Ok(planned)
 }
@@ -347,13 +317,11 @@ pub async fn auto_admit_blocked_plans_for_environment(
         .db()
         .list_blocked_environment_run_plan_ids(project_id, environment_id)
         .await?;
-    let service = EnvironmentService::new(state.db());
     let mut admitted = 0usize;
 
     for plan_id in blocked_plan_ids {
-        let invocation_id = Uuid::new_v4();
-        let prepared = service.admit_plan(invocation_id, plan_id).await?;
-        let Some(prepared_invocation) = prepared.prepared else {
+        let admission = admit_and_start_plan(state, plan_id).await?;
+        let Some(invocation_id) = admission.invocation_id else {
             continue;
         };
         info!(
@@ -363,68 +331,10 @@ pub async fn auto_admit_blocked_plans_for_environment(
             environment_id = environment_id,
             "admitting blocked plan"
         );
-        start_prepared_invocation(
-            state,
-            invocation_id,
-            InvocationCommandApi::Build,
-            Some(plan_id),
-            prepared_invocation,
-        )
-        .await?;
-        state
-            .db()
-            .mark_environment_run_plan_admitted(plan_id, invocation_id)
-            .await?;
         admitted += 1;
     }
 
     Ok(admitted)
-}
-
-/// Check if any unsatisfied source events are now fully satisfied by per-node watermarks.
-/// If so, advance `environment_source_state_status` for those events.
-async fn advance_source_satisfaction_from_watermarks(
-    state: &AppState,
-    environment: &EnvironmentRecord,
-    baseline_run_id: Option<Uuid>,
-    source_events: &[SourceStateEventRecord],
-) -> AppResult<()> {
-    let Some(manifest_run_id) = baseline_run_id else {
-        return Ok(());
-    };
-
-    for event in source_events {
-        let all_satisfied = state
-            .db()
-            .are_all_downstream_nodes_satisfied(
-                environment.project_id,
-                environment.id,
-                &event.source_key,
-                event.id,
-                manifest_run_id,
-            )
-            .await?;
-
-        if all_satisfied {
-            state
-                .db()
-                .advance_source_state_status_from_watermarks(
-                    environment.project_id,
-                    environment.id,
-                    event.id,
-                )
-                .await?;
-            info!(
-                project_id = %environment.project_ref,
-                environment_slug = %environment.slug,
-                source_key = %event.source_key,
-                event_id = event.id,
-                "source event satisfied via per-node watermarks"
-            );
-        }
-    }
-
-    Ok(())
 }
 
 fn should_ignore_reconcile_error(err: &AppError) -> bool {

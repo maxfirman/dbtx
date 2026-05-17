@@ -30,180 +30,6 @@ impl<'a> EnvironmentService<'a> {
         }
     }
 
-    async fn replan_pending_plan(
-        &self,
-        plan: EnvironmentRunPlanRecord,
-    ) -> AppResult<EnvironmentRunPlanRecord> {
-        let Some(baseline_run_id) = plan.baseline_run_id else {
-            return Ok(plan);
-        };
-
-        match plan.reason.as_str() {
-            "code_change" => {
-                let Some(target_git_commit_sha) = plan.target_git_commit_sha.clone() else {
-                    return Ok(plan);
-                };
-                let Some(target_manifest_run_id) = self
-                    .db
-                    .latest_manifest_run_id_for_commit(
-                        plan.project_id,
-                        plan.environment_id,
-                        &target_git_commit_sha,
-                    )
-                    .await?
-                else {
-                    return Ok(plan);
-                };
-                let target_nodes = self
-                    .db
-                    .load_planning_manifest_nodes(target_manifest_run_id)
-                    .await?;
-                let baseline_nodes = self
-                    .db
-                    .load_planning_manifest_nodes(baseline_run_id)
-                    .await?;
-                let target_edges = self.db.load_manifest_edges(target_manifest_run_id).await?;
-                let current_nodes = self
-                    .db
-                    .load_current_node_state_for_planning(plan.project_id, plan.environment_id)
-                    .await?;
-                let selected_resources = plan_code_change_selected_resources(
-                    &baseline_nodes,
-                    &target_nodes,
-                    &target_edges,
-                    &current_nodes,
-                );
-                let selection_spec = if selected_resources.is_empty() {
-                    Some("state_modified_live".to_string())
-                } else {
-                    Some("state_modified_live_plus".to_string())
-                };
-                let mut metadata = plan.metadata.clone();
-                metadata["last_replanned_at"] = Value::String(chrono::Utc::now().to_rfc3339());
-                metadata["replanning_mode"] = Value::String("live_state_diff".to_string());
-                if selected_resources.is_empty() {
-                    return self
-                        .db
-                        .mark_environment_run_plan_completed_noop(
-                            plan.plan_id,
-                            "plan already reconciled by prior run progress",
-                            metadata,
-                        )
-                        .await;
-                }
-                if selected_resources != plan.selected_resources
-                    || selection_spec.as_deref() != plan.selection_spec.as_deref()
-                {
-                    return self
-                        .db
-                        .update_environment_run_plan_selection(
-                            plan.plan_id,
-                            selection_spec.as_deref(),
-                            &selected_resources,
-                            metadata,
-                        )
-                        .await;
-                }
-                self.db
-                    .update_environment_run_plan_selection(
-                        plan.plan_id,
-                        plan.selection_spec.as_deref(),
-                        &plan.selected_resources,
-                        metadata,
-                    )
-                    .await
-            }
-            "source_state_change" => {
-                let source_event_ids = plan_source_event_ids(plan.source_event_id, &plan.metadata);
-                if source_event_ids.is_empty() {
-                    return Ok(plan);
-                }
-                let source_keys: Vec<String> = plan
-                    .metadata
-                    .get("source_keys")
-                    .and_then(|v| v.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|v| v.as_str().map(ToString::to_string))
-                    .collect();
-                let mut metadata = plan.metadata.clone();
-                metadata["last_replanned_at"] = Value::String(chrono::Utc::now().to_rfc3339());
-                metadata["replanning_mode"] = Value::String("watermark_stale_replan".to_string());
-
-                // Fast-path: check if the old satisfaction table already marks these satisfied
-                // (from a prior successful plan completion via mark_source_state_event_satisfied_in_tx)
-                let already_satisfied = self
-                    .db
-                    .are_source_state_events_satisfied(
-                        plan.project_id,
-                        plan.environment_id,
-                        &source_event_ids,
-                    )
-                    .await?;
-                if already_satisfied {
-                    return self
-                        .db
-                        .mark_environment_run_plan_completed_noop(
-                            plan.plan_id,
-                            "source-triggered plan already satisfied by a successful plan",
-                            metadata,
-                        )
-                        .await;
-                }
-
-                let Some(baseline_run_id) = plan.baseline_run_id else {
-                    return Ok(plan);
-                };
-
-                // Re-query stale nodes using current watermark state
-                let stale_nodes = if !source_keys.is_empty() {
-                    self.db
-                        .list_stale_downstream_nodes(
-                            plan.project_id,
-                            plan.environment_id,
-                            &source_keys,
-                            &source_event_ids,
-                            baseline_run_id,
-                        )
-                        .await?
-                } else {
-                    plan.selected_resources.clone()
-                };
-
-                if stale_nodes.is_empty() {
-                    return self
-                        .db
-                        .mark_environment_run_plan_completed_noop(
-                            plan.plan_id,
-                            "all downstream nodes already satisfy source watermarks",
-                            metadata,
-                        )
-                        .await;
-                }
-                if stale_nodes != plan.selected_resources {
-                    return self
-                        .db
-                        .update_environment_run_plan_selection(
-                            plan.plan_id,
-                            Some("source_downstream_stale"),
-                            &stale_nodes,
-                            metadata,
-                        )
-                        .await;
-                }
-                self.db
-                    .update_environment_run_plan_selection(
-                        plan.plan_id,
-                        plan.selection_spec.as_deref(),
-                        &plan.selected_resources,
-                        metadata,
-                    )
-                    .await
-            }
-            _ => Ok(plan),
-        }
-    }
-
     pub async fn create_draft(&self, project: String) -> AppResult<EnvironmentDraftRecord> {
         self.db.require_current_schema().await?;
         let project = self.db.get_project_by_project_id(&project).await?;
@@ -482,162 +308,22 @@ impl<'a> EnvironmentService<'a> {
                 .db
                 .get_environment_actual_state(&project, &slug)
                 .await?;
-            let baseline_run_id = actual_state.last_successful_run_id;
-
             let source_events = self
                 .db
                 .list_unsatisfied_source_state_events(environment.project_id, environment.id)
                 .await?;
-            let code_drift = environment.git_commit_sha != actual_state.last_successful_commit_sha;
+            let draft = crate::services::planning::derive_environment_plan(
+                self.db,
+                &environment,
+                &actual_state,
+                &source_events,
+            )
+            .await?;
 
-            if !code_drift && source_events.is_empty() {
-                return Err(AppError::EnvironmentAlreadyReconciled);
-            }
-
-            let (
-                reason,
-                input_fingerprint,
-                selection_spec,
-                selected_resources,
-                source_event_id,
-                metadata,
-            ) = if code_drift {
-                let desired_commit_sha = environment
-                    .git_commit_sha
-                    .clone()
-                    .ok_or(AppError::ReconciliationRequiresCommitSha)?;
-                let input_fingerprint = code_change_input_fingerprint_for_baseline(
-                    &desired_commit_sha,
-                    baseline_run_id,
-                );
-                if let Some(target_manifest_run_id) = self
-                    .db
-                    .latest_manifest_run_id_for_commit(
-                        environment.project_id,
-                        environment.id,
-                        &desired_commit_sha,
-                    )
-                    .await?
+            if draft.selected_resources.is_empty() {
+                if draft.code_drift
+                    && let Some(sha) = &environment.git_commit_sha
                 {
-                    if let Some(baseline_run_id) = baseline_run_id {
-                        let target_nodes = self
-                            .db
-                            .load_planning_manifest_nodes(target_manifest_run_id)
-                            .await?;
-                        let baseline_nodes = self
-                            .db
-                            .load_planning_manifest_nodes(baseline_run_id)
-                            .await?;
-                        let target_edges =
-                            self.db.load_manifest_edges(target_manifest_run_id).await?;
-                        let current_nodes = self
-                            .db
-                            .load_current_node_state_for_planning(
-                                environment.project_id,
-                                environment.id,
-                            )
-                            .await?;
-                        let selected_resources = plan_code_change_selected_resources(
-                            &baseline_nodes,
-                            &target_nodes,
-                            &target_edges,
-                            &current_nodes,
-                        );
-                        let selection_spec = if selected_resources.is_empty() {
-                            "state_modified_live"
-                        } else {
-                            "state_modified_live_plus"
-                        };
-                        (
-                            "code_change",
-                            input_fingerprint.clone(),
-                            Some(selection_spec.to_string()),
-                            selected_resources,
-                            None,
-                            serde_json::json!({
-                                "code_drift": true,
-                                "actual_commit_sha": actual_state.last_successful_commit_sha,
-                                "desired_commit_sha": desired_commit_sha,
-                                "source_event_count": source_events.len(),
-                                "target_manifest_run_id": target_manifest_run_id,
-                                "planning_mode": "live_state_diff",
-                            }),
-                        )
-                    } else {
-                        (
-                            "code_change",
-                            input_fingerprint.clone(),
-                            Some("full_graph".to_string()),
-                            self.db
-                                .list_manifest_node_unique_ids(target_manifest_run_id)
-                                .await?,
-                            None,
-                            serde_json::json!({
-                                "code_drift": true,
-                                "actual_commit_sha": actual_state.last_successful_commit_sha,
-                                "desired_commit_sha": desired_commit_sha,
-                                "source_event_count": source_events.len(),
-                                "target_manifest_run_id": target_manifest_run_id,
-                                "planning_mode": "initial_full_graph_no_baseline",
-                            }),
-                        )
-                    }
-                } else {
-                    let Some(baseline_run_id) = baseline_run_id else {
-                        return Err(AppError::ReconciliationRequiresBaseline);
-                    };
-                    (
-                        "code_change",
-                        input_fingerprint,
-                        Some("full_graph".to_string()),
-                        self.db
-                            .list_manifest_node_unique_ids(baseline_run_id)
-                            .await?,
-                        None,
-                        serde_json::json!({
-                            "code_drift": true,
-                            "actual_commit_sha": actual_state.last_successful_commit_sha,
-                            "desired_commit_sha": desired_commit_sha,
-                            "source_event_count": source_events.len(),
-                            "planning_mode": "full_graph_fallback_no_target_manifest",
-                        }),
-                    )
-                }
-            } else {
-                let source_baseline_run_id =
-                    baseline_run_id.ok_or(AppError::ReconciliationRequiresBaseline)?;
-                let source_keys: Vec<String> = source_events
-                    .iter()
-                    .map(|event| event.source_key.clone())
-                    .collect();
-                let source_event_ids: Vec<i64> =
-                    source_events.iter().map(|event| event.id).collect();
-                let input_fingerprint = source_state_change_input_fingerprint(&source_event_ids);
-                (
-                    "source_state_change",
-                    input_fingerprint,
-                    Some("source_downstream_stale".to_string()),
-                    self.db
-                        .list_stale_downstream_nodes(
-                            environment.project_id,
-                            environment.id,
-                            &source_keys,
-                            &source_event_ids,
-                            source_baseline_run_id,
-                        )
-                        .await?,
-                    source_events.first().map(|event| event.id),
-                    serde_json::json!({
-                        "source_keys": source_keys,
-                        "source_event_ids": source_event_ids,
-                        "source_event_count": source_events.len(),
-                        "planning_mode": "watermark_stale",
-                    }),
-                )
-            };
-
-            if selected_resources.is_empty() {
-                if code_drift && let Some(sha) = &environment.git_commit_sha {
                     self.db
                         .advance_environment_actual_state_commit(
                             environment.project_id,
@@ -653,13 +339,13 @@ impl<'a> EnvironmentService<'a> {
                 .find_equivalent_live_environment_run_plan(EquivalentPlanLookup {
                     project_id: environment.project_id,
                     environment_id: environment.id,
-                    reason,
-                    input_fingerprint: &input_fingerprint,
+                    reason: draft.reason,
+                    input_fingerprint: &draft.input_fingerprint,
                     target_git_branch: environment.git_branch.as_deref(),
                     target_git_commit_sha: environment.git_commit_sha.as_deref(),
-                    baseline_run_id,
-                    selection_spec: selection_spec.as_deref(),
-                    selected_resources: &selected_resources,
+                    baseline_run_id: draft.baseline_run_id,
+                    selection_spec: draft.selection_spec.as_deref(),
+                    selected_resources: &draft.selected_resources,
                 })
                 .await?
             {
@@ -670,13 +356,13 @@ impl<'a> EnvironmentService<'a> {
                 .db
                 .create_environment_run_plan(CreateEnvironmentRunPlanInput {
                     environment: &environment,
-                    reason,
-                    input_fingerprint: &input_fingerprint,
-                    baseline_run_id,
-                    selection_spec: selection_spec.as_deref(),
-                    selected_resources: &selected_resources,
-                    source_event_id,
-                    metadata,
+                    reason: draft.reason,
+                    input_fingerprint: &draft.input_fingerprint,
+                    baseline_run_id: draft.baseline_run_id,
+                    selection_spec: draft.selection_spec.as_deref(),
+                    selected_resources: &draft.selected_resources,
+                    source_event_id: draft.source_event_id,
+                    metadata: draft.metadata,
                 })
                 .await?;
             self.db
@@ -714,7 +400,7 @@ impl<'a> EnvironmentService<'a> {
                     plan.status.to_string(),
                 ));
             }
-            let plan = self.replan_pending_plan(plan).await?;
+            let plan = crate::services::planning::replan_pending_plan(self.db, plan).await?;
             if plan.status == PlanStatus::Completed {
                 return Ok(EnvironmentPlanAdmitPrepared {
                     plan,

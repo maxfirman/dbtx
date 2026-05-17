@@ -1,12 +1,12 @@
 //! Worker execution runtime: dbt process management, git worktree materialization, and event streaming.
 
 pub(crate) mod git;
+mod session;
 mod validation;
 
 use crate::api::{
-    InvocationClaimResponse, InvocationCommandApi, InvocationCompleteApiRequest,
-    InvocationEventBatchApiRequest, InvocationExecutionModeApi, InvocationExecutionSpecApi,
-    InvocationHeartbeatApiRequest, InvocationLifecycleStatus,
+    InvocationClaimResponse, InvocationCommandApi, InvocationExecutionModeApi,
+    InvocationExecutionSpecApi, InvocationLifecycleStatus,
 };
 use crate::client::DaemonClient;
 use crate::db::validate_remote_project_root;
@@ -14,6 +14,7 @@ use crate::error::{AppError, AppResult};
 use crate::event::LogEvent;
 use git::{ensure_git_worktree, git_cache_root, short_hash};
 use serde_yaml::Value as YamlValue;
+use session::WorkerInvocationSession;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tracing::{info, warn};
@@ -160,10 +161,7 @@ pub async fn execute_claimed_invocation(
                 }
             }
             _ = heartbeat.tick() => {
-                let hb = client.invocation_heartbeat(claim.invocation_id, InvocationHeartbeatApiRequest {
-                    worker_id: claim.worker_id.clone(),
-                    lease_token: claim.lease_token,
-                }).await?;
+                let hb = WorkerInvocationSession::new(client, &claim).heartbeat().await?;
                 if hb.cancel_requested {
                     warn!(invocation_id = %claim.invocation_id, worker_id = %claim.worker_id, "cancel requested by control plane");
                     cancel_requested = true;
@@ -213,34 +211,27 @@ pub async fn execute_claimed_invocation(
         None
     };
 
-    client
-        .invocation_complete(
-            claim.invocation_id,
-            InvocationCompleteApiRequest {
-                worker_id: claim.worker_id.clone(),
-                lease_token: claim.lease_token,
-                completion: crate::execution::ExecutionCompletion {
-                    status: if cancel_requested {
-                        InvocationLifecycleStatus::Canceled
-                    } else if exit_code != 0 {
-                        InvocationLifecycleStatus::Failed
-                    } else {
-                        InvocationLifecycleStatus::Succeeded
-                    },
-                    exit_code,
-                    error: if cancel_requested {
-                        Some("invocation canceled".to_string())
-                    } else if exit_code == 0 {
-                        None
-                    } else {
-                        Some(format!("dbt invocation failed with exit code {exit_code}"))
-                    },
-                    dbt_version,
-                    manifest,
-                    result: None,
-                },
+    WorkerInvocationSession::new(client, &claim)
+        .complete(crate::execution::ExecutionCompletion {
+            status: if cancel_requested {
+                InvocationLifecycleStatus::Canceled
+            } else if exit_code != 0 {
+                InvocationLifecycleStatus::Failed
+            } else {
+                InvocationLifecycleStatus::Succeeded
             },
-        )
+            exit_code,
+            error: if cancel_requested {
+                Some("invocation canceled".to_string())
+            } else if exit_code == 0 {
+                None
+            } else {
+                Some(format!("dbt invocation failed with exit code {exit_code}"))
+            },
+            dbt_version,
+            manifest,
+            result: None,
+        })
         .await?;
 
     info!(invocation_id = %claim.invocation_id, worker_id = %claim.worker_id, exit_code, canceled = cancel_requested, "finished claimed invocation execution");
@@ -259,22 +250,8 @@ async fn report_setup_failure(
     claim: &InvocationClaimResponse,
     error_message: &str,
 ) -> AppResult<()> {
-    client
-        .invocation_complete(
-            claim.invocation_id,
-            InvocationCompleteApiRequest {
-                worker_id: claim.worker_id.clone(),
-                lease_token: claim.lease_token,
-                completion: crate::execution::ExecutionCompletion {
-                    status: InvocationLifecycleStatus::Failed,
-                    exit_code: 1,
-                    error: Some(error_message.to_string()),
-                    dbt_version: None,
-                    manifest: None,
-                    result: None,
-                },
-            },
-        )
+    WorkerInvocationSession::new(client, claim)
+        .complete_failed(error_message)
         .await
 }
 
@@ -326,15 +303,8 @@ async fn send_event(
     claim: &InvocationClaimResponse,
     event: crate::execution::ExecutionEvent,
 ) -> AppResult<()> {
-    client
-        .invocation_append_events(
-            claim.invocation_id,
-            InvocationEventBatchApiRequest {
-                worker_id: claim.worker_id.clone(),
-                lease_token: claim.lease_token,
-                events: vec![event],
-            },
-        )
+    WorkerInvocationSession::new(client, claim)
+        .append_event(event)
         .await
 }
 

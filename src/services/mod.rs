@@ -278,7 +278,9 @@ pub struct InferredProjectInput {
 
 mod environments;
 mod invocations;
+mod planning;
 mod projects;
+pub(crate) mod source_state;
 
 pub use environments::{EnvironmentPlanAdmitPrepared, EnvironmentService};
 pub use invocations::InvocationService;
