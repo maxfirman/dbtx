@@ -5,6 +5,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use dbtx::api::*;
+use dbtx::client::error_from_response_body;
 use dbtx::db::Db;
 use dbtx::error::{AppError, AppResult};
 use http_body_util::BodyExt;
@@ -511,16 +512,8 @@ fn ensure_ok(status: StatusCode, bytes: &[u8]) -> AppResult<()> {
     if status.is_success() {
         return Ok(());
     }
-    let msg = serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|v| {
-            v.get("error")
-                .and_then(|e| e.as_str())
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| String::from_utf8_lossy(bytes).to_string());
-    Err(match status {
-        StatusCode::PRECONDITION_FAILED => AppError::SchemaOutOfDate,
-        _ => AppError::Internal(msg),
-    })
+    Err(error_from_response_body(
+        status,
+        &String::from_utf8_lossy(bytes),
+    ))
 }

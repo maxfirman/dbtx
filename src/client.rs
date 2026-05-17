@@ -556,7 +556,11 @@ async fn ensure_success(response: reqwest::Response) -> AppResult<reqwest::Respo
     }
     let status = response.status();
     let body = response.text().await.map_err(map_reqwest_error)?;
-    let message = serde_json::from_str::<serde_json::Value>(&body)
+    Err(error_from_response_body(status, &body))
+}
+
+pub fn error_from_response_body(status: StatusCode, body: &str) -> AppError {
+    let message = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|value| {
             value
@@ -564,11 +568,11 @@ async fn ensure_success(response: reqwest::Response) -> AppResult<reqwest::Respo
                 .and_then(|value| value.as_str())
                 .map(ToString::to_string)
         })
-        .unwrap_or(body);
-    Err(match status {
+        .unwrap_or_else(|| body.to_string());
+    match status {
         StatusCode::PRECONDITION_FAILED => AppError::SchemaOutOfDate,
         _ => AppError::Internal(message),
-    })
+    }
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> AppError {
