@@ -14,9 +14,10 @@ use crate::api::{
     InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
     InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse, ProjectDeleteResponse,
     ProjectDraftCreateApiRequest, ProjectDraftResponse, ProjectDraftValidateResponse,
-    ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse, QueueStatusResponse,
-    QueuesResponse, ReadyResponse, SourceStateEventCreateApiRequest, SourceStateEventResponse,
-    WorkerStatusResponse, WorkersResponse,
+    ProjectResponse, ProjectResolveQuery, ProjectResolveResponse, ProjectUpdateApiRequest,
+    ProjectsResponse, LocalEnvironmentUpsertApiRequest, LocalEnvironmentUpsertApiResponse,
+    QueueStatusResponse, QueuesResponse, ReadyResponse, SourceStateEventCreateApiRequest,
+    SourceStateEventResponse, WorkerStatusResponse, WorkersResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{
@@ -162,6 +163,7 @@ fn system_routes() -> Router<AppState> {
 fn project_routes() -> Router<AppState> {
     Router::new()
         .route("/v1/projects", get(projects_list))
+        .route("/v1/projects/resolve", get(project_resolve))
         .route(
             "/v1/projects/{project_id}",
             patch(project_update)
@@ -182,6 +184,10 @@ fn project_routes() -> Router<AppState> {
 
 fn environment_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/v1/projects/{project_id}/environments/local",
+            post(environment_local_upsert),
+        )
         .route(
             "/v1/projects/{project_id}/environment-drafts",
             post(environment_draft_create),
@@ -755,6 +761,37 @@ async fn project_draft_confirm(
     Ok(Json(ProjectResponse { project }))
 }
 
+async fn environment_local_upsert(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<LocalEnvironmentUpsertApiRequest>,
+) -> Result<Json<LocalEnvironmentUpsertApiResponse>, ApiError> {
+    let project = state.db.get_project_by_project_id(&project_id).await?;
+    let slug = format!("local-{}-{}", request.machine_id, request.target_name);
+    let worker_queue = format!("local-{}", request.machine_id);
+    let environment = state
+        .db
+        .upsert_local_environment_lightweight(
+            project.id,
+            &slug,
+            &request.target_name,
+            &request.adapter_type,
+            &worker_queue,
+            &request.schema_name,
+        )
+        .await?;
+    info!(
+        project_id = %project_id,
+        environment_slug = %environment.slug,
+        machine_id = %request.machine_id,
+        "upserted local environment"
+    );
+    Ok(Json(LocalEnvironmentUpsertApiResponse {
+        environment_slug: environment.slug,
+        worker_queue,
+    }))
+}
+
 #[utoipa::path(
     post,
     path = "/v1/projects/{project_id}/environment-drafts",
@@ -924,6 +961,19 @@ async fn projects_list(State(state): State<AppState>) -> Result<Json<ProjectsRes
     let projects = service.list().await?;
     info!(count = projects.len(), "listed projects");
     Ok(Json(ProjectsResponse { projects }))
+}
+
+async fn project_resolve(
+    State(state): State<AppState>,
+    Query(query): Query<ProjectResolveQuery>,
+) -> Result<Json<ProjectResolveResponse>, ApiError> {
+    let project = state
+        .db
+        .get_project_by_repo(&query.git_repo_url, &query.project_root)
+        .await?;
+    Ok(Json(ProjectResolveResponse {
+        project: ProjectResponse { project },
+    }))
 }
 
 #[utoipa::path(
@@ -2009,6 +2059,7 @@ impl IntoResponse for ApiError {
             | AppError::InvalidInput(_)
             | AppError::UnsupportedLocalExecution(_) => StatusCode::BAD_REQUEST,
             AppError::ProjectIdNotFound(_)
+            | AppError::ProjectNotFoundByRepo(_, _)
             | AppError::EnvironmentNotFound(_, _)
             | AppError::PlanNotFound(_)
             | AppError::InvocationNotFound(_)

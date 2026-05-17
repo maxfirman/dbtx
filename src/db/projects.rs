@@ -484,6 +484,22 @@ impl Db {
         Ok(project_record_from_row(&row))
     }
 
+    pub(crate) async fn get_project_by_repo(
+        &self,
+        git_repo_url: &str,
+        project_root: &str,
+    ) -> AppResult<ProjectRecord> {
+        let row = sqlx::query(
+            "SELECT id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata FROM projects WHERE git_repo_url = $1 AND project_root = $2",
+        )
+        .bind(git_repo_url)
+        .bind(project_root)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::ProjectNotFoundByRepo(git_repo_url.to_string(), project_root.to_string()))?;
+        Ok(project_record_from_row(&row))
+    }
+
     pub async fn get_project_by_id(&self, id: i64) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
             "SELECT id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata FROM projects WHERE id = $1",

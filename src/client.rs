@@ -11,8 +11,10 @@ use crate::api::{
     InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
     InvocationListApiRequest, InvocationStatusResponse, InvocationsResponse, MigrateResponse,
     ProjectDeleteResponse, ProjectDraftCreateApiRequest, ProjectDraftResponse,
-    ProjectDraftValidateResponse, ProjectResponse, ProjectUpdateApiRequest, ProjectsResponse,
-    QueuesResponse, SourceStateEventCreateApiRequest, SourceStateEventResponse, WorkersResponse,
+    ProjectDraftValidateResponse, ProjectResolveResponse, ProjectResponse,
+    ProjectUpdateApiRequest, ProjectsResponse, LocalEnvironmentUpsertApiRequest,
+    LocalEnvironmentUpsertApiResponse, QueuesResponse, SourceStateEventCreateApiRequest,
+    SourceStateEventResponse, WorkersResponse,
 };
 use crate::error::{AppError, AppResult};
 use futures_util::StreamExt;
@@ -62,6 +64,33 @@ impl DaemonClient {
 
     pub async fn project_list(&self) -> AppResult<ProjectsResponse> {
         self.send(self.http.get(self.url("/v1/projects"))).await
+    }
+
+    pub async fn project_resolve(
+        &self,
+        git_repo_url: &str,
+        project_root: &str,
+    ) -> AppResult<ProjectResolveResponse> {
+        self.send(self.http.get(self.url("/v1/projects/resolve")).query(&[
+            ("git_repo_url", git_repo_url),
+            ("project_root", project_root),
+        ]))
+        .await
+    }
+
+    pub async fn environment_local_upsert(
+        &self,
+        project_id: &str,
+        request: LocalEnvironmentUpsertApiRequest,
+    ) -> AppResult<LocalEnvironmentUpsertApiResponse> {
+        self.send(
+            self.http
+                .post(self.url(&format!(
+                    "/v1/projects/{project_id}/environments/local"
+                )))
+                .json(&request),
+        )
+        .await
     }
 
     pub async fn project_show_by_id(&self, project_id: &str) -> AppResult<ProjectResponse> {

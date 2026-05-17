@@ -148,6 +148,50 @@ impl Db {
         Ok(())
     }
 
+    pub(crate) async fn upsert_local_environment_lightweight(
+        &self,
+        project_id: i64,
+        slug: &str,
+        target_name: &str,
+        adapter_type: &str,
+        worker_queue: &str,
+        schema_name: &str,
+    ) -> AppResult<EnvironmentRecord> {
+        sqlx::query(
+            r#"
+            INSERT INTO environments (
+                project_id, slug, profile_name, target_name, status, adapter_type,
+                worker_queue, schema_name
+            )
+            VALUES ($1, $2, $3, $4, 'active', $5, $6, $7)
+            ON CONFLICT (project_id, slug) DO UPDATE
+            SET adapter_type = EXCLUDED.adapter_type,
+                schema_name = EXCLUDED.schema_name,
+                worker_queue = EXCLUDED.worker_queue
+            RETURNING id
+            "#,
+        )
+        .bind(project_id)
+        .bind(slug)
+        .bind(target_name)
+        .bind(target_name)
+        .bind(adapter_type)
+        .bind(worker_queue)
+        .bind(schema_name)
+        .fetch_one(&self.pool)
+        .await?;
+        self.get_environment_by_id(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT id FROM environments WHERE project_id = $1 AND slug = $2",
+            )
+            .bind(project_id)
+            .bind(slug)
+            .fetch_one(&self.pool)
+            .await?,
+        )
+        .await
+    }
+
     pub(crate) async fn upsert_local_environment(
         &self,
         input: LocalEnvironmentUpsertInput<'_>,

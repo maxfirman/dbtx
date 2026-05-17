@@ -437,3 +437,28 @@ pub struct InvocationTimelineResponse {
     pub is_terminal: bool,
     pub model_base_url: Option<String>,
 }
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct ProjectResolveQuery {
+    pub git_repo_url: String,
+    pub project_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProjectResolveResponse {
+    pub project: ProjectResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LocalEnvironmentUpsertApiRequest {
+    pub target_name: String,
+    pub machine_id: String,
+    pub adapter_type: String,
+    pub schema_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LocalEnvironmentUpsertApiResponse {
+    pub environment_slug: String,
+    pub worker_queue: String,
+}
