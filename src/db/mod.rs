@@ -111,6 +111,7 @@ impl Db {
     }
 }
 
+mod completion;
 mod environments;
 mod invocations;
 mod models;
