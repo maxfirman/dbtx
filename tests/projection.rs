@@ -431,10 +431,9 @@ async fn source_state_reconcile_creates_and_admits_plan() {
         vec![
             "model.pkg.customers".to_string(),
             "model.pkg.orders".to_string(),
-            "source.pkg.raw_orders".to_string(),
         ]
     );
-    assert_eq!(plan.resource_count, 3);
+    assert_eq!(plan.resource_count, 2);
     assert!(plan.source_event_id.is_some());
 
     let admitted = client
@@ -471,7 +470,7 @@ async fn source_state_reconcile_creates_and_admits_plan() {
 
 #[tokio::test]
 #[ignore = "requires docker for postgres testcontainer"]
-async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconcile() {
+async fn successful_source_state_plan_without_watermarks_does_not_record_satisfaction() {
     let db = TestDatabase::new_without_reconciler().await;
     let repo = TempProjectRepo::new("proj");
     let client = db.client().clone();
@@ -499,7 +498,7 @@ async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconc
     )
     .await;
 
-    let source_event = client
+    let _source_event = client
         .environment_source_state_event_create(
             &project_id,
             "remote",
@@ -556,7 +555,7 @@ async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconc
         .await
         .expect("complete admitted invocation");
 
-    let satisfied_event_id: i64 = sqlx::query_scalar(
+    let satisfied_event_id: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT latest_satisfied_event_id
         FROM environment_source_state_status
@@ -573,10 +572,10 @@ async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconc
     .bind(&project_id)
     .bind("remote")
     .bind("source.pkg.raw_orders")
-    .fetch_one(db.pool())
+    .fetch_optional(db.pool())
     .await
     .expect("load satisfied source event");
-    assert_eq!(satisfied_event_id, source_event.id);
+    assert_eq!(satisfied_event_id, None);
 
     let err = client
         .environment_reconcile(
@@ -585,10 +584,10 @@ async fn successful_source_state_plan_records_satisfaction_and_suppresses_reconc
             EnvironmentReconcileApiRequest::default(),
         )
         .await
-        .expect_err("already satisfied source state should not create a new plan");
+        .expect_err("completion without watermarks should not make the source look satisfied");
     assert!(
         err.to_string()
-            .contains("environment is already reconciled to known desired state"),
+            .contains("reconciliation plan resolved to no selected resources"),
         "{err}"
     );
 }
@@ -911,13 +910,11 @@ async fn two_source_events_for_different_keys_produce_single_plan() {
         Some("source_downstream_stale")
     );
 
-    // Both source trees should be included — all 5 nodes
+    // Both source trees should be included, excluding source nodes themselves.
     let mut expected = vec![
         "model.pkg.customers",
         "model.pkg.orders",
         "model.pkg.summary",
-        "source.pkg.raw_customers",
-        "source.pkg.raw_orders",
     ];
     expected.sort();
     let mut actual = plan.selected_resources.clone();
@@ -926,7 +923,7 @@ async fn two_source_events_for_different_keys_produce_single_plan() {
         actual, expected,
         "plan should select downstream of both sources"
     );
-    assert_eq!(plan.resource_count, 5);
+    assert_eq!(plan.resource_count, 3);
 
     // metadata should contain both source event IDs
     let source_event_ids = plan
@@ -1333,11 +1330,7 @@ async fn admitted_source_plan_produces_invocation_with_select_args() {
         .take_while(|a| !a.starts_with("--"))
         .map(|s| s.as_str())
         .collect();
-    let mut expected = vec![
-        "model.pkg.customers",
-        "model.pkg.orders",
-        "source.pkg.raw_orders",
-    ];
+    let mut expected = vec!["model.pkg.customers", "model.pkg.orders"];
     expected.sort();
     let mut actual: Vec<&str> = select_args.clone();
     actual.sort();
@@ -1587,8 +1580,8 @@ async fn partial_satisfaction_targets_only_unsatisfied_source_downstream() {
     let mut resources = plan.selected_resources.clone();
     resources.sort();
     assert!(
-        resources.contains(&"source.pkg.raw_customers".to_string()),
-        "should include raw_customers"
+        !resources.contains(&"source.pkg.raw_customers".to_string()),
+        "should not include source nodes"
     );
     assert!(
         resources.contains(&"model.pkg.customers".to_string()),
@@ -3383,13 +3376,16 @@ async fn only_one_of_multiple_blocked_plans_for_same_resource_auto_admits() {
         .await
         .expect("reload third plan")
         .plan;
-    // After the first plan succeeds and satisfies the source state,
-    // both remaining plans should be completed as noops — there is no
-    // remaining drift to reconcile.
-    assert_eq!(second_reloaded.status, PlanStatus::Completed);
-    assert_eq!(third_reloaded.status, PlanStatus::Completed);
-    assert!(second_reloaded.admitted_invocation_id.is_none());
-    assert!(third_reloaded.admitted_invocation_id.is_none());
+    assert_eq!(second_plan.plan_id, third_plan.plan_id);
+    // Completion alone no longer marks source state satisfied. The equivalent
+    // pending plan should be admitted once after the blocking invocation ends.
+    assert_eq!(second_reloaded.status, PlanStatus::Admitted);
+    assert_eq!(third_reloaded.status, PlanStatus::Admitted);
+    assert!(second_reloaded.admitted_invocation_id.is_some());
+    assert_eq!(
+        second_reloaded.admitted_invocation_id,
+        third_reloaded.admitted_invocation_id
+    );
 }
 
 #[tokio::test]
@@ -6369,6 +6365,9 @@ async fn insert_active_selected_resource(
         WHERE invocation_id = $1
           AND project_id = $4
           AND environment_id = $5
+        ON CONFLICT (invocation_id, unique_id) DO UPDATE SET
+            resource_type = COALESCE(EXCLUDED.resource_type, invocation_selected_resources.resource_type),
+            updated_at = NOW()
         "#,
     )
     .bind(invocation_id)
@@ -7035,7 +7034,7 @@ async fn watermark_partial_success_produces_smaller_retry_plan() {
     .await
     .expect("populate ancestors");
 
-    // First reconcile: should select all 3 downstream nodes (source + 2 models)
+    // First reconcile: should select executable downstream nodes only.
     let plan = client
         .environment_reconcile(
             &project_id,
@@ -7046,7 +7045,7 @@ async fn watermark_partial_success_produces_smaller_retry_plan() {
         .expect("first reconcile")
         .plan;
     assert_eq!(plan.reason, "source_state_change");
-    assert_eq!(plan.selected_resources.len(), 3);
+    assert_eq!(plan.selected_resources.len(), 2);
 
     // Simulate partial success: advance watermarks for source and stg_orders only
     sqlx::query(
@@ -7381,6 +7380,75 @@ async fn watermark_advances_through_normal_execution_event_flow() {
         "watermark should be advanced to the source event ID after successful node execution"
     );
 
+    let satisfied: Option<i64> = sqlx::query_scalar(
+        "SELECT latest_satisfied_event_id FROM environment_source_state_status WHERE project_id = $1 AND environment_id = $2 AND source_key = 'source.pkg.raw_orders'",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .fetch_optional(db.pool())
+    .await
+    .expect("query real-time satisfaction");
+    assert_eq!(
+        satisfied,
+        Some(source_event.id),
+        "source satisfaction should advance as soon as the last executable downstream node commits"
+    );
+
+    let first_log_previous: Option<i64> = sqlx::query_scalar(
+        "SELECT previous_event_id FROM node_source_watermark_log WHERE project_id = $1 AND environment_id = $2 AND unique_id = 'model.pkg.orders' AND source_key = 'source.pkg.raw_orders' AND watermark_event_id = $3",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(source_event.id)
+    .fetch_one(db.pool())
+    .await
+    .expect("query first audit log");
+    assert_eq!(first_log_previous, None);
+
+    let source_event_2 = client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v2".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create second source event")
+        .event;
+
+    let second_node_start = r#"{"info":{"name":"NodeStart","code":"Q024","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"started","node_started_at":"2026-01-01T00:01:00Z","node_finished_at":"","node_relation":{},"node_checksum":"abc123"}}}"#;
+    let second_node_finish = r#"{"info":{"name":"NodeFinished","code":"Q025","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.orders","resource_type":"model","node_name":"orders","node_path":"models/orders.sql","materialized":"table","node_status":"success","node_started_at":"2026-01-01T00:01:00Z","node_finished_at":"2026-01-01T00:01:01Z","node_relation":{"database":"db","schema":"main","alias":"orders"},"node_checksum":"abc123"},"run_result":{"status":"success","execution_time":1.0}}}"#;
+    client
+        .invocation_append_events(
+            created.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                events: vec![
+                    sample_dbt_log_event(second_node_start),
+                    sample_dbt_log_event(second_node_finish),
+                ],
+            },
+        )
+        .await
+        .expect("append second node execution");
+
+    let second_log_previous: Option<i64> = sqlx::query_scalar(
+        "SELECT previous_event_id FROM node_source_watermark_log WHERE project_id = $1 AND environment_id = $2 AND unique_id = 'model.pkg.orders' AND source_key = 'source.pkg.raw_orders' AND watermark_event_id = $3",
+    )
+    .bind(project_pk)
+    .bind(environment_pk)
+    .bind(source_event_2.id)
+    .fetch_one(db.pool())
+    .await
+    .expect("query second audit log");
+    assert_eq!(second_log_previous, Some(source_event.id));
+
     // Verify candidates were cleaned up
     let candidate_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM node_source_watermark_candidates WHERE unique_id = 'model.pkg.orders'",
@@ -7391,6 +7459,116 @@ async fn watermark_advances_through_normal_execution_event_flow() {
     assert_eq!(
         candidate_count, 0,
         "candidates should be cleaned up after commit"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_uses_invocation_manifest_not_newer_environment_manifest() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event");
+
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[("source.pkg.raw_orders", "model.pkg.orders")],
+    )
+    .await;
+
+    let created = client
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "remote",
+            InvocationCommandApi::Build,
+        ))
+        .await
+        .expect("create invocation");
+    let claim = client
+        .invocation_claim_next(InvocationClaimNextApiRequest {
+            execution_mode: Some(InvocationExecutionModeApi::Server),
+            worker_id: "worker-a".to_string(),
+            worker_queues: vec!["generic".to_string()],
+        })
+        .await
+        .expect("claim next")
+        .expect("claimed invocation");
+
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+            ("model.pkg.new_orders", "model"),
+        ],
+        &[
+            ("source.pkg.raw_orders", "model.pkg.orders"),
+            ("source.pkg.raw_orders", "model.pkg.new_orders"),
+        ],
+    )
+    .await;
+
+    let node_start = r#"{"info":{"name":"NodeStart","code":"Q024","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.new_orders","resource_type":"model","node_name":"new_orders","node_path":"models/new_orders.sql","materialized":"table","node_status":"started","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"","node_relation":{},"node_checksum":"new123"}}}"#;
+    let node_finish = r#"{"info":{"name":"NodeFinished","code":"Q025","invocation_id":"abc"},"data":{"node_info":{"unique_id":"model.pkg.new_orders","resource_type":"model","node_name":"new_orders","node_path":"models/new_orders.sql","materialized":"table","node_status":"success","node_started_at":"2026-01-01T00:00:00Z","node_finished_at":"2026-01-01T00:00:01Z","node_relation":{"database":"db","schema":"main","alias":"new_orders"},"node_checksum":"new123"},"run_result":{"status":"success","execution_time":1.0}}}"#;
+    client
+        .invocation_append_events(
+            created.invocation_id,
+            InvocationEventBatchApiRequest {
+                worker_id: "worker-a".to_string(),
+                lease_token: claim.lease_token,
+                events: vec![
+                    sample_dbt_log_event(node_start),
+                    sample_dbt_log_event(node_finish),
+                ],
+            },
+        )
+        .await
+        .expect("append node events");
+
+    let watermark_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM node_source_watermarks WHERE unique_id = 'model.pkg.new_orders'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("count new node watermarks");
+    assert_eq!(
+        watermark_count, 0,
+        "node absent from the invocation manifest must not inherit the newer environment graph"
     );
 }
 

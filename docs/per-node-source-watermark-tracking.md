@@ -175,7 +175,7 @@ This ensures concurrent executions are safe — a slower invocation processing a
 
 With per-node watermarks, source event satisfaction becomes:
 
-> A source event E is **satisfied** when ALL nodes downstream of E's source_key have `watermark_event_id >= E.id`.
+> A source event E is **satisfied** when all executable nodes downstream of E's source_key have `watermark_event_id >= E.id`.
 
 This replaces the current single-flag `environment_source_state_status.latest_satisfied_event_id` model.
 
@@ -209,7 +209,7 @@ This means partial failure naturally results in a smaller retry plan.
 ### Backward Compatibility
 
 - `environment_source_state_status` is retained for the "is this source fully satisfied?" summary query (useful for UI and reconciler fast-path checks)
-- It is now derived: a source is satisfied when all downstream nodes have watermarks >= the event. The reconciler updates this table based on per-node watermarks rather than plan completion.
+- It is now derived: a source is satisfied when all executable downstream nodes have watermarks >= the event. Successful plan completion does not mark source events satisfied directly.
 - Existing environments with no watermark data: missing watermarks are treated as "never processed". This is conservative and may trigger one redundant execution per node on the first source-triggered plan after migration.
 
 ### Graph Changes
@@ -341,12 +341,12 @@ Instead of checking `are_source_state_events_satisfied` (all-or-nothing), query 
 
 **Update `environment_source_state_status` to be derived from per-node watermarks:**
 
-During the reconciler tick (lazy approach), after checking for unsatisfied source events:
+During successful node watermark commits:
 
-1. For each unsatisfied event, check `are_all_downstream_nodes_satisfied()`
-2. If all downstream nodes have watermarks >= the event ID, advance `environment_source_state_status.latest_satisfied_event_id`
+1. For each source key advanced by that node, check unsatisfied events with `are_all_downstream_nodes_satisfied()`
+2. If all executable downstream nodes have watermarks >= the event ID, advance `environment_source_state_status.latest_satisfied_event_id`
 
-This means manual runs that advance all downstream watermarks will cause the reconciler to mark the source as satisfied on its next tick — closing the "manual runs are invisible" gap.
+This means manual runs that advance all executable downstream watermarks mark the source as satisfied immediately, without waiting for run completion or the next reconciler tick.
 
 ### Phase 5: UI and Observability
 

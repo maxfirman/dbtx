@@ -1019,12 +1019,21 @@ impl Db {
             .execute(&self.pool)
             .await?;
 
+            let watermark_manifest_run_id = match invocation_id {
+                Some(invocation_id) => {
+                    self.load_invocation_watermark_manifest_run_id(invocation_id)
+                        .await?
+                }
+                None => None,
+            };
+
             // Watermark tracking: compute candidates on node start, commit on success
             self.handle_node_watermark(
                 invocation_id,
                 run_id,
                 project_id,
                 environment_id,
+                watermark_manifest_run_id,
                 &node,
                 promotable,
             )
@@ -1044,6 +1053,7 @@ impl Db {
         run_id: Uuid,
         project_id: i64,
         environment_id: i64,
+        watermark_manifest_run_id: Option<Uuid>,
         node: &crate::event::NormalizedNodeEvent,
         promotable: bool,
     ) -> AppResult<()> {
@@ -1051,24 +1061,7 @@ impl Db {
         let is_finish = node.finished_at.is_some();
 
         if is_start {
-            // Use the latest manifest run for ancestor source lookup, not the current run
-            // (the current run's manifest hasn't been persisted yet during execution)
-            let manifest_run_id: Option<Uuid> = sqlx::query_scalar(
-                r#"
-                SELECT r.run_id
-                FROM runs r
-                JOIN manifest_snapshots ms ON ms.run_id = r.run_id
-                WHERE r.project_id = $1 AND r.environment_id = $2
-                ORDER BY r.id DESC
-                LIMIT 1
-                "#,
-            )
-            .bind(project_id)
-            .bind(environment_id)
-            .fetch_optional(&self.pool)
-            .await?;
-
-            let Some(manifest_run_id) = manifest_run_id else {
+            let Some(manifest_run_id) = watermark_manifest_run_id else {
                 return Ok(());
             };
 
@@ -1118,15 +1111,29 @@ impl Db {
                     .load_watermark_candidates(run_id, &node.unique_id)
                     .await?;
                 if !candidates.is_empty() {
-                    self.commit_node_watermarks(
-                        project_id,
-                        environment_id,
-                        &node.unique_id,
-                        run_id,
-                        invocation_id,
-                        &candidates,
-                    )
-                    .await?;
+                    let advanced = self
+                        .commit_node_watermarks(
+                            project_id,
+                            environment_id,
+                            &node.unique_id,
+                            run_id,
+                            invocation_id,
+                            &candidates,
+                        )
+                        .await?;
+                    let advanced_source_keys = advanced
+                        .into_iter()
+                        .map(|candidate| candidate.source_key)
+                        .collect::<Vec<_>>();
+                    if let Some(manifest_run_id) = watermark_manifest_run_id {
+                        self.advance_satisfied_source_events_from_watermarks(
+                            project_id,
+                            environment_id,
+                            &advanced_source_keys,
+                            manifest_run_id,
+                        )
+                        .await?;
+                    }
                 }
             }
             // Always clean up candidates (success or failure)
@@ -1350,41 +1357,6 @@ impl Db {
         .bind(next_attempt_at)
         .execute(&mut **tx)
         .await?;
-        if matches!(invocation_status, InvocationLifecycleStatus::Succeeded) {
-            let plan_row = sqlx::query(
-                r#"
-                SELECT project_id, environment_id, reason, source_event_id, metadata
-                FROM environment_run_plans
-                WHERE plan_id = $1
-                "#,
-            )
-            .bind(plan_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-            if let Some(plan_row) = plan_row {
-                let reason: String = plan_row.get("reason");
-                if reason == "source_state_change" {
-                    let project_id: i64 = plan_row.get("project_id");
-                    let environment_id: i64 = plan_row.get("environment_id");
-                    let source_event_id: Option<i64> = plan_row.get("source_event_id");
-                    let metadata = plan_row
-                        .try_get::<sqlx::types::Json<Value>, _>("metadata")
-                        .map(|json| json.0)
-                        .unwrap_or(Value::Null);
-                    let source_event_ids = plan_source_event_ids(source_event_id, &metadata);
-                    for source_event_id in source_event_ids {
-                        self.mark_source_state_event_satisfied_in_tx(
-                            tx,
-                            project_id,
-                            environment_id,
-                            source_event_id,
-                            plan_id,
-                        )
-                        .await?;
-                    }
-                }
-            }
-        }
         sqlx::query(
             r#"
             INSERT INTO environment_actual_state (
@@ -1399,62 +1371,6 @@ impl Db {
             "#,
         )
         .bind(plan_id)
-        .execute(&mut **tx)
-        .await?;
-        Ok(())
-    }
-
-    async fn mark_source_state_event_satisfied_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        project_id: i64,
-        environment_id: i64,
-        source_event_id: i64,
-        plan_id: Uuid,
-    ) -> AppResult<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO environment_source_state_status (
-                project_id,
-                environment_id,
-                source_key,
-                latest_satisfied_event_id,
-                latest_satisfied_state_version,
-                latest_satisfied_observed_at,
-                last_satisfied_run_id,
-                last_satisfied_plan_id,
-                updated_at
-            )
-            SELECT
-                e.project_id,
-                e.environment_id,
-                e.source_key,
-                e.id,
-                e.state_version,
-                e.observed_at,
-                inv.run_id,
-                $2,
-                NOW()
-            FROM source_state_events e
-            JOIN environment_run_plans erp ON erp.plan_id = $2
-            LEFT JOIN invocations inv ON inv.invocation_id = erp.admitted_invocation_id
-            WHERE e.id = $1
-              AND e.project_id = $3
-              AND e.environment_id = $4
-            ON CONFLICT (project_id, environment_id, source_key) DO UPDATE SET
-                latest_satisfied_event_id = EXCLUDED.latest_satisfied_event_id,
-                latest_satisfied_state_version = EXCLUDED.latest_satisfied_state_version,
-                latest_satisfied_observed_at = EXCLUDED.latest_satisfied_observed_at,
-                last_satisfied_run_id = EXCLUDED.last_satisfied_run_id,
-                last_satisfied_plan_id = EXCLUDED.last_satisfied_plan_id,
-                updated_at = NOW()
-            WHERE environment_source_state_status.latest_satisfied_event_id < EXCLUDED.latest_satisfied_event_id
-            "#,
-        )
-        .bind(source_event_id)
-        .bind(plan_id)
-        .bind(project_id)
-        .bind(environment_id)
         .execute(&mut **tx)
         .await?;
         Ok(())

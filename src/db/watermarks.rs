@@ -310,13 +310,48 @@ impl Db {
         run_id: Uuid,
         invocation_id: Option<Uuid>,
         candidates: &[WatermarkCandidate],
-    ) -> AppResult<()> {
+    ) -> AppResult<Vec<WatermarkCandidate>> {
         if candidates.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
+        let mut advanced = Vec::new();
         for candidate in candidates {
-            // Upsert with monotonic guard
-            let result = sqlx::query(
+            let mut tx = self.pool.begin().await?;
+            let lock_key = format!(
+                "{}:{}:{}:{}",
+                project_id, environment_id, unique_id, candidate.source_key
+            );
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(&lock_key)
+                .execute(&mut *tx)
+                .await?;
+
+            let previous_event_id = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT watermark_event_id
+                FROM node_source_watermarks
+                WHERE project_id = $1
+                  AND environment_id = $2
+                  AND unique_id = $3
+                  AND source_key = $4
+                "#,
+            )
+            .bind(project_id)
+            .bind(environment_id)
+            .bind(unique_id)
+            .bind(&candidate.source_key)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if previous_event_id
+                .map(|previous| previous >= candidate.watermark_event_id)
+                .unwrap_or(false)
+            {
+                tx.commit().await?;
+                continue;
+            }
+
+            sqlx::query(
                 r#"
                 INSERT INTO node_source_watermarks
                     (project_id, environment_id, unique_id, source_key,
@@ -327,7 +362,6 @@ impl Db {
                     watermark_observed_at = EXCLUDED.watermark_observed_at,
                     run_id = EXCLUDED.run_id,
                     updated_at = NOW()
-                WHERE node_source_watermarks.watermark_event_id < EXCLUDED.watermark_event_id
                 "#,
             )
             .bind(project_id)
@@ -337,31 +371,82 @@ impl Db {
             .bind(candidate.watermark_event_id)
             .bind(candidate.watermark_observed_at)
             .bind(run_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
-            // If the watermark advanced, write to audit log
-            if result.rows_affected() > 0 {
-                sqlx::query(
-                    r#"
+            sqlx::query(
+                r#"
                     INSERT INTO node_source_watermark_log
                         (project_id, environment_id, unique_id, source_key,
                          watermark_event_id, previous_event_id, run_id, invocation_id)
-                    VALUES ($1, $2, $3, $4, $5,
-                        (SELECT watermark_event_id FROM node_source_watermarks
-                         WHERE project_id = $1 AND environment_id = $2
-                           AND unique_id = $3 AND source_key = $4) - 1,
-                        $6, $7)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     "#,
+            )
+            .bind(project_id)
+            .bind(environment_id)
+            .bind(unique_id)
+            .bind(&candidate.source_key)
+            .bind(candidate.watermark_event_id)
+            .bind(previous_event_id)
+            .bind(run_id)
+            .bind(invocation_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            advanced.push(candidate.clone());
+        }
+        Ok(advanced)
+    }
+
+    pub(crate) async fn advance_satisfied_source_events_from_watermarks(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        source_keys: &[String],
+        manifest_run_id: Uuid,
+    ) -> AppResult<()> {
+        if source_keys.is_empty() {
+            return Ok(());
+        }
+        let source_event_ids = sqlx::query(
+            r#"
+            SELECT e.source_key, e.id
+            FROM source_state_events e
+            LEFT JOIN environment_source_state_status s
+              ON s.project_id = e.project_id
+             AND s.environment_id = e.environment_id
+             AND s.source_key = e.source_key
+            WHERE e.project_id = $1
+              AND e.environment_id = $2
+              AND e.source_key = ANY($3::TEXT[])
+              AND (s.latest_satisfied_event_id IS NULL OR e.id > s.latest_satisfied_event_id)
+            ORDER BY e.source_key ASC, e.id ASC
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(source_keys)
+        .fetch_all(&self.pool)
+        .await?;
+
+        for row in source_event_ids {
+            let source_key: String = row.get("source_key");
+            let event_id: i64 = row.get("id");
+            if self
+                .are_all_downstream_nodes_satisfied(
+                    project_id,
+                    environment_id,
+                    &source_key,
+                    event_id,
+                    manifest_run_id,
                 )
-                .bind(project_id)
-                .bind(environment_id)
-                .bind(unique_id)
-                .bind(&candidate.source_key)
-                .bind(candidate.watermark_event_id)
-                .bind(run_id)
-                .bind(invocation_id)
-                .execute(&self.pool)
+                .await?
+            {
+                self.advance_source_state_status_from_watermarks(
+                    project_id,
+                    environment_id,
+                    event_id,
+                )
                 .await?;
             }
         }
@@ -403,6 +488,10 @@ impl Db {
             r#"
             SELECT DISTINCT nas.unique_id
             FROM node_ancestor_sources nas
+            JOIN manifest_nodes mn
+              ON mn.run_id = nas.run_id
+             AND mn.unique_id = nas.unique_id
+             AND mn.resource_type <> 'source'
             LEFT JOIN node_source_watermarks nsw
                 ON nsw.project_id = $1
                AND nsw.environment_id = $2
@@ -458,6 +547,10 @@ impl Db {
             r#"
             SELECT COUNT(*)
             FROM node_ancestor_sources nas
+            JOIN manifest_nodes mn
+              ON mn.run_id = nas.run_id
+             AND mn.unique_id = nas.unique_id
+             AND mn.resource_type <> 'source'
             LEFT JOIN node_source_watermarks nsw
                 ON nsw.project_id = $1
                AND nsw.environment_id = $2

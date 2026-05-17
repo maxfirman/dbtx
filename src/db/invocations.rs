@@ -7,13 +7,17 @@ impl Db {
         &self,
         input: CreateInvocationInput,
     ) -> AppResult<InvocationStatusResponse> {
+        let watermark_manifest_run_id = self
+            .resolve_invocation_watermark_manifest_run_id(&input)
+            .await?;
         let row = sqlx::query(
             r#"
             INSERT INTO invocations (
                 invocation_id, plan_id, run_id, project_id, environment_id, project_draft_id, environment_draft_id,
-                command, execution_mode, worker_queue, status, execution_spec, promote_base_manifest, updates_actual_state, claim_deadline_at
+                command, execution_mode, worker_queue, status, execution_spec, promote_base_manifest,
+                updates_actual_state, claim_deadline_at, watermark_manifest_run_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             RETURNING invocation_id, execution_mode, worker_queue, status, exit_code, error,
                 started_at, claimed_at, last_heartbeat_at, cancel_requested_at, completed_at,
                 cancel_requested, claimed_by
@@ -34,9 +38,104 @@ impl Db {
         .bind(input.promote_base_manifest)
         .bind(input.updates_actual_state)
         .bind(input.claim_deadline_at)
+        .bind(watermark_manifest_run_id)
         .fetch_one(&self.pool)
         .await?;
         invocation_status_from_row(&row)
+    }
+
+    async fn resolve_invocation_watermark_manifest_run_id(
+        &self,
+        input: &CreateInvocationInput,
+    ) -> AppResult<Option<Uuid>> {
+        if !is_watermarkable_command(&input.command) {
+            return Ok(None);
+        }
+        let (Some(project_id), Some(environment_id)) = (input.project_id, input.environment_id)
+        else {
+            return Ok(None);
+        };
+
+        if let Some(plan_id) = input.plan_id {
+            let row = sqlx::query(
+                r#"
+                SELECT reason, baseline_run_id, target_git_commit_sha, metadata
+                FROM environment_run_plans
+                WHERE plan_id = $1
+                "#,
+            )
+            .bind(plan_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(row) = row {
+                let reason: String = row.get("reason");
+                let baseline_run_id: Option<Uuid> = row.get("baseline_run_id");
+                if reason == "source_state_change" {
+                    return Ok(baseline_run_id);
+                }
+                let metadata = row
+                    .try_get::<sqlx::types::Json<Value>, _>("metadata")
+                    .map(|json| json.0)
+                    .unwrap_or(Value::Null);
+                if let Some(run_id) = metadata
+                    .get("target_manifest_run_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                {
+                    return Ok(Some(run_id));
+                }
+                let target_git_commit_sha: Option<String> = row.get("target_git_commit_sha");
+                if let Some(commit_sha) = target_git_commit_sha
+                    && let Some(run_id) = self
+                        .latest_manifest_run_id_for_commit(project_id, environment_id, &commit_sha)
+                        .await?
+                {
+                    return Ok(Some(run_id));
+                }
+                return Ok(baseline_run_id);
+            }
+        }
+
+        if let Some(run_id) = input.run_id {
+            let commit_sha: Option<String> = sqlx::query_scalar(
+                r#"
+                SELECT git_commit_sha
+                FROM runs
+                WHERE run_id = $1
+                "#,
+            )
+            .bind(run_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .flatten();
+            if let Some(commit_sha) = commit_sha
+                && let Some(manifest_run_id) = self
+                    .latest_manifest_run_id_for_commit(project_id, environment_id, &commit_sha)
+                    .await?
+            {
+                return Ok(Some(manifest_run_id));
+            }
+        }
+
+        self.latest_manifest_run_id(project_id, environment_id)
+            .await
+    }
+
+    pub(crate) async fn load_invocation_watermark_manifest_run_id(
+        &self,
+        invocation_id: Uuid,
+    ) -> AppResult<Option<Uuid>> {
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            r#"
+            SELECT watermark_manifest_run_id
+            FROM invocations
+            WHERE invocation_id = $1
+            "#,
+        )
+        .bind(invocation_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::InvocationNotFound(invocation_id.to_string()))
     }
 
     pub(crate) async fn list_invocations(
@@ -1054,4 +1153,8 @@ impl Db {
             })
             .collect())
     }
+}
+
+fn is_watermarkable_command(command: &str) -> bool {
+    matches!(command, "build" | "run" | "test" | "seed")
 }

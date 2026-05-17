@@ -438,6 +438,7 @@ fn automatic_retry_backoff(failure_count: i32) -> chrono::Duration {
     chrono::Duration::seconds(seconds)
 }
 
+#[cfg(test)]
 fn plan_source_event_ids(source_event_id: Option<i64>, metadata: &Value) -> Vec<i64> {
     let mut event_ids = metadata
         .get("source_event_ids")

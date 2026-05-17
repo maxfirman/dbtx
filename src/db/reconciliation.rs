@@ -492,6 +492,24 @@ impl Db {
             .ok_or_else(|| AppError::PlanNotFound(plan_id.to_string()))?;
         sqlx::query(
             r#"
+            INSERT INTO invocation_selected_resources (
+                invocation_id, run_id, project_id, environment_id, unique_id
+            )
+            SELECT $2, i.run_id, plan.project_id, plan.environment_id, selected.unique_id
+            FROM environment_run_plans plan
+            JOIN invocations i ON i.invocation_id = $2
+            JOIN LATERAL jsonb_array_elements_text(plan.selected_resources) selected(unique_id)
+              ON TRUE
+            WHERE plan.plan_id = $1
+            ON CONFLICT (invocation_id, unique_id) DO NOTHING
+            "#,
+        )
+        .bind(plan_id)
+        .bind(invocation_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
             INSERT INTO environment_actual_state (
                 project_id, environment_id, last_admitted_plan_id, updated_at
             )
@@ -756,6 +774,29 @@ impl Db {
         .map_err(Into::into)
     }
 
+    pub(crate) async fn latest_manifest_run_id(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+    ) -> AppResult<Option<Uuid>> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT r.run_id
+            FROM runs r
+            JOIN manifest_snapshots ms ON ms.run_id = r.run_id
+            WHERE r.project_id = $1
+              AND r.environment_id = $2
+            ORDER BY r.id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(project_id)
+        .bind(environment_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub(crate) async fn has_active_manifest_prepare_for_commit(
         &self,
         project_id: i64,
@@ -1001,6 +1042,7 @@ impl Db {
             JOIN manifest_nodes mn
               ON mn.run_id = $1
              AND mn.unique_id = r.unique_id
+             AND mn.resource_type <> 'source'
             ORDER BY mn.unique_id ASC
             "#,
         )
