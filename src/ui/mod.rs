@@ -10,7 +10,7 @@ use formatting::{
 };
 
 use crate::api::{
-    EnvironmentActiveResourcePhaseApi, InvocationCommandApi, InvocationLifecycleStatus,
+    EnvironmentActiveResourcePhaseApi, InvocationLifecycleStatus,
     InvocationListApiRequest, InvocationStatusResponse, QueueStatusResponse,
     WorkerStatusResponse,
 };
@@ -23,7 +23,7 @@ use crate::db::{
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
     ensure_target_manifest_for_reconcile, start_environment_draft_prepare_invocation,
-    start_environment_draft_validation_invocation, start_prepared_invocation,
+    start_environment_draft_validation_invocation,
     start_project_draft_validation_invocation,
 };
 use crate::server::AppState;
@@ -1522,23 +1522,7 @@ async fn environment_plan_admit(
     Path((project_id, slug, plan_id)): Path<(String, String, Uuid)>,
 ) -> Result<Response, UiError> {
     let service = EnvironmentService::new(state.db());
-    let prepared = service.admit_plan(Uuid::new_v4(), plan_id).await?;
-    if let (Some(invocation_id), Some(prepared_invocation)) =
-        (prepared.invocation_id, prepared.prepared)
-    {
-        start_prepared_invocation(
-            &state,
-            invocation_id,
-            InvocationCommandApi::Build,
-            Some(plan_id),
-            prepared_invocation,
-        )
-        .await?;
-        state
-            .db()
-            .mark_environment_run_plan_admitted(plan_id, invocation_id)
-            .await?;
-    }
+    service.admit_and_start_plan(&state, plan_id).await?;
 
     if is_htmx(&headers) {
         return environment_detail_panel(State(state), Path((project_id, slug)))

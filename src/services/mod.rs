@@ -243,6 +243,20 @@ pub struct EnvironmentPlanAdmission {
     pub invocation_id: Option<Uuid>,
 }
 
+/// Capability trait for starting prepared invocations.
+///
+/// Services accept this trait to complete full workflows (e.g. admit + start)
+/// without needing direct access to AppState or the InvocationManager.
+pub trait InvocationStarter: Send + Sync {
+    fn start_prepared_invocation(
+        &self,
+        invocation_id: Uuid,
+        command: crate::api::InvocationCommandApi,
+        plan_id: Option<Uuid>,
+        prepared: LocalExecutionPrepared,
+    ) -> impl std::future::Future<Output = AppResult<Uuid>> + Send;
+}
+
 #[derive(Debug, Clone)]
 struct ReleaseTargetRequest {
     git_branch: Option<String>,

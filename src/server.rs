@@ -32,7 +32,7 @@ use crate::execution::{
 use crate::invocation_bootstrap::invocation_claim_deadline_at;
 use crate::invocation_bootstrap::{
     ensure_target_manifest_for_reconcile, start_environment_draft_prepare_invocation,
-    start_environment_draft_validation_invocation, start_prepared_invocation,
+    start_environment_draft_validation_invocation,
     start_project_draft_validation_invocation,
 };
 use crate::invocation_runtime::{
@@ -97,6 +97,25 @@ impl AppState {
             .await?;
         runtime.push_event(sequence, started_event).await;
         Ok(())
+    }
+}
+
+impl crate::services::InvocationStarter for AppState {
+    async fn start_prepared_invocation(
+        &self,
+        invocation_id: Uuid,
+        command: crate::api::InvocationCommandApi,
+        plan_id: Option<Uuid>,
+        prepared: crate::services::LocalExecutionPrepared,
+    ) -> AppResult<Uuid> {
+        crate::invocation_bootstrap::start_prepared_invocation(
+            self,
+            invocation_id,
+            command,
+            plan_id,
+            prepared,
+        )
+        .await
     }
 }
 
@@ -1369,25 +1388,10 @@ async fn environment_plan_admit(
     Path(plan_id): Path<Uuid>,
 ) -> Result<Json<EnvironmentRunPlanResponse>, ApiError> {
     let service = EnvironmentService::new(&state.db);
-    let prepared = service.admit_plan(Uuid::new_v4(), plan_id).await?;
-    let mut plan = prepared.plan;
-    if let (Some(invocation_id), Some(prepared_invocation)) =
-        (prepared.invocation_id, prepared.prepared)
-    {
-        start_prepared_invocation(
-            &state,
-            invocation_id,
-            InvocationCommandApi::Build,
-            Some(plan_id),
-            prepared_invocation,
-        )
-        .await?;
-        plan = state
-            .db
-            .mark_environment_run_plan_admitted(plan_id, invocation_id)
-            .await?;
-    }
-    Ok(Json(EnvironmentRunPlanResponse { plan }))
+    let admission = service.admit_and_start_plan(&state, plan_id).await?;
+    Ok(Json(EnvironmentRunPlanResponse {
+        plan: admission.plan,
+    }))
 }
 
 #[utoipa::path(

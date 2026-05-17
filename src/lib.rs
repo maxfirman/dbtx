@@ -15,7 +15,6 @@ pub mod execution;
 pub mod invocation_bootstrap;
 pub mod invocation_runtime;
 pub mod manifest;
-pub mod plan_admission;
 pub mod profile;
 pub mod reconciler;
 pub mod server;

@@ -3,7 +3,6 @@ use crate::api::InvocationCommandApi;
 use crate::db::{EnvironmentRecord, PlanStatus, PreparationStatus, SourceStateEventRecord};
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::start_prepared_invocation;
-use crate::plan_admission::admit_and_start_plan;
 use crate::server::AppState;
 use crate::services::{
     EnvironmentService, InvocationService, code_change_input_fingerprint_for_baseline,
@@ -135,7 +134,10 @@ pub async fn reconcile_environments_once(state: &AppState) -> AppResult<usize> {
             resource_count = plan.resource_count,
             "created reconciliation plan"
         );
-        let admission = match admit_and_start_plan(state, plan.plan_id).await {
+        let admission = match EnvironmentService::new(state.db())
+            .admit_and_start_plan(state, plan.plan_id)
+            .await
+        {
             Ok(admission) => admission,
             Err(err) if should_ignore_reconcile_error(&err) => continue,
             Err(err) => {
@@ -320,7 +322,9 @@ pub async fn auto_admit_blocked_plans_for_environment(
     let mut admitted = 0usize;
 
     for plan_id in blocked_plan_ids {
-        let admission = admit_and_start_plan(state, plan_id).await?;
+        let admission = EnvironmentService::new(state.db())
+            .admit_and_start_plan(state, plan_id)
+            .await?;
         let Some(invocation_id) = admission.invocation_id else {
             continue;
         };

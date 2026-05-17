@@ -440,4 +440,39 @@ impl<'a> EnvironmentService<'a> {
             .await;
         result
     }
+
+    /// Admit a plan and start its invocation in one call.
+    ///
+    /// This is the unified workflow that replaces the old three-step dance
+    /// (service.admit_plan → start_prepared_invocation → mark_admitted).
+    pub async fn admit_and_start_plan(
+        &self,
+        starter: &impl super::InvocationStarter,
+        plan_id: Uuid,
+    ) -> AppResult<super::EnvironmentPlanAdmission> {
+        let invocation_id = Uuid::new_v4();
+        let prepared = self.admit_plan(invocation_id, plan_id).await?;
+        let Some(prepared_invocation) = prepared.prepared else {
+            return Ok(super::EnvironmentPlanAdmission {
+                plan: prepared.plan,
+                invocation_id: None,
+            });
+        };
+        starter
+            .start_prepared_invocation(
+                invocation_id,
+                crate::api::InvocationCommandApi::Build,
+                Some(plan_id),
+                prepared_invocation,
+            )
+            .await?;
+        let plan = self
+            .db
+            .mark_environment_run_plan_admitted(plan_id, invocation_id)
+            .await?;
+        Ok(super::EnvironmentPlanAdmission {
+            plan,
+            invocation_id: Some(invocation_id),
+        })
+    }
 }
