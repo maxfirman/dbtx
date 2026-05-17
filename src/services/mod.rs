@@ -1,22 +1,22 @@
 //! Domain services: invocation orchestration, reconciliation planning, and environment management.
-use crate::config::{InvocationContext, RuntimeConfig};
+use crate::config::InvocationContext;
 use crate::db::{
     CreateEnvironmentDraftInput, CreateEnvironmentRunPlanInput, CreateProjectDraftInput,
     CreateProjectInput, CurrentNodeStatePlanningRecord, Db, EnvironmentActualStateRecord,
     EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput, EnvironmentRunPlanRecord,
-    EnvironmentVersionRecord, EquivalentPlanLookup, GitState, LocalEnvironmentUpsertInput,
+    EnvironmentVersionRecord, EquivalentPlanLookup, GitState,
     PlanStatus, PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord,
     RunStart, SourceStateEventCreateInput, SourceStateEventRecord, UpdateEnvironmentDraftInput,
 };
 use crate::dbt_utils::{
     append_invocation_id, build_generated_profiles,
-    git_repo_root, read_dbt_project_name, read_git_state,
+    git_repo_root, read_git_state,
 };
 use crate::error::{AppError, AppResult};
 use crate::execution::ExecutionMode;
 use crate::manifest::ReconstructedManifest;
 use crate::profile::{
-    EnvironmentProfileRecord, LocalTargetProfile, resolve_runtime_profile,
+    EnvironmentProfileRecord, resolve_runtime_profile,
     validate_environment_profile,
 };
 use serde_json::Value;
@@ -69,16 +69,6 @@ impl InvocationCommand {
                 | Self::EnvironmentValidate
         )
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct InvocationRequest {
-    pub command: InvocationCommand,
-    pub args: Vec<OsString>,
-    pub config: RuntimeConfig,
-    pub current_dir: Option<PathBuf>,
-    pub environment_slug: String,
-    pub execution_mode: ExecutionMode,
 }
 
 #[derive(Debug, Clone)]
@@ -444,7 +434,7 @@ fn parse_release_target_args(args: &[OsString]) -> AppResult<ReleaseTargetReques
     })
 }
 
-fn local_machine_scope() -> AppResult<String> {
+pub fn local_machine_scope() -> AppResult<String> {
     if let Ok(value) = std::env::var("DBTX_LOCAL_MACHINE_ID")
         && !value.trim().is_empty()
     {

@@ -192,66 +192,6 @@ impl Db {
         .await
     }
 
-    pub(crate) async fn upsert_local_environment(
-        &self,
-        input: LocalEnvironmentUpsertInput<'_>,
-    ) -> AppResult<EnvironmentRecord> {
-        let LocalEnvironmentUpsertInput {
-            project,
-            profile_name,
-            target_name,
-            adapter_type,
-            worker_queue,
-            schema_name,
-            threads,
-            profile_config,
-            profile_secrets,
-        } = input;
-        validate_environment_profile(
-            adapter_type,
-            schema_name,
-            threads,
-            profile_config,
-            profile_secrets,
-            false,
-        )?;
-        let slug = format!("{profile_name}__{target_name}");
-        let row = sqlx::query(
-            r#"
-            INSERT INTO environments (
-                project_id, slug, profile_name, target_name, status, adapter_type,
-                worker_queue, schema_name, threads, profile_config, profile_secrets
-            )
-            VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (project_id, slug) DO UPDATE
-            SET slug = EXCLUDED.slug,
-                profile_name = EXCLUDED.profile_name,
-                target_name = EXCLUDED.target_name,
-                adapter_type = EXCLUDED.adapter_type,
-                worker_queue = EXCLUDED.worker_queue,
-                schema_name = EXCLUDED.schema_name,
-                threads = EXCLUDED.threads,
-                profile_config = EXCLUDED.profile_config,
-                profile_secrets = EXCLUDED.profile_secrets
-            RETURNING id
-            "#,
-        )
-        .bind(project.id)
-        .bind(&slug)
-        .bind(profile_name)
-        .bind(target_name)
-        .bind(adapter_type)
-        .bind(worker_queue)
-        .bind(schema_name)
-        .bind(threads)
-        .bind(sqlx::types::Json(profile_config))
-        .bind(sqlx::types::Json(profile_secrets))
-        .fetch_one(&self.pool)
-        .await?;
-        let environment_id: i64 = row.get("id");
-        self.get_environment_by_id(environment_id).await
-    }
-
     pub(super) async fn finalize_run_in_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,

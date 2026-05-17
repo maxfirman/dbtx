@@ -414,6 +414,41 @@ async fn create_invocation(
     ctx: &config::InvocationContext,
 ) -> AppResult<api::InvocationCreateResponse> {
     let client = client::DaemonClient::new(service_url);
+
+    // Resolve project by git repo
+    let git_state = crate::dbt_utils::read_git_state(&ctx.project_dir);
+    let repo_url = git_state
+        .repo_url
+        .ok_or(AppError::RemoteProjectRequiresGitRepo)?;
+    let repo_root = crate::dbt_utils::git_repo_root(&ctx.project_dir)?;
+    let project_root =
+        crate::services::relative_project_root(&repo_root, &ctx.project_dir.canonicalize()?);
+
+    let project = client
+        .project_resolve(&repo_url, &project_root)
+        .await?
+        .project
+        .project;
+
+    // Resolve local environment
+    let target_name = ctx.target_name.clone().unwrap_or_else(|| "dev".to_string());
+    let local_profile =
+        crate::profile::LocalTargetProfile::from_local_project(&ctx.project_dir, Some(&target_name))?;
+    let machine_id = crate::services::local_machine_scope()?;
+
+    let env = client
+        .environment_local_upsert(
+            &project.project_id,
+            api::LocalEnvironmentUpsertApiRequest {
+                target_name: local_profile.target_name,
+                machine_id,
+                adapter_type: local_profile.adapter_type,
+                schema_name: local_profile.schema_name,
+            },
+        )
+        .await?;
+
+    // Create invocation
     client
         .invocation_create(api::InvocationCreateApiRequest {
             command: match command {
@@ -436,8 +471,8 @@ async fn create_invocation(
                 .into_iter()
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect(),
-            project_id: None,
-            environment_slug: Some(ctx.target_name.clone().unwrap_or_default()),
+            project_id: Some(project.project_id),
+            environment_slug: Some(env.environment_slug),
         })
         .await
 }

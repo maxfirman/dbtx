@@ -15,6 +15,7 @@ pub(crate) fn append_invocation_id(mut args: Vec<OsString>, run_id: Uuid) -> Vec
     args
 }
 
+#[allow(dead_code)]
 pub(crate) fn read_dbt_project_name(project_dir: &Path) -> String {
     read_dbt_project_yaml(project_dir)
         .ok()
@@ -32,6 +33,7 @@ pub(crate) fn read_dbt_project_name(project_dir: &Path) -> String {
         })
 }
 
+#[allow(dead_code)]
 fn read_dbt_project_yaml(project_dir: &Path) -> AppResult<serde_yaml::Value> {
     let path = project_dir.join("dbt_project.yml");
     if !path.is_file() {

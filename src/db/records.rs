@@ -609,19 +609,6 @@ pub(crate) struct InvocationPersistenceRecord {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LocalEnvironmentUpsertInput<'a> {
-    pub(crate) project: &'a ProjectRecord,
-    pub(crate) profile_name: &'a str,
-    pub(crate) target_name: &'a str,
-    pub(crate) adapter_type: &'a str,
-    pub(crate) worker_queue: &'a str,
-    pub(crate) schema_name: &'a str,
-    pub(crate) threads: Option<i32>,
-    pub(crate) profile_config: &'a Value,
-    pub(crate) profile_secrets: &'a Value,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct TimedOutInvocationRecord {
     pub(crate) invocation_id: Uuid,
     pub(crate) status: InvocationLifecycleStatus,
