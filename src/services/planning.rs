@@ -368,7 +368,9 @@ pub(super) async fn replan_pending_plan(
 
     match plan.reason.as_str() {
         "code_change" => replan_code_change_plan(db, plan, baseline_run_id).await,
-        "source_state_change" => replan_source_state_change_plan(db, db, plan, baseline_run_id).await,
+        "source_state_change" => {
+            replan_source_state_change_plan(db, db, plan, baseline_run_id).await
+        }
         _ => Ok(plan),
     }
 }

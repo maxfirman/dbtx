@@ -93,7 +93,9 @@ pub enum AppError {
     SchemaOutOfDate,
     #[error("project id '{0}' was not found in the database.")]
     ProjectIdNotFound(String),
-    #[error("no project found for repo '{0}' with root '{1}'. Create one with `dbtx project create`.")]
+    #[error(
+        "no project found for repo '{0}' with root '{1}'. Create one with `dbtx project create`."
+    )]
     ProjectNotFoundByRepo(String, String),
     #[error("environment '{1}' for project '{0}' was not found.")]
     EnvironmentNotFound(String, String),

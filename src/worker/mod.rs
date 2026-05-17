@@ -78,14 +78,14 @@ pub async fn execute_claimed_invocation(
         project_dir = %project_dir.display(),
         "starting claimed invocation execution"
     );
-    let _runtime_guard = match prepare_runtime_project_for_execution(&spec, command_name, &project_dir).await
-    {
-        Ok(guard) => guard,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
+    let _runtime_guard =
+        match prepare_runtime_project_for_execution(&spec, command_name, &project_dir).await {
+            Ok(guard) => guard,
+            Err(err) => {
+                report_setup_failure(client, &claim, &err.to_string()).await?;
+                return Err(err);
+            }
+        };
     let is_local = matches!(spec, InvocationExecutionSpecApi::Local { .. });
     let profiles_dir = if !is_local {
         match write_profiles_dir(spec.profiles_yml()) {
@@ -118,7 +118,7 @@ pub async fn execute_claimed_invocation(
     }
 
     let command = map_command(command_name);
-    let dbt_path = std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string());
+    let dbt_path = crate::dbt_runner::dbt_path_from_env();
     let mut dbt_child =
         match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, &dbt_args, &project_dir) {
             Ok(child) => child,

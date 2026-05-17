@@ -432,8 +432,10 @@ async fn create_invocation(
 
     // Resolve local environment
     let target_name = ctx.target_name.clone().unwrap_or_else(|| "dev".to_string());
-    let local_profile =
-        crate::profile::LocalTargetProfile::from_local_project(&ctx.project_dir, Some(&target_name))?;
+    let local_profile = crate::profile::LocalTargetProfile::from_local_project(
+        &ctx.project_dir,
+        Some(&target_name),
+    )?;
     let machine_id = crate::services::local_machine_scope()?;
 
     let env = client

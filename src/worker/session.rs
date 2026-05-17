@@ -72,4 +72,16 @@ impl<'a> WorkerInvocationSession<'a> {
         })
         .await
     }
+
+    pub(super) async fn complete_canceled(&self) -> AppResult<()> {
+        self.complete(crate::execution::ExecutionCompletion {
+            status: InvocationLifecycleStatus::Canceled,
+            exit_code: 130,
+            error: Some("invocation canceled".to_string()),
+            dbt_version: None,
+            manifest: None,
+            result: None,
+        })
+        .await
+    }
 }

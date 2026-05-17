@@ -12,12 +12,13 @@ use crate::api::{
     InvocationEvent, InvocationEventBatchApiRequest, InvocationExecutionModeApi,
     InvocationExecutionSpecApi, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
     InvocationLifecycleStatus, InvocationListApiRequest, InvocationStatusResponse,
-    InvocationWorkerHealthApi, InvocationsResponse, MigrateResponse, ProjectDeleteResponse,
+    InvocationWorkerHealthApi, InvocationsResponse, LocalEnvironmentUpsertApiRequest,
+    LocalEnvironmentUpsertApiResponse, MigrateResponse, ProjectDeleteResponse,
     ProjectDraftCreateApiRequest, ProjectDraftResponse, ProjectDraftValidateResponse,
-    ProjectResponse, ProjectResolveQuery, ProjectResolveResponse, ProjectUpdateApiRequest,
-    ProjectsResponse, LocalEnvironmentUpsertApiRequest, LocalEnvironmentUpsertApiResponse,
-    QueueStatusResponse, QueuesResponse, ReadyResponse, SourceStateEventCreateApiRequest,
-    SourceStateEventResponse, WorkerStatusResponse, WorkersResponse,
+    ProjectResolveQuery, ProjectResolveResponse, ProjectResponse, ProjectUpdateApiRequest,
+    ProjectsResponse, QueueStatusResponse, QueuesResponse, ReadyResponse,
+    SourceStateEventCreateApiRequest, SourceStateEventResponse, WorkerStatusResponse,
+    WorkersResponse,
 };
 use crate::config::RuntimeConfig;
 use crate::db::{
@@ -32,8 +33,7 @@ use crate::execution::{
 use crate::invocation_bootstrap::invocation_claim_deadline_at;
 use crate::invocation_bootstrap::{
     ensure_target_manifest_for_reconcile, start_environment_draft_prepare_invocation,
-    start_environment_draft_validation_invocation,
-    start_project_draft_validation_invocation,
+    start_environment_draft_validation_invocation, start_project_draft_validation_invocation,
 };
 use crate::invocation_runtime::{
     InvocationManager, InvocationPersistence, InvocationRecorder, event_stream,
@@ -42,8 +42,8 @@ use crate::invocation_runtime::{
 use crate::reconciler::auto_admit_blocked_plans_for_environment;
 use crate::services::{
     EnvironmentReleaseRequest, EnvironmentRollbackRequest, EnvironmentService, InvocationCommand,
-    InvocationService, PreparedExecutionSpec, ProjectCreateRequest,
-    ProjectService, ProjectUpdateRequest, SourceStateEventCreateRequest,
+    InvocationService, PreparedExecutionSpec, ProjectCreateRequest, ProjectService,
+    ProjectUpdateRequest, SourceStateEventCreateRequest,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -114,7 +114,9 @@ impl AppState {
             .await?;
         let runtime = self.invocations.get_or_create(invocation_id, None).await;
         let recorder = InvocationRecorder::new(self.db.clone(), invocation_id, runtime);
-        recorder.complete(worker_id, lease_token, completion).await?;
+        recorder
+            .complete(worker_id, lease_token, completion)
+            .await?;
         if let (Some(project_id), Some(environment_id)) =
             (persistence.project_id, persistence.environment_id)
         {
@@ -2040,7 +2042,12 @@ async fn invocation_complete(
 ) -> Result<StatusCode, ApiError> {
     reconcile_timed_out_invocations(&state).await?;
     state
-        .complete_invocation(id, &request.worker_id, request.lease_token, request.completion)
+        .complete_invocation(
+            id,
+            &request.worker_id,
+            request.lease_token,
+            request.completion,
+        )
         .await?;
     info!(invocation_id = %id, "completed invocation via api");
     Ok(StatusCode::NO_CONTENT)

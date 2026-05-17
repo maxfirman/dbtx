@@ -4,20 +4,18 @@ use crate::db::{
     CreateEnvironmentDraftInput, CreateEnvironmentRunPlanInput, CreateProjectDraftInput,
     CreateProjectInput, CurrentNodeStatePlanningRecord, Db, EnvironmentActualStateRecord,
     EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput, EnvironmentRunPlanRecord,
-    EnvironmentVersionRecord, EquivalentPlanLookup, GitState,
-    PlanStatus, PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord,
-    RunStart, SourceStateEventCreateInput, SourceStateEventRecord, UpdateEnvironmentDraftInput,
+    EnvironmentVersionRecord, EquivalentPlanLookup, GitState, PlanStatus,
+    PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord, RunStart,
+    SourceStateEventCreateInput, SourceStateEventRecord, UpdateEnvironmentDraftInput,
 };
 use crate::dbt_utils::{
-    append_invocation_id, build_generated_profiles,
-    git_repo_root, read_git_state,
+    append_invocation_id, build_generated_profiles, git_repo_root, read_git_state,
 };
 use crate::error::{AppError, AppResult};
 use crate::execution::ExecutionMode;
 use crate::manifest::ReconstructedManifest;
 use crate::profile::{
-    EnvironmentProfileRecord, resolve_runtime_profile,
-    validate_environment_profile,
+    EnvironmentProfileRecord, resolve_runtime_profile, validate_environment_profile,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -331,7 +329,6 @@ pub fn infer_local_project_defaults(
     })
 }
 
-
 pub fn infer_remote_project_defaults(
     current_dir: &Path,
     git_repo_url: Option<&str>,
@@ -513,8 +510,6 @@ fn validation_worker_queue_from_env(value: Option<&str>) -> String {
         .unwrap_or("generic")
         .to_string()
 }
-
-
 
 fn infer_local_identity_hash(current_dir: &Path, project_name: &str) -> AppResult<String> {
     let canonical_project_dir = current_dir.canonicalize()?;

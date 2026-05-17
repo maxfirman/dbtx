@@ -9,12 +9,12 @@ use crate::api::{
     InvocationCleanupApiRequest, InvocationCleanupResponse, InvocationCompleteApiRequest,
     InvocationCreateApiRequest, InvocationCreateResponse, InvocationEvent,
     InvocationEventBatchApiRequest, InvocationHeartbeatApiRequest, InvocationHeartbeatResponse,
-    InvocationListApiRequest, InvocationStatusResponse, InvocationsResponse, MigrateResponse,
+    InvocationListApiRequest, InvocationStatusResponse, InvocationsResponse,
+    LocalEnvironmentUpsertApiRequest, LocalEnvironmentUpsertApiResponse, MigrateResponse,
     ProjectDeleteResponse, ProjectDraftCreateApiRequest, ProjectDraftResponse,
-    ProjectDraftValidateResponse, ProjectResolveResponse, ProjectResponse,
-    ProjectUpdateApiRequest, ProjectsResponse, LocalEnvironmentUpsertApiRequest,
-    LocalEnvironmentUpsertApiResponse, QueuesResponse, SourceStateEventCreateApiRequest,
-    SourceStateEventResponse, WorkersResponse,
+    ProjectDraftValidateResponse, ProjectResolveResponse, ProjectResponse, ProjectUpdateApiRequest,
+    ProjectsResponse, QueuesResponse, SourceStateEventCreateApiRequest, SourceStateEventResponse,
+    WorkersResponse,
 };
 use crate::error::{AppError, AppResult};
 use futures_util::StreamExt;
@@ -85,9 +85,7 @@ impl DaemonClient {
     ) -> AppResult<LocalEnvironmentUpsertApiResponse> {
         self.send(
             self.http
-                .post(self.url(&format!(
-                    "/v1/projects/{project_id}/environments/local"
-                )))
+                .post(self.url(&format!("/v1/projects/{project_id}/environments/local")))
                 .json(&request),
         )
         .await

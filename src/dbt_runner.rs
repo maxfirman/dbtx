@@ -10,6 +10,10 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 
+pub(crate) fn dbt_path_from_env() -> String {
+    std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string())
+}
+
 /// A spawned dbt child process with captured stdout and a background stderr task.
 pub(crate) struct DbtChild {
     child: Child,

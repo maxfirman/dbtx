@@ -482,7 +482,10 @@ mod tests {
         assert_eq!(resource_type_from_unique_id("source.pkg.raw"), "source");
         assert_eq!(resource_type_from_unique_id("seed.pkg.data"), "seed");
         assert_eq!(resource_type_from_unique_id("test.pkg.not_null"), "test");
-        assert_eq!(resource_type_from_unique_id("snapshot.pkg.snap"), "snapshot");
+        assert_eq!(
+            resource_type_from_unique_id("snapshot.pkg.snap"),
+            "snapshot"
+        );
         assert_eq!(resource_type_from_unique_id("unknown.pkg.x"), "model");
         assert_eq!(resource_type_from_unique_id(""), "model");
     }

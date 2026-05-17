@@ -14,8 +14,8 @@ use crate::db::validate_remote_project_root;
 use crate::error::{AppError, AppResult};
 use crate::services::read_dbt_project_name_from_root;
 use serde_json::{Value, json};
+use std::ffi::OsString;
 use std::path::Path;
-use tokio::process::Command as TokioCommand;
 
 pub(super) async fn execute_release_validation(
     client: &DaemonClient,
@@ -337,36 +337,96 @@ async fn run_validation_command(
         format!("Running dbt {command}"),
     )
     .await?;
-    let output =
-        TokioCommand::new(std::env::var("DBTX_DBT_PATH").unwrap_or_else(|_| "dbt".to_string()))
-            .arg(command)
-            .arg("--profiles-dir")
-            .arg(profiles_dir)
-            .current_dir(project_dir)
-            .output()
+    let args = vec![
+        OsString::from("--profiles-dir"),
+        profiles_dir.as_os_str().to_os_string(),
+    ];
+    let dbt_path = crate::dbt_runner::dbt_path_from_env();
+    let mut dbt_child =
+        match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, &args, project_dir) {
+            Ok(child) => child,
+            Err(err) => {
+                report_setup_failure(client, claim, &err.to_string()).await?;
+                return Err(err);
+            }
+        };
+    let pretty_terminal_output = claim.execution_mode == InvocationExecutionModeApi::Local;
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
+    let mut cancel_requested = false;
+
+    loop {
+        tokio::select! {
+            line = dbt_child.stdout_lines.next_line() => {
+                let Some(line) = line? else { break; };
+                emit_stream_output(
+                    pretty_terminal_output,
+                    claim.invocation_id,
+                    &claim.worker_id,
+                    "stdout",
+                    &line,
+                );
+                send_event(
+                    client,
+                    claim,
+                    crate::execution::ExecutionEvent {
+                        kind: crate::execution::ExecutionEventKind::StdoutLine,
+                        occurred_at: chrono::Utc::now(),
+                        text: Some(line.clone()),
+                        raw_line: Some(line),
+                        dbt_event_name: None,
+                        node_unique_id: None,
+                        level: None,
+                        error: None,
+                    },
+                )
+                .await?;
+            }
+            _ = heartbeat.tick() => {
+                let hb = WorkerInvocationSession::new(client, claim).heartbeat().await?;
+                if hb.cancel_requested {
+                    cancel_requested = true;
+                    dbt_child.start_kill();
+                }
+            }
+        }
+    }
+
+    let result = dbt_child.wait().await?;
+    for line in &result.stderr_lines {
+        emit_stream_output(
+            pretty_terminal_output,
+            claim.invocation_id,
+            &claim.worker_id,
+            "stderr",
+            line,
+        );
+        send_event(
+            client,
+            claim,
+            crate::execution::ExecutionEvent {
+                kind: crate::execution::ExecutionEventKind::StderrLine,
+                occurred_at: chrono::Utc::now(),
+                text: Some(line.clone()),
+                raw_line: Some(line.clone()),
+                dbt_event_name: None,
+                node_unique_id: None,
+                level: None,
+                error: None,
+            },
+        )
+        .await?;
+    }
+    if cancel_requested {
+        let err = AppError::InvocationCanceled;
+        WorkerInvocationSession::new(client, claim)
+            .complete_canceled()
             .await?;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        send_worker_event(
-            client,
-            claim,
-            crate::execution::ExecutionEventKind::StdoutLine,
-            line.to_string(),
-        )
-        .await?;
+        return Err(err);
     }
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
-        send_worker_event(
-            client,
-            claim,
-            crate::execution::ExecutionEventKind::StderrLine,
-            line.to_string(),
-        )
-        .await?;
-    }
-    if !output.status.success() {
+    if result.exit_code != 0 {
         let err = AppError::Internal(format!(
             "dbt {command} failed with exit code {}",
-            output.status.code().unwrap_or(1)
+            result.exit_code
         ));
         report_setup_failure(client, claim, &err.to_string()).await?;
         return Err(err);

@@ -3,16 +3,16 @@ mod formatting;
 mod read_models;
 
 use formatting::{
-    compute_diff, fmt_duration, fmt_opt_time, fmt_optional_ts, fmt_ts, git_commit_url,
-    highlight_sql, invocation_display_status, invocation_mode_value, model_status_class,
-    plan_status_class, render_invocation_log_html, resource_type_from_unique_id, short_commit_sha,
-    short_hash, status_badge_class, topo_sort_resources, DiffLineView,
+    DiffLineView, compute_diff, fmt_duration, fmt_opt_time, fmt_optional_ts, fmt_ts,
+    git_commit_url, highlight_sql, invocation_display_status, invocation_mode_value,
+    model_status_class, plan_status_class, render_invocation_log_html,
+    resource_type_from_unique_id, short_commit_sha, short_hash, status_badge_class,
+    topo_sort_resources,
 };
 
 use crate::api::{
-    EnvironmentActiveResourcePhaseApi, InvocationLifecycleStatus,
-    InvocationListApiRequest, InvocationStatusResponse, QueueStatusResponse,
-    WorkerStatusResponse,
+    EnvironmentActiveResourcePhaseApi, InvocationLifecycleStatus, InvocationListApiRequest,
+    InvocationStatusResponse, QueueStatusResponse, WorkerStatusResponse,
 };
 use crate::db::{
     DraftStatus, EnvironmentActiveResourceRecord, EnvironmentActualStateRecord,
@@ -23,8 +23,7 @@ use crate::db::{
 use crate::error::{AppError, AppResult};
 use crate::invocation_bootstrap::{
     ensure_target_manifest_for_reconcile, start_environment_draft_prepare_invocation,
-    start_environment_draft_validation_invocation,
-    start_project_draft_validation_invocation,
+    start_environment_draft_validation_invocation, start_project_draft_validation_invocation,
 };
 use crate::server::AppState;
 use crate::services::{
@@ -1171,8 +1170,6 @@ async fn invocation_timeline(
     }))
 }
 
-
-
 #[derive(Debug, Default, Deserialize, Clone, Copy)]
 struct StaleVisibilityQuery {
     show_stale: Option<bool>,
@@ -1612,30 +1609,6 @@ fn htmx_headers() -> HeaderMap {
 fn parse_uuid(value: &str) -> AppResult<Uuid> {
     Uuid::parse_str(value).map_err(|err| AppError::InvalidInput(format!("invalid uuid: {err}")))
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[derive(Clone)]
 struct ProjectSummaryView {
@@ -2500,8 +2473,6 @@ fn reconcile_plan_input_summary(plan: &EnvironmentRunPlanRecord) -> String {
     }
 }
 
-
-
 fn environment_active_resource_view(
     resource: &EnvironmentActiveResourceRecord,
 ) -> EnvironmentActiveResourceView {
@@ -2834,7 +2805,6 @@ struct ModelHistoryEntryView {
     prev_checksum_short: String,
     diff_url: String,
 }
-
 
 // --- Model UI template structs ---
 
@@ -3265,8 +3235,6 @@ async fn render_tab(
     }
 }
 
-
-
 async fn render_overview_tab(
     db: &crate::db::Db,
     project: &crate::db::ProjectRecord,
@@ -3593,8 +3561,6 @@ fn build_exec_view(e: &crate::db::ModelNodeExecutionRecord) -> ModelExecView {
     }
 }
 
-
-
 async fn render_lineage_tab(
     db: &crate::db::Db,
     project: &crate::db::ProjectRecord,
@@ -3720,10 +3686,6 @@ async fn render_lineage_tab(
     .render()
     .map_err(|e| UiError(AppError::Internal(e.to_string())))
 }
-
-
-
-
 
 async fn render_tests_tab(
     db: &crate::db::Db,
@@ -3869,13 +3831,9 @@ async fn model_history_diff(
     render_template(&ModelHistoryDiffTemplate { diff_lines })
 }
 
-
-
 fn extract_str(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
-
-
 
 async fn build_overview_lineage(
     db: &crate::db::Db,
@@ -3933,8 +3891,6 @@ async fn build_overview_lineage(
         has_lineage,
     })
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -4572,8 +4528,6 @@ mod tests {
         assert!(rendered.contains("Blocking Invocation"));
         assert!(rendered.contains("Overlap 2"));
     }
-
-
 
     #[test]
     fn parse_catalog_filter_query_handles_repeated_resource_type() {
