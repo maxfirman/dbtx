@@ -314,9 +314,13 @@ impl Db {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
+        let mut tx = self.pool.begin().await?;
         let mut advanced = Vec::new();
         for candidate in candidates {
-            let mut tx = self.pool.begin().await?;
+            // Advisory lock per (project, environment, node, source_key) to serialize
+            // concurrent commits. Uses hashtextextended which maps the composite key to
+            // a bigint — hash collisions are possible but benign (they only widen the
+            // serialization scope, never compromise correctness).
             let lock_key = format!(
                 "{}:{}:{}:{}",
                 project_id, environment_id, unique_id, candidate.source_key
@@ -347,7 +351,6 @@ impl Db {
                 .map(|previous| previous >= candidate.watermark_event_id)
                 .unwrap_or(false)
             {
-                tx.commit().await?;
                 continue;
             }
 
@@ -392,9 +395,9 @@ impl Db {
             .bind(invocation_id)
             .execute(&mut *tx)
             .await?;
-            tx.commit().await?;
             advanced.push(candidate.clone());
         }
+        tx.commit().await?;
         Ok(advanced)
     }
 

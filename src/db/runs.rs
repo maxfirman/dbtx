@@ -908,6 +908,15 @@ impl Db {
             .await?;
         }
 
+        // Resolve watermark manifest run ID once per event (static for the invocation lifetime).
+        let watermark_manifest_run_id = match invocation_id {
+            Some(invocation_id) => {
+                self.load_invocation_watermark_manifest_run_id(invocation_id)
+                    .await?
+            }
+            None => None,
+        };
+
         if let Some(node) = event.normalized_node_event() {
             if let Some(invocation_id) = invocation_id {
                 self.update_invocation_selected_resource_progress(invocation_id, &node)
@@ -1019,14 +1028,6 @@ impl Db {
             .execute(&self.pool)
             .await?;
 
-            let watermark_manifest_run_id = match invocation_id {
-                Some(invocation_id) => {
-                    self.load_invocation_watermark_manifest_run_id(invocation_id)
-                        .await?
-                }
-                None => None,
-            };
-
             // Watermark tracking: compute candidates on node start, commit on success
             self.handle_node_watermark(
                 invocation_id,
@@ -1047,6 +1048,7 @@ impl Db {
     /// On node start: compute candidate watermarks from parents and store in staging table.
     /// On node finish (success): commit candidates to the primary watermark table.
     /// On node finish (failure): discard candidates.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_node_watermark(
         &self,
         invocation_id: Option<Uuid>,

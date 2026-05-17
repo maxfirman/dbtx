@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Plan reason indicating the invocation was triggered by a source state change.
+/// For source-triggered plans, the baseline manifest (not the target) is the correct
+/// watermark graph since the code hasn't changed — only the data freshness has.
+const PLAN_REASON_SOURCE_STATE_CHANGE: &str = "source_state_change";
+
 impl Db {
     pub(crate) async fn create_invocation(
         &self,
@@ -70,7 +75,7 @@ impl Db {
             if let Some(row) = row {
                 let reason: String = row.get("reason");
                 let baseline_run_id: Option<Uuid> = row.get("baseline_run_id");
-                if reason == "source_state_change" {
+                if reason == PLAN_REASON_SOURCE_STATE_CHANGE {
                     return Ok(baseline_run_id);
                 }
                 let metadata = row
@@ -1155,6 +1160,12 @@ impl Db {
     }
 }
 
+/// Commands that produce node executions which should advance source watermarks.
+/// Matches on the first token to handle cases where the command field might
+/// contain additional arguments (e.g. "build --select orders+").
 fn is_watermarkable_command(command: &str) -> bool {
-    matches!(command, "build" | "run" | "test" | "seed")
+    matches!(
+        command.split_whitespace().next().unwrap_or(""),
+        "build" | "run" | "test" | "seed"
+    )
 }
