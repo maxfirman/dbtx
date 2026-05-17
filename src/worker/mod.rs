@@ -332,7 +332,11 @@ async fn materialize_execution_project_dir(
     spec: &InvocationExecutionSpecApi,
 ) -> AppResult<PathBuf> {
     match spec {
-        InvocationExecutionSpecApi::Local { .. } => Ok(std::env::current_dir()?),
+        InvocationExecutionSpecApi::Local { args, .. } => {
+            let args = args.iter().cloned().map(Into::into).collect::<Vec<_>>();
+            let ctx = crate::config::InvocationContext::from_args(&args, false)?;
+            Ok(ctx.project_dir)
+        }
         InvocationExecutionSpecApi::Remote {
             repo_url,
             commit_sha,
@@ -791,6 +795,26 @@ mod tests {
         };
         assert!(spec.profiles_yml().is_empty());
         assert!(matches!(spec, InvocationExecutionSpecApi::Local { .. }));
+    }
+
+    #[tokio::test]
+    async fn local_spec_materializes_project_dir_from_args() {
+        use crate::api::{InvocationCommandApi, InvocationExecutionSpecApi};
+
+        let project = TempDir::new().expect("project dir");
+        let spec = InvocationExecutionSpecApi::Local {
+            command: InvocationCommandApi::Build,
+            args: vec![
+                "--project-dir".to_string(),
+                project.path().to_string_lossy().into_owned(),
+            ],
+            state_manifest: None,
+        };
+
+        let resolved = super::materialize_execution_project_dir(&spec)
+            .await
+            .expect("materialize local project dir");
+        assert_eq!(resolved, project.path());
     }
 
     #[test]

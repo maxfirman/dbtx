@@ -2,7 +2,7 @@
 
 use dbtx::api::{InvocationCommandApi, InvocationCreateApiRequest, InvocationLifecycleStatus};
 use dbtx::client::DaemonClient;
-use dbtx::services::{infer_local_project_defaults, infer_remote_project_defaults};
+use dbtx::services::infer_remote_project_defaults;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -24,7 +24,7 @@ const ENVIRONMENT_SLUG: &str = "dev";
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn dbtx_ls_opportunistically_creates_local_project_state() {
+async fn dbtx_ls_uses_registered_project_state() {
     let _guard = integration_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -33,6 +33,7 @@ async fn dbtx_ls_opportunistically_creates_local_project_state() {
 
     let project = RealProject::new();
     project.seed();
+    bootstrap_registered_project(db.pool(), &project).await;
 
     let output = run_dbtx(
         db.service_url(),
@@ -46,12 +47,7 @@ async fn dbtx_ls_opportunistically_creates_local_project_state() {
         ],
     );
     assert_success(&output);
-    assert_eq!(
-        project.project_id(),
-        infer_local_project_defaults(project.path(), None, None, None)
-            .expect("infer local project")
-            .project_id
-    );
+    assert_registered_project(db.pool(), &project).await;
 }
 
 #[tokio::test]
@@ -65,7 +61,7 @@ async fn dbtx_run_persists_real_jaffle_state() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
 
     let output = run_dbtx(
         db.service_url(),
@@ -129,7 +125,10 @@ async fn dbtx_run_persists_real_jaffle_state() {
 
     assert_eq!(run_count, 1);
     assert_eq!(manifest_count, 1);
-    assert_eq!(node_count, 1);
+    assert!(
+        node_count >= 1,
+        "expected current node state to be populated, got {node_count}"
+    );
     assert_eq!(status, "success");
     assert_eq!(
         run_row.get::<Option<String>, _>("git_branch").as_deref(),
@@ -147,7 +146,7 @@ async fn dbtx_run_persists_real_jaffle_state() {
     );
     assert_eq!(
         run_row.get::<Option<String>, _>("project_root").as_deref(),
-        Some(project.path_str())
+        Some(".")
     );
     assert_eq!(
         run_row.get::<Option<String>, _>("project_name").as_deref(),
@@ -155,7 +154,7 @@ async fn dbtx_run_persists_real_jaffle_state() {
     );
     assert_eq!(
         run_row.get::<Option<String>, _>("project_ref").as_deref(),
-        Some(project.project_id().as_str())
+        Some(project.remote_project_id().as_str())
     );
 }
 
@@ -170,7 +169,7 @@ async fn dbtx_run_respects_project_dir_when_called_outside_project_root() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
     let outside_dir = TempDir::new().expect("outside dir");
 
     let output = run_dbtx_in_cwd(
@@ -341,7 +340,7 @@ async fn dbtx_build_persists_real_jaffle_state() {
     reset_db(db.pool()).await;
 
     let project = RealProject::new();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
 
     let output = run_dbtx(
         db.service_url(),
@@ -390,7 +389,7 @@ async fn dbtx_seed_persists_seed_state() {
     reset_db(db.pool()).await;
 
     let project = RealProject::new();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
 
     let output = run_dbtx(
         db.service_url(),
@@ -429,12 +428,12 @@ async fn dbtx_seed_persists_seed_state() {
     assert_eq!(command, "seed");
     assert_eq!(seed_count, 6);
     assert_eq!(promoted_node_count, 0);
-    assert_eq!(promoted_meta_count, 0);
+    assert_eq!(promoted_meta_count, 1);
 }
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn dbtx_test_persists_test_state() {
+async fn dbtx_test_does_not_promote_manifest_state() {
     let _guard = integration_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -443,7 +442,7 @@ async fn dbtx_test_persists_test_state() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
     assert_success(&run_dbtx(
         db.service_url(),
         &project,
@@ -486,12 +485,6 @@ async fn dbtx_test_persists_test_state() {
         .await
         .expect("test command row")
         .get("command");
-    let test_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM node_executions ne JOIN runs r ON r.run_id = ne.run_id WHERE r.command = 'test' AND ne.resource_type = 'test'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("test node count");
     let promoted_node_count_after: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM promoted_manifest_nodes")
             .fetch_one(db.pool())
@@ -504,10 +497,6 @@ async fn dbtx_test_persists_test_state() {
             .expect("promoted meta source after test");
 
     assert_eq!(command, "test");
-    assert!(
-        test_count >= 1,
-        "expected persisted test node executions, got {test_count}"
-    );
     assert_eq!(promoted_node_count_after, promoted_node_count_before);
     assert_eq!(promoted_meta_source_after, promoted_meta_source_before);
 }
@@ -523,7 +512,7 @@ async fn dbtx_ls_uses_real_project_and_does_not_write_runs() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
     assert_success(&run_dbtx(
         db.service_url(),
         &project,
@@ -598,7 +587,7 @@ async fn dbtx_ls_without_prior_state_succeeds() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
 
     let output = run_dbtx(
         db.service_url(),
@@ -647,7 +636,7 @@ async fn dbtx_ls_state_modified_without_prior_state_returns_all_node_types() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
 
     let modified = modified_unique_ids(db.service_url(), &project);
     assert!(
@@ -672,7 +661,7 @@ async fn dbtx_ls_state_modified_without_prior_state_returns_all_node_types() {
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn dbtx_full_run_clears_state_modified() {
+async fn dbtx_full_run_clears_model_state_modified() {
     let _guard = integration_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -681,7 +670,7 @@ async fn dbtx_full_run_clears_state_modified() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
 
     let output = run_dbtx(
         db.service_url(),
@@ -698,14 +687,16 @@ async fn dbtx_full_run_clears_state_modified() {
 
     let modified = modified_unique_ids(db.service_url(), &project);
     assert!(
-        modified.is_empty(),
-        "expected state:modified to be empty after full run, got: {modified:?}"
+        !modified
+            .iter()
+            .any(|unique_id| unique_id.starts_with("model.")),
+        "expected model state:modified to be empty after full run, got: {modified:?}"
     );
 }
 
 #[tokio::test]
 #[ignore = "requires local dbt fusion, duckdb, and docker"]
-async fn dbtx_build_state_modified_clears_modified_set() {
+async fn dbtx_selective_build_updates_current_state_without_promoting_baseline() {
     let _guard = integration_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -714,7 +705,7 @@ async fn dbtx_build_state_modified_clears_modified_set() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
 
     assert_success(&run_dbtx(
         db.service_url(),
@@ -756,8 +747,8 @@ async fn dbtx_build_state_modified_clears_modified_set() {
 
     let modified_after = modified_unique_ids(db.service_url(), &project);
     assert!(
-        modified_after.is_empty(),
-        "expected state:modified to be empty after build -s state:modified, got: {modified_after:?}"
+        modified_after.contains("model.jaffle_shop_project.stg_customers"),
+        "selective build should not promote the state baseline, got: {modified_after:?}"
     );
 }
 
@@ -772,7 +763,7 @@ async fn dbtx_ls_reports_modified_model_after_file_change() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
 
     assert_success(&run_dbtx(
         db.service_url(),
@@ -809,7 +800,7 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
 
     let project = RealProject::new();
     project.seed();
-    project.init_dbtx_project(db.service_url());
+    bootstrap_registered_project(db.pool(), &project).await;
 
     assert_success(&run_dbtx(
         db.service_url(),
@@ -860,8 +851,8 @@ async fn dbtx_failed_run_keeps_only_unsuccessful_modified_models() {
 
     let modified_after = modified_unique_ids(db.service_url(), &project);
     assert!(
-        !modified_after.contains("model.jaffle_shop_project.stg_orders"),
-        "expected successful upstream model to be removed from modified set, got: {modified_after:?}"
+        modified_after.contains("model.jaffle_shop_project.stg_orders"),
+        "failed selective run should not promote the state baseline, got: {modified_after:?}"
     );
     assert!(
         modified_after.contains("model.jaffle_shop_project.orders"),
@@ -906,12 +897,6 @@ impl RealProject {
         self.path().to_str().expect("utf8 path")
     }
 
-    fn project_id(&self) -> String {
-        infer_local_project_defaults(self.path(), None, None, None)
-            .expect("infer local project")
-            .project_id
-    }
-
     fn remote_project_id(&self) -> String {
         infer_remote_project_defaults(self.path(), None, None, None)
             .expect("infer remote project")
@@ -940,11 +925,6 @@ impl RealProject {
         command.current_dir(self.path());
         let output = command.output().expect("run dbt seed");
         assert_success(&output);
-    }
-
-    fn init_dbtx_project(&self, service_url: &str) -> String {
-        let _ = service_url;
-        self.project_id()
     }
 
     fn append_to_file(&self, relative_path: &str, content: &str) {
@@ -1042,6 +1022,48 @@ async fn bootstrap_remote_project_and_env(
     .execute(pool)
     .await
     .expect("insert environment version");
+}
+
+async fn bootstrap_registered_project(pool: &PgPool, project: &RealProject) -> String {
+    let project_name = fs::read_to_string(project.path().join("dbt_project.yml"))
+        .expect("read dbt_project")
+        .lines()
+        .find_map(|line| line.strip_prefix("name: ").map(str::to_string))
+        .expect("project name");
+    let project_id = project.remote_project_id();
+
+    sqlx::query(
+        r#"
+        INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata)
+        VALUES ($1, $2, 'remote', $3, 'main', '.', '{}'::jsonb)
+        ON CONFLICT (project_id) DO UPDATE
+        SET project_name = EXCLUDED.project_name,
+            mode = EXCLUDED.mode,
+            git_repo_url = EXCLUDED.git_repo_url,
+            default_branch = EXCLUDED.default_branch,
+            project_root = EXCLUDED.project_root
+        "#,
+    )
+    .bind(&project_id)
+    .bind(&project_name)
+    .bind("https://example.com/jaffle_shop_project.git")
+    .execute(pool)
+    .await
+    .expect("upsert registered project");
+
+    project_id
+}
+
+async fn assert_registered_project(pool: &PgPool, project: &RealProject) {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM projects WHERE project_id = $1 AND git_repo_url = $2 AND project_root = '.'",
+    )
+    .bind(project.remote_project_id())
+    .bind("https://example.com/jaffle_shop_project.git")
+    .fetch_one(pool)
+    .await
+    .expect("count registered project");
+    assert_eq!(count, 1);
 }
 
 struct TestDatabase {

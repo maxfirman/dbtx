@@ -1579,7 +1579,7 @@ async fn invocation_create(
                         .map(|v| serde_json::Value::String(v.to_string_lossy().into_owned()))
                         .collect(),
                 );
-                let git_state = crate::dbt_utils::read_git_state(std::path::Path::new("."));
+                let git_state = crate::dbt_utils::read_git_state(&ctx.project_dir);
                 db.insert_run_started(crate::db::RunStart {
                     run_id,
                     project: &project,
