@@ -12,7 +12,6 @@ use crate::api::{
 use crate::client::DaemonClient;
 use crate::db::validate_remote_project_root;
 use crate::error::{AppError, AppResult};
-use crate::event::LogEvent;
 use dbt_execution::complete_worker_dbt_invocation;
 use git::{ensure_git_worktree, git_cache_root, short_hash};
 use serde_yaml::Value as YamlValue;
@@ -119,7 +118,7 @@ pub async fn execute_claimed_invocation(
 
     let command = map_command(command_name);
     let dbt_path = crate::dbt_runner::dbt_path_from_env();
-    let mut dbt_child =
+    let dbt_child =
         match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, &dbt_args, &project_dir) {
             Ok(child) => child,
             Err(err) => {
@@ -128,86 +127,14 @@ pub async fn execute_claimed_invocation(
             }
         };
 
-    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
-    let mut dbt_version: Option<String> = None;
-    let mut cancel_requested = false;
-
-    loop {
-        tokio::select! {
-            line = dbt_child.stdout_lines.next_line() => {
-                let Some(line) = line? else { break; };
-                if persists_state(command_name)
-                    && let Some(event) = LogEvent::parse(&line)
-                {
-                    if dbt_version.is_none() && event.info.name == "MainReportVersion" {
-                        dbt_version = event.data.get("version")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                    }
-                    emit_dbt_log_output(pretty_terminal_output, claim.invocation_id, &claim.worker_id, &event);
-                    send_event(client, &claim, crate::execution::ExecutionEvent {
-                        kind: crate::execution::ExecutionEventKind::DbtLog,
-                        occurred_at: chrono::Utc::now(),
-                        text: event.render_text_line(),
-                        raw_line: Some(line),
-                        dbt_event_name: Some(event.info.name.clone()),
-                        node_unique_id: event.data.get("node_info")
-                            .and_then(|v| v.get("unique_id"))
-                            .and_then(|v| v.as_str())
-                            .map(ToString::to_string),
-                        level: Some(event.info.level.clone()),
-                        error: None,
-                    }).await?;
-                } else {
-                    emit_stream_output(pretty_terminal_output, claim.invocation_id, &claim.worker_id, "stdout", &line);
-                    send_event(client, &claim, crate::execution::ExecutionEvent {
-                        kind: crate::execution::ExecutionEventKind::StdoutLine,
-                        occurred_at: chrono::Utc::now(),
-                        text: Some(line.clone()),
-                        raw_line: Some(line),
-                        dbt_event_name: None,
-                        node_unique_id: None,
-                        level: None,
-                        error: None,
-                    }).await?;
-                }
-            }
-            _ = heartbeat.tick() => {
-                let hb = WorkerInvocationSession::new(client, &claim).heartbeat().await?;
-                if hb.cancel_requested {
-                    warn!(invocation_id = %claim.invocation_id, worker_id = %claim.worker_id, "cancel requested by control plane");
-                    cancel_requested = true;
-                    dbt_child.start_kill();
-                }
-            }
-        }
-    }
-
-    let result = dbt_child.wait().await?;
-    for line in &result.stderr_lines {
-        emit_stream_output(
-            pretty_terminal_output,
-            claim.invocation_id,
-            &claim.worker_id,
-            "stderr",
-            line,
-        );
-        send_event(
-            client,
-            &claim,
-            crate::execution::ExecutionEvent {
-                kind: crate::execution::ExecutionEventKind::StderrLine,
-                occurred_at: chrono::Utc::now(),
-                text: Some(line.clone()),
-                raw_line: Some(line.clone()),
-                dbt_event_name: None,
-                node_unique_id: None,
-                level: None,
-                error: None,
-            },
-        )
-        .await?;
-    }
+    let session = WorkerInvocationSession::new(client, &claim);
+    let exec_config = crate::dbt_runner::DbtExecutionConfig {
+        parse_dbt_logs: persists_state(command_name),
+        pretty_terminal_output,
+        invocation_id: claim.invocation_id,
+        worker_id: claim.worker_id.clone(),
+    };
+    let exec_result = crate::dbt_runner::run_dbt_execution(dbt_child, &session, &exec_config).await?;
 
     let manifest = if persists_state(command_name) {
         let manifest_path = project_dir.join("target").join("manifest.json");
@@ -217,7 +144,12 @@ pub async fn execute_claimed_invocation(
     } else {
         None
     };
-    let terminal = complete_worker_dbt_invocation(result, cancel_requested, dbt_version, manifest);
+    let terminal = complete_worker_dbt_invocation(
+        exec_result.child_result,
+        exec_result.cancel_requested,
+        exec_result.dbt_version,
+        manifest,
+    );
     let app_result = terminal.as_result();
     let exit_code = terminal.exit_code;
 
@@ -225,7 +157,7 @@ pub async fn execute_claimed_invocation(
         .complete(terminal.completion)
         .await?;
 
-    info!(invocation_id = %claim.invocation_id, worker_id = %claim.worker_id, exit_code, canceled = cancel_requested, "finished claimed invocation execution");
+    info!(invocation_id = %claim.invocation_id, worker_id = %claim.worker_id, exit_code, canceled = exec_result.cancel_requested, "finished claimed invocation execution");
     app_result
 }
 
@@ -237,28 +169,6 @@ async fn report_setup_failure(
     WorkerInvocationSession::new(client, claim)
         .complete_failed(error_message)
         .await
-}
-
-fn emit_dbt_log_output(
-    pretty_terminal_output: bool,
-    invocation_id: uuid::Uuid,
-    worker_id: &str,
-    event: &LogEvent,
-) {
-    let rendered = event.render_text_line();
-    if pretty_terminal_output {
-        if let Some(rendered) = rendered {
-            println!("{rendered}");
-        }
-        return;
-    }
-    info!(
-        invocation_id = %invocation_id, worker_id = %worker_id,
-        event_type = "dbt.log", dbt_event_name = %event.info.name, level = %event.info.level,
-        node_unique_id = event.data.get("node_info").and_then(|v| v.get("unique_id")).and_then(|v| v.as_str()).unwrap_or(""),
-        text = rendered.as_deref().unwrap_or(""),
-        "worker invocation event"
-    );
 }
 
 fn emit_stream_output(

@@ -85,3 +85,14 @@ impl<'a> WorkerInvocationSession<'a> {
         .await
     }
 }
+
+impl crate::dbt_runner::DbtExecutionSession for WorkerInvocationSession<'_> {
+    async fn heartbeat(&self) -> AppResult<bool> {
+        let response = self.heartbeat().await?;
+        Ok(response.cancel_requested)
+    }
+
+    async fn send_event(&self, event: crate::execution::ExecutionEvent) -> AppResult<()> {
+        self.append_event(event).await
+    }
+}

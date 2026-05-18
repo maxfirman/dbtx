@@ -342,7 +342,7 @@ async fn run_validation_command(
         profiles_dir.as_os_str().to_os_string(),
     ];
     let dbt_path = crate::dbt_runner::dbt_path_from_env();
-    let mut dbt_child =
+    let dbt_child =
         match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, &args, project_dir) {
             Ok(child) => child,
             Err(err) => {
@@ -350,83 +350,26 @@ async fn run_validation_command(
                 return Err(err);
             }
         };
-    let pretty_terminal_output = claim.execution_mode == InvocationExecutionModeApi::Local;
-    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
-    let mut cancel_requested = false;
+    let session = WorkerInvocationSession::new(client, claim);
+    let exec_config = crate::dbt_runner::DbtExecutionConfig {
+        parse_dbt_logs: false,
+        pretty_terminal_output: claim.execution_mode == InvocationExecutionModeApi::Local,
+        invocation_id: claim.invocation_id,
+        worker_id: claim.worker_id.clone(),
+    };
+    let exec_result = crate::dbt_runner::run_dbt_execution(dbt_child, &session, &exec_config).await?;
 
-    loop {
-        tokio::select! {
-            line = dbt_child.stdout_lines.next_line() => {
-                let Some(line) = line? else { break; };
-                emit_stream_output(
-                    pretty_terminal_output,
-                    claim.invocation_id,
-                    &claim.worker_id,
-                    "stdout",
-                    &line,
-                );
-                send_event(
-                    client,
-                    claim,
-                    crate::execution::ExecutionEvent {
-                        kind: crate::execution::ExecutionEventKind::StdoutLine,
-                        occurred_at: chrono::Utc::now(),
-                        text: Some(line.clone()),
-                        raw_line: Some(line),
-                        dbt_event_name: None,
-                        node_unique_id: None,
-                        level: None,
-                        error: None,
-                    },
-                )
-                .await?;
-            }
-            _ = heartbeat.tick() => {
-                let hb = WorkerInvocationSession::new(client, claim).heartbeat().await?;
-                if hb.cancel_requested {
-                    cancel_requested = true;
-                    dbt_child.start_kill();
-                }
-            }
-        }
-    }
-
-    let result = dbt_child.wait().await?;
-    for line in &result.stderr_lines {
-        emit_stream_output(
-            pretty_terminal_output,
-            claim.invocation_id,
-            &claim.worker_id,
-            "stderr",
-            line,
-        );
-        send_event(
-            client,
-            claim,
-            crate::execution::ExecutionEvent {
-                kind: crate::execution::ExecutionEventKind::StderrLine,
-                occurred_at: chrono::Utc::now(),
-                text: Some(line.clone()),
-                raw_line: Some(line.clone()),
-                dbt_event_name: None,
-                node_unique_id: None,
-                level: None,
-                error: None,
-            },
-        )
-        .await?;
-    }
-    if cancel_requested {
+    if exec_result.cancel_requested {
         let err = AppError::InvocationCanceled;
         WorkerInvocationSession::new(client, claim)
             .complete_canceled()
             .await?;
         return Err(err);
     }
-    if result.exit_code != 0 {
+    if exec_result.child_result.exit_code != 0 {
         let err = AppError::Internal(format!(
             "dbt {command} failed with exit code {}",
-            result.exit_code
+            exec_result.child_result.exit_code
         ));
         report_setup_failure(client, claim, &err.to_string()).await?;
         return Err(err);
