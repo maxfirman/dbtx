@@ -820,4 +820,127 @@ mod tests {
             "expected Internal, got: {err}"
         );
     }
+
+    #[tokio::test]
+    async fn client_project_list_happy_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "projects": [{
+                    "id": 1,
+                    "project_id": "prj_abc",
+                    "project_name": "analytics",
+                    "git_repo_url": "https://github.com/org/repo.git",
+                    "default_branch": "main",
+                    "project_root": ".",
+                    "metadata": {}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = super::DaemonClient::new(mock_server.uri());
+        let resp = client.project_list().await.expect("should succeed");
+        assert_eq!(resp.projects.len(), 1);
+        assert_eq!(resp.projects[0].project_id, "prj_abc");
+    }
+
+    #[tokio::test]
+    async fn client_invocation_create_happy_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/invocations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "invocation_id": "11111111-1111-1111-1111-111111111111",
+                "execution_mode": "server",
+                "worker_queue": "generic",
+                "execution_spec": {"type": "server", "command": "build", "args": [], "repo_url": "https://example.com/repo.git", "git_commit_sha": "abc123", "project_root": ".", "profiles_yml": "test: {}", "environment_slug": "prod"}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = super::DaemonClient::new(mock_server.uri());
+        let resp = client
+            .invocation_create(crate::api::InvocationCreateApiRequest {
+                command: crate::api::InvocationCommandApi::Build,
+                args: vec![],
+                project_id: Some("prj_abc".to_string()),
+                environment_slug: Some("prod".to_string()),
+            })
+            .await
+            .expect("should succeed");
+        assert_eq!(
+            resp.invocation_id.to_string(),
+            "11111111-1111-1111-1111-111111111111"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_invocation_claim_next_returns_none_on_204() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/invocations/claim-next"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = super::DaemonClient::new(mock_server.uri());
+        let resp = client
+            .invocation_claim_next(crate::api::InvocationClaimNextApiRequest {
+                execution_mode: Some(crate::api::InvocationExecutionModeApi::Server),
+                worker_id: "w1".to_string(),
+                worker_queues: vec!["generic".to_string()],
+            })
+            .await
+            .expect("should succeed");
+        assert!(resp.is_none());
+    }
+
+    #[tokio::test]
+    async fn client_migrate_happy_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/state/migrate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "applied": [{"version": 1, "description": "initial schema"}]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = super::DaemonClient::new(mock_server.uri());
+        let resp = client.migrate().await.expect("should succeed");
+        assert_eq!(resp.applied.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn client_worker_list_happy_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/workers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "workers": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = super::DaemonClient::new(mock_server.uri());
+        let resp = client.worker_list().await.expect("should succeed");
+        assert!(resp.workers.is_empty());
+    }
 }
