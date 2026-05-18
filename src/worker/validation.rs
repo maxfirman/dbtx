@@ -1,4 +1,12 @@
 //! Validation execution: release, project, environment prepare, and environment validate.
+//!
+//! All validation functions share a common lifecycle:
+//! 1. Extract spec fields (fail if wrong variant)
+//! 2. Perform fallible async work, reporting failures to the control plane
+//! 3. Send progress events
+//! 4. Complete with a result JSON
+//!
+//! The `try_or_fail` helper concentrates the "try this, or mark the invocation failed" pattern.
 
 use super::git::{
     ensure_git_worktree, list_recent_branch_commits, list_remote_branches,
@@ -16,6 +24,21 @@ use crate::services::read_dbt_project_name_from_root;
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::path::Path;
+
+/// Try a fallible operation; on error, report failure to the control plane and propagate.
+async fn try_or_fail<T>(
+    client: &DaemonClient,
+    claim: &InvocationClaimResponse,
+    result: AppResult<T>,
+) -> AppResult<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            report_setup_failure(client, claim, &err.to_string()).await?;
+            Err(err)
+        }
+    }
+}
 
 pub(super) async fn execute_release_validation(
     client: &DaemonClient,
@@ -58,16 +81,12 @@ pub(super) async fn execute_release_validation(
         )
         .await?;
     }
-    let resolved_commit_sha =
-        match resolve_remote_git_target(repo_url, git_ref.as_deref(), git_commit_sha.as_deref())
-            .await
-        {
-            Ok(resolved) => resolved,
-            Err(err) => {
-                report_setup_failure(client, &claim, &err.to_string()).await?;
-                return Err(err);
-            }
-        };
+    let resolved_commit_sha = try_or_fail(
+        client,
+        &claim,
+        resolve_remote_git_target(repo_url, git_ref.as_deref(), git_commit_sha.as_deref()).await,
+    )
+    .await?;
     send_worker_event(
         client,
         &claim,
@@ -117,13 +136,8 @@ pub(super) async fn execute_project_validation(
     )
     .await?;
 
-    let default_branch = match resolve_remote_default_branch(repo_url).await {
-        Ok(branch) => branch,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
+    let default_branch =
+        try_or_fail(client, &claim, resolve_remote_default_branch(repo_url).await).await?;
     send_worker_event(
         client,
         &claim,
@@ -132,29 +146,17 @@ pub(super) async fn execute_project_validation(
     )
     .await?;
 
-    let default_commit =
-        match resolve_remote_git_target(repo_url, Some(&default_branch), None).await {
-            Ok(commit) => commit,
-            Err(err) => {
-                report_setup_failure(client, &claim, &err.to_string()).await?;
-                return Err(err);
-            }
-        };
-    let repo_checkout = match ensure_git_worktree(repo_url, &default_commit).await {
-        Ok(path) => path,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
+    let default_commit = try_or_fail(
+        client,
+        &claim,
+        resolve_remote_git_target(repo_url, Some(&default_branch), None).await,
+    )
+    .await?;
+    let repo_checkout =
+        try_or_fail(client, &claim, ensure_git_worktree(repo_url, &default_commit).await).await?;
     let project_dir = repo_checkout.join(project_root);
-    let project_name = match read_dbt_project_name_from_root(&project_dir) {
-        Ok(name) => name,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
+    let project_name =
+        try_or_fail(client, &claim, read_dbt_project_name_from_root(&project_dir)).await?;
     send_worker_event(
         client,
         &claim,
@@ -198,17 +200,9 @@ pub(super) async fn execute_environment_prepare(
     )
     .await?;
 
-    let default_branch = match resolve_remote_default_branch(repo_url).await {
-        Ok(branch) => branch,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
-    let active_branch = selected_branch
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| default_branch.clone());
+    let default_branch =
+        try_or_fail(client, &claim, resolve_remote_default_branch(repo_url).await).await?;
+    let active_branch = resolve_active_branch(selected_branch, &default_branch);
     send_worker_event(
         client,
         &claim,
@@ -217,28 +211,20 @@ pub(super) async fn execute_environment_prepare(
     )
     .await?;
 
-    let branches = match list_remote_branches(repo_url).await {
-        Ok(branches) => branches,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
-    let latest_commit_sha =
-        match resolve_remote_git_target(repo_url, Some(&active_branch), None).await {
-            Ok(commit) => commit,
-            Err(err) => {
-                report_setup_failure(client, &claim, &err.to_string()).await?;
-                return Err(err);
-            }
-        };
-    let commits = match list_recent_branch_commits(repo_url, &active_branch, 50).await {
-        Ok(commits) => commits,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
+    let branches =
+        try_or_fail(client, &claim, list_remote_branches(repo_url).await).await?;
+    let latest_commit_sha = try_or_fail(
+        client,
+        &claim,
+        resolve_remote_git_target(repo_url, Some(&active_branch), None).await,
+    )
+    .await?;
+    let commits = try_or_fail(
+        client,
+        &claim,
+        list_recent_branch_commits(repo_url, &active_branch, 50).await,
+    )
+    .await?;
 
     complete_success(
         client,
@@ -281,13 +267,8 @@ pub(super) async fn execute_environment_validation(
     )
     .await?;
 
-    let repo_checkout = match ensure_git_worktree(repo_url, commit_sha).await {
-        Ok(path) => path,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
+    let repo_checkout =
+        try_or_fail(client, &claim, ensure_git_worktree(repo_url, commit_sha).await).await?;
     validate_remote_project_root(project_root)?;
     let project_dir = if project_root == "." || project_root.is_empty() {
         repo_checkout
@@ -299,13 +280,7 @@ pub(super) async fn execute_environment_validation(
         report_setup_failure(client, &claim, &err.to_string()).await?;
         return Err(err);
     }
-    let profiles_dir = match write_profiles_dir(profiles_yml) {
-        Ok(dir) => dir,
-        Err(err) => {
-            report_setup_failure(client, &claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
+    let profiles_dir = try_or_fail(client, &claim, write_profiles_dir(profiles_yml)).await?;
 
     run_validation_command(client, &claim, &project_dir, profiles_dir.path(), "deps").await?;
     run_validation_command(client, &claim, &project_dir, profiles_dir.path(), "debug").await?;
@@ -360,6 +335,13 @@ async fn run_validation_command(
     Ok(())
 }
 
+fn resolve_active_branch(selected_branch: &Option<String>, default_branch: &str) -> String {
+    selected_branch
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_branch.to_string())
+}
+
 async fn complete_success(
     client: &DaemonClient,
     claim: &InvocationClaimResponse,
@@ -409,6 +391,7 @@ async fn send_worker_event(
 
 #[cfg(test)]
 mod tests {
+    use super::resolve_active_branch;
     use crate::api::InvocationExecutionSpecApi;
     use crate::error::AppError;
 
@@ -430,14 +413,6 @@ mod tests {
                 "project validation requires project validation spec".to_string(),
             )),
         }
-    }
-
-    /// Resolves the active branch from selected_branch or default_branch.
-    fn resolve_active_branch(selected_branch: &Option<String>, default_branch: &str) -> String {
-        selected_branch
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| default_branch.to_string())
     }
 
     #[test]
