@@ -1,7 +1,7 @@
 //! Per-environment automatic reconciliation cycle.
 
 use super::should_ignore_reconcile_error;
-use crate::db::{EnvironmentRecord, PlanStatus, PreparationStatus, SourceStateEventRecord};
+use crate::db::{Db, EnvironmentRecord, PlanStatus, PreparationStatus, SourceStateEventRecord};
 use crate::error::AppResult;
 use crate::process_state::ProcessState;
 use crate::services::{EnvironmentService, PreparationKind, ReconcileInputIdentity};
@@ -34,7 +34,7 @@ async fn reconcile_environment_once(
         .db()
         .get_environment_actual_state(&environment.project_ref, &environment.slug)
         .await?;
-    let source_events = crate::services::source_state::advance_and_load_unsatisfied_source_events(
+    let source_events = advance_and_load_unsatisfied_source_events(
         state.db(),
         &environment,
         actual_state.last_successful_run_id,
@@ -200,4 +200,35 @@ async fn ensure_target_manifest_for_reconcile_async(
         crate::manifest_preparation::ManifestPreparationOutcome::InProgress
         | crate::manifest_preparation::ManifestPreparationOutcome::Started(_) => Ok(true),
     }
+}
+
+/// Advance watermark-satisfied source events and return the remaining unsatisfied ones.
+async fn advance_and_load_unsatisfied_source_events(
+    db: &Db,
+    environment: &EnvironmentRecord,
+    baseline_run_id: Option<Uuid>,
+) -> AppResult<Vec<SourceStateEventRecord>> {
+    let source_events = db
+        .list_unsatisfied_source_state_events(environment.project_id, environment.id)
+        .await?;
+    let Some(manifest_run_id) = baseline_run_id else {
+        return Ok(source_events);
+    };
+    if source_events.is_empty() {
+        return Ok(source_events);
+    }
+
+    let source_keys = source_events
+        .iter()
+        .map(|event| event.source_key.clone())
+        .collect::<Vec<_>>();
+    db.advance_satisfied_source_events_from_watermarks(
+        environment.project_id,
+        environment.id,
+        &source_keys,
+        manifest_run_id,
+    )
+    .await?;
+    db.list_unsatisfied_source_state_events(environment.project_id, environment.id)
+        .await
 }

@@ -278,7 +278,6 @@ mod planning;
 mod prepared_execution;
 mod projects;
 mod reconcile_identity;
-pub(crate) mod source_state;
 
 pub use admission::EnvironmentPlanAdmitPrepared;
 pub use environments::EnvironmentService;
