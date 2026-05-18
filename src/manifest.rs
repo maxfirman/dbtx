@@ -444,4 +444,112 @@ mod tests {
         assert!(source.is_some(), "source node should be extracted");
         assert_eq!(source.unwrap().resource_type.as_deref(), Some("source"));
     }
+
+    #[test]
+    fn reconstruct_ignores_promoted_node_not_in_base() {
+        let raw = json!({
+            "nodes": {
+                "model.pkg.existing": {
+                    "raw_code": "select 1",
+                    "checksum": {"checksum":"abc"}
+                }
+            }
+        });
+
+        let successful_nodes = BTreeMap::from([(
+            "model.pkg.missing".to_string(),
+            json!({"raw_code": "promoted code", "checksum": {"checksum":"xyz"}}),
+        )]);
+
+        let reconstructed = ManifestSnapshot::reconstruct(raw, &successful_nodes);
+        // The promoted node that doesn't exist in base should not appear
+        assert!(reconstructed["nodes"]["model.pkg.missing"].is_null());
+        // The existing node should remain unchanged
+        assert_eq!(
+            reconstructed["nodes"]["model.pkg.existing"]["raw_code"],
+            "select 1"
+        );
+    }
+
+    #[test]
+    fn reconstruct_with_empty_promoted_nodes_is_identity() {
+        let raw = json!({
+            "nodes": {
+                "model.pkg.a": {
+                    "raw_code": "original",
+                    "checksum": {"checksum":"abc"},
+                    "depends_on": {"nodes": []}
+                }
+            }
+        });
+
+        let reconstructed = ManifestSnapshot::reconstruct(raw.clone(), &BTreeMap::new());
+        assert_eq!(reconstructed["nodes"]["model.pkg.a"]["raw_code"], "original");
+        assert_eq!(
+            reconstructed["nodes"]["model.pkg.a"]["checksum"]["checksum"],
+            "abc"
+        );
+    }
+
+    #[test]
+    fn reconstruct_mixed_promoted_and_unpromoted_nodes() {
+        let raw = json!({
+            "nodes": {
+                "model.pkg.promoted": {
+                    "raw_code": "new code",
+                    "checksum": {"checksum":"new"},
+                    "depends_on": {"nodes": []}
+                },
+                "model.pkg.unchanged": {
+                    "raw_code": "stable code",
+                    "checksum": {"checksum":"stable"},
+                    "depends_on": {"nodes": ["model.pkg.promoted"]}
+                }
+            }
+        });
+
+        let successful_nodes = BTreeMap::from([(
+            "model.pkg.promoted".to_string(),
+            json!({
+                "raw_code": "promoted code",
+                "checksum": {"checksum":"promoted"},
+                "depends_on": {"nodes": []}
+            }),
+        )]);
+
+        let reconstructed = ManifestSnapshot::reconstruct(raw, &successful_nodes);
+        // Promoted node is replaced
+        assert_eq!(
+            reconstructed["nodes"]["model.pkg.promoted"]["raw_code"],
+            "promoted code"
+        );
+        // Unchanged node is preserved
+        assert_eq!(
+            reconstructed["nodes"]["model.pkg.unchanged"]["raw_code"],
+            "stable code"
+        );
+        // Dependency maps are rebuilt from the final state
+        assert_eq!(
+            reconstructed["parent_map"]["model.pkg.unchanged"],
+            json!(["model.pkg.promoted"])
+        );
+    }
+
+    #[tokio::test]
+    async fn write_empty_state_produces_valid_manifest() {
+        let result =
+            super::ReconstructedManifest::write_empty_state("test_project", "duckdb").await;
+        assert!(result.is_ok());
+        let manifest = result.unwrap();
+        let content =
+            tokio::fs::read_to_string(manifest.temp_dir.path().join("manifest.json"))
+                .await
+                .expect("read manifest");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("valid JSON");
+        assert!(parsed["metadata"]["project_name"].is_string());
+        assert_eq!(parsed["metadata"]["project_name"], "test_project");
+        assert!(parsed["nodes"].is_object());
+        assert!(parsed["parent_map"].is_object());
+    }
 }
