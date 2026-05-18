@@ -533,7 +533,7 @@ async fn publish_terminal_invocation(
     exit_code: i32,
     error: String,
 ) -> AppResult<()> {
-    let runtime = state.invocations.get_or_create(invocation_id, None).await;
+    let runtime = state.invocations().get_or_create(invocation_id, None).await;
     let completed_event = InvocationEvent {
         event_type: "invocation.completed".to_string(),
         timestamp: Utc::now(),
@@ -550,7 +550,7 @@ async fn publish_terminal_invocation(
         .append_invocation_event(invocation_id, &completed_event)
         .await?;
     runtime.push_event(sequence, completed_event).await;
-    state.invocations.schedule_cleanup(invocation_id);
+    state.invocations().schedule_cleanup(invocation_id);
     Ok(())
 }
 

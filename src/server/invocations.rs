@@ -221,7 +221,7 @@ pub(super) async fn invocation_claim_next(
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
     state
-        .invocations
+        .invocations()
         .get_or_create(claimed.invocation_id, None)
         .await;
     info!(invocation_id = %claimed.invocation_id, "claimed next invocation execution");
@@ -410,7 +410,7 @@ pub(super) async fn invocation_append_events(
     Json(request): Json<InvocationEventBatchApiRequest>,
 ) -> Result<StatusCode, ApiError> {
     reconcile_timed_out_invocations(&state).await?;
-    let runtime = state.invocations.get_or_create(id, None).await;
+    let runtime = state.invocations().get_or_create(id, None).await;
     let recorder = InvocationRecorder::new(state.db.clone(), id, runtime);
     if !recorder.is_running().await {
         return Err(ApiError(AppError::Internal(
@@ -481,7 +481,7 @@ pub(super) async fn invocation_events(
     Query(query): Query<InvocationEventsQuery>,
     headers: axum::http::HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let runtime = state.invocations.get_or_create(id, None).await;
+    let runtime = state.invocations().get_or_create(id, None).await;
     let rx = runtime.subscribe();
     let header_resume = headers
         .get("last-event-id")
