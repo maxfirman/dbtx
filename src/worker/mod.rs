@@ -153,9 +153,7 @@ pub async fn execute_claimed_invocation(
     let app_result = terminal.as_result();
     let exit_code = terminal.exit_code;
 
-    WorkerInvocationSession::new(client, &claim)
-        .complete(terminal.completion)
-        .await?;
+    session.complete(terminal.completion).await?;
 
     info!(invocation_id = %claim.invocation_id, worker_id = %claim.worker_id, exit_code, canceled = exec_result.cancel_requested, "finished claimed invocation execution");
     app_result

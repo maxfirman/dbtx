@@ -360,18 +360,15 @@ async fn run_validation_command(
     let exec_result = crate::dbt_runner::run_dbt_execution(dbt_child, &session, &exec_config).await?;
 
     if exec_result.cancel_requested {
-        let err = AppError::InvocationCanceled;
-        WorkerInvocationSession::new(client, claim)
-            .complete_canceled()
-            .await?;
-        return Err(err);
+        session.complete_canceled().await?;
+        return Err(AppError::InvocationCanceled);
     }
     if exec_result.child_result.exit_code != 0 {
         let err = AppError::Internal(format!(
             "dbt {command} failed with exit code {}",
             exec_result.child_result.exit_code
         ));
-        report_setup_failure(client, claim, &err.to_string()).await?;
+        session.complete_failed(&err.to_string()).await?;
         return Err(err);
     }
     Ok(())
