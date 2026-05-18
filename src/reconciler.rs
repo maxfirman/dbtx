@@ -2,7 +2,6 @@
 use crate::api::InvocationCommandApi;
 use crate::db::{EnvironmentRecord, PlanStatus, PreparationStatus, SourceStateEventRecord};
 use crate::error::{AppError, AppResult};
-use crate::invocation_bootstrap::start_prepared_invocation;
 use crate::process_state::ProcessState;
 use crate::services::{
     EnvironmentService, InvocationService, code_change_input_fingerprint_for_baseline,
@@ -286,14 +285,14 @@ async fn ensure_target_manifest_for_reconcile_async(
     let prepared = InvocationService::new(state.db())
         .prepare_remote_manifest_capture(invocation_id, &environment.project_ref, &environment.slug)
         .await?;
-    start_prepared_invocation(
-        state,
-        invocation_id,
-        InvocationCommandApi::ManifestPrepare,
-        None,
-        prepared,
-    )
-    .await?;
+    state
+        .start_prepared_invocation(
+            invocation_id,
+            InvocationCommandApi::ManifestPrepare,
+            None,
+            prepared,
+        )
+        .await?;
     state
         .db()
         .mark_manifest_prepare_running(

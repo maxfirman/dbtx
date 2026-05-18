@@ -65,7 +65,7 @@ pub(super) async fn environment_reconcile(
     headers: HeaderMap,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Result<Response, UiError> {
-    ensure_target_manifest_for_reconcile(&state, &project_id, &slug).await?;
+    state.ensure_target_manifest_for_reconcile(&project_id, &slug).await?;
     let service = EnvironmentService::new(state.db());
     service.reconcile(project_id.clone(), slug.clone()).await?;
 

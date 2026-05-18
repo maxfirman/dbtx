@@ -218,7 +218,8 @@ async fn start_project_draft_validation(state: &AppState, draft_id: Uuid) -> Res
     let prepared = ProjectService::new(state.db())
         .prepare_draft_validation(draft_id)
         .await?;
-    start_project_draft_validation_invocation(state, prepared)
+    state
+        .start_project_draft_validation_invocation(prepared)
         .await
         .map_err(UiError::from)?;
     Ok(())
@@ -235,7 +236,8 @@ async fn start_environment_draft_prepared(
     state: &AppState,
     prepared: crate::services::EnvironmentDraftCreatePrepared,
 ) -> Result<(), UiError> {
-    start_environment_draft_prepare_invocation(state, prepared)
+    state
+        .start_environment_draft_prepare_invocation(prepared)
         .await
         .map_err(UiError::from)?;
     Ok(())
@@ -245,7 +247,8 @@ async fn start_environment_draft_validation(
     state: &AppState,
     prepared: crate::services::EnvironmentDraftValidationPrepared,
 ) -> Result<(), UiError> {
-    start_environment_draft_validation_invocation(state, prepared)
+    state
+        .start_environment_draft_validation_invocation(prepared)
         .await
         .map_err(UiError::from)?;
     Ok(())

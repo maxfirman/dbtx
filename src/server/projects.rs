@@ -123,7 +123,7 @@ pub(super) async fn project_draft_validate(
     let prepared = ProjectService::new(&state.db)
         .prepare_draft_validation(draft_id)
         .await?;
-    let invocation_id = start_project_draft_validation_invocation(&state, prepared).await?;
+    let invocation_id = state.start_project_draft_validation_invocation(prepared).await?;
     Ok(Json(ProjectDraftValidateResponse {
         draft: state.db.get_project_draft(draft_id).await?,
         invocation_id,

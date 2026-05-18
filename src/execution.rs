@@ -60,6 +60,14 @@ pub struct ExecutionCompletion {
     pub result: Option<serde_json::Value>,
 }
 
+pub fn invocation_claim_deadline_at(
+    execution_mode: InvocationExecutionModeApi,
+) -> DateTime<Utc> {
+    Utc::now()
+        + chrono::Duration::from_std(claim_startup_timeout(execution_mode))
+            .expect("timeout fits chrono duration")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +98,19 @@ mod tests {
             claim_startup_timeout(InvocationExecutionModeApi::Server),
             Duration::from_secs(60)
         );
+    }
+
+    #[test]
+    fn claim_deadline_is_in_the_future() {
+        let now = Utc::now();
+        let deadline = invocation_claim_deadline_at(InvocationExecutionModeApi::Server);
+        assert!(deadline > now);
+    }
+
+    #[test]
+    fn server_deadline_is_longer_than_local() {
+        let server = invocation_claim_deadline_at(InvocationExecutionModeApi::Server);
+        let local = invocation_claim_deadline_at(InvocationExecutionModeApi::Local);
+        assert!(server > local);
     }
 }
