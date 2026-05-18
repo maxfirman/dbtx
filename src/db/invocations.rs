@@ -2,11 +2,6 @@
 
 use super::*;
 
-/// Plan reason indicating the invocation was triggered by a source state change.
-/// For source-triggered plans, the baseline manifest (not the target) is the correct
-/// watermark graph since the code has not changed, only the data freshness has.
-const PLAN_REASON_SOURCE_STATE_CHANGE: &str = "source_state_change";
-
 impl Db {
     pub(crate) async fn create_invocation(
         &self,
@@ -53,15 +48,18 @@ impl Db {
         &self,
         input: &CreateInvocationInput,
     ) -> AppResult<Option<Uuid>> {
-        if !is_watermarkable_command(&input.command) {
-            return Ok(None);
-        }
+        use crate::services::{
+            WatermarkPlanContext, WatermarkResolution, WatermarkResolutionInput,
+            resolve_watermark_strategy,
+        };
+
         let (Some(project_id), Some(environment_id)) = (input.project_id, input.environment_id)
         else {
             return Ok(None);
         };
 
-        if let Some(plan_id) = input.plan_id {
+        // Fetch plan context if plan_id is present
+        let plan = if let Some(plan_id) = input.plan_id {
             let row = sqlx::query(
                 r#"
                 SELECT reason, baseline_run_id, target_git_commit_sha, metadata
@@ -72,58 +70,61 @@ impl Db {
             .bind(plan_id)
             .fetch_optional(&self.pool)
             .await?;
-            if let Some(row) = row {
-                let reason: String = row.get("reason");
-                let baseline_run_id: Option<Uuid> = row.get("baseline_run_id");
-                if reason == PLAN_REASON_SOURCE_STATE_CHANGE {
-                    return Ok(baseline_run_id);
-                }
-                let metadata = row
+            row.map(|row| WatermarkPlanContext {
+                reason: row.get("reason"),
+                baseline_run_id: row.get("baseline_run_id"),
+                target_git_commit_sha: row.get("target_git_commit_sha"),
+                metadata: row
                     .try_get::<sqlx::types::Json<Value>, _>("metadata")
                     .map(|json| json.0)
-                    .unwrap_or(Value::Null);
-                if let Some(run_id) = metadata
-                    .get("target_manifest_run_id")
-                    .and_then(Value::as_str)
-                    .and_then(|value| Uuid::parse_str(value).ok())
-                {
-                    return Ok(Some(run_id));
-                }
-                let target_git_commit_sha: Option<String> = row.get("target_git_commit_sha");
-                if let Some(commit_sha) = target_git_commit_sha
-                    && let Some(run_id) = self
-                        .latest_manifest_run_id_for_commit(project_id, environment_id, &commit_sha)
-                        .await?
-                {
-                    return Ok(Some(run_id));
-                }
-                return Ok(baseline_run_id);
-            }
-        }
+                    .unwrap_or(Value::Null),
+            })
+        } else {
+            None
+        };
 
-        if let Some(run_id) = input.run_id {
-            let commit_sha: Option<String> = sqlx::query_scalar(
-                r#"
-                SELECT git_commit_sha
-                FROM runs
-                WHERE run_id = $1
-                "#,
-            )
-            .bind(run_id)
-            .fetch_optional(&self.pool)
-            .await?
-            .flatten();
-            if let Some(commit_sha) = commit_sha
-                && let Some(manifest_run_id) = self
+        // Fetch run commit_sha if run_id is present
+        let run_commit_sha = if let Some(run_id) = input.run_id {
+            sqlx::query_scalar::<_, String>("SELECT git_commit_sha FROM runs WHERE run_id = $1")
+                .bind(run_id)
+                .fetch_optional(&self.pool)
+                .await?
+        } else {
+            None
+        };
+
+        let resolution_input = WatermarkResolutionInput {
+            command: input.command.clone(),
+            project_id: input.project_id,
+            environment_id: input.environment_id,
+            plan,
+            run_commit_sha,
+        };
+
+        match resolve_watermark_strategy(&resolution_input) {
+            WatermarkResolution::None => Ok(None),
+            WatermarkResolution::Resolved(run_id) => Ok(run_id),
+            WatermarkResolution::LookupByCommit(commit_sha) => {
+                let result = self
                     .latest_manifest_run_id_for_commit(project_id, environment_id, &commit_sha)
-                    .await?
-            {
-                return Ok(Some(manifest_run_id));
+                    .await?;
+                if result.is_some() {
+                    Ok(result)
+                } else {
+                    // Fallback: for plan-based lookups, use baseline_run_id; otherwise latest manifest
+                    if let Some(plan) = &resolution_input.plan {
+                        Ok(plan.baseline_run_id)
+                    } else {
+                        self.latest_manifest_run_id(project_id, environment_id)
+                            .await
+                    }
+                }
+            }
+            WatermarkResolution::LatestManifest => {
+                self.latest_manifest_run_id(project_id, environment_id)
+                    .await
             }
         }
-
-        self.latest_manifest_run_id(project_id, environment_id)
-            .await
     }
 
     pub(crate) async fn load_invocation_watermark_manifest_run_id(
@@ -1157,40 +1158,5 @@ impl Db {
                 )
             })
             .collect())
-    }
-}
-
-/// Commands that produce node executions which should advance source watermarks.
-/// Matches on the first token to tolerate legacy rows that may include dbt args.
-fn is_watermarkable_command(command: &str) -> bool {
-    matches!(
-        command.split_whitespace().next().unwrap_or(""),
-        "build" | "run" | "test" | "seed"
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_watermarkable_command;
-
-    #[test]
-    fn is_watermarkable_command_accepts_data_commands() {
-        for command in ["build", "run", "test", "seed"] {
-            assert!(is_watermarkable_command(command));
-        }
-    }
-
-    #[test]
-    fn is_watermarkable_command_uses_first_token() {
-        assert!(is_watermarkable_command("build --select orders+"));
-        assert!(is_watermarkable_command("run --full-refresh"));
-        assert!(!is_watermarkable_command("ls --select orders+"));
-    }
-
-    #[test]
-    fn is_watermarkable_command_rejects_non_data_commands() {
-        for command in ["", "ls", "release", "environment-validate"] {
-            assert!(!is_watermarkable_command(command));
-        }
     }
 }

@@ -308,8 +308,10 @@ pub(crate) mod source_state;
 pub use environments::{EnvironmentPlanAdmitPrepared, EnvironmentService};
 pub use invocations::InvocationService;
 pub use invocations::{
+    WatermarkPlanContext, WatermarkResolution, WatermarkResolutionInput,
     code_change_input_fingerprint, code_change_input_fingerprint_for_baseline,
-    source_state_change_input_fingerprint, target_manifest_input_fingerprint,
+    is_watermarkable_command, resolve_watermark_strategy, source_state_change_input_fingerprint,
+    target_manifest_input_fingerprint,
 };
 pub use projects::ProjectService;
 

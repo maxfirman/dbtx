@@ -7828,3 +7828,215 @@ async fn paused_environment_skipped_by_reconciler() {
         "resumed environment should get a reconciliation plan"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_resolution_non_watermarkable_command_returns_none() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+
+    // Seed a manifest so there IS one available
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[("model.pkg.orders", "model")],
+        &[],
+    )
+    .await;
+
+    // Create an ls invocation (non-watermarkable)
+    let created = client
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "remote",
+            InvocationCommandApi::Ls,
+        ))
+        .await
+        .expect("create ls invocation");
+
+    let watermark: Option<Uuid> = sqlx::query_scalar(
+        "SELECT watermark_manifest_run_id FROM invocations WHERE invocation_id = $1",
+    )
+    .bind(created.invocation_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("query watermark");
+
+    assert_eq!(
+        watermark, None,
+        "non-watermarkable command (ls) should have no watermark manifest"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_resolution_build_without_plan_uses_latest_manifest() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[("model.pkg.orders", "model")],
+        &[],
+    )
+    .await;
+
+    // Get the run_id of the seeded manifest
+    let expected_run_id: Uuid = sqlx::query_scalar(
+        r#"
+        SELECT r.run_id FROM runs r
+        JOIN manifest_snapshots ms ON ms.run_id = r.run_id
+        JOIN projects p ON p.id = r.project_id
+        JOIN environments e ON e.id = r.environment_id
+        WHERE p.project_id = $1 AND e.slug = 'remote'
+        ORDER BY r.id DESC LIMIT 1
+        "#,
+    )
+    .bind(&project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("find seeded manifest run_id");
+
+    let created = client
+        .invocation_create(remote_invocation_request(
+            &project_id,
+            "remote",
+            InvocationCommandApi::Build,
+        ))
+        .await
+        .expect("create build invocation");
+
+    let watermark: Option<Uuid> = sqlx::query_scalar(
+        "SELECT watermark_manifest_run_id FROM invocations WHERE invocation_id = $1",
+    )
+    .bind(created.invocation_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("query watermark");
+
+    assert_eq!(
+        watermark,
+        Some(expected_run_id),
+        "build without plan should use the latest manifest run_id for the commit"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn watermark_resolution_source_state_plan_uses_baseline_run_id() {
+    let db = TestDatabase::new_without_reconciler().await;
+    let client = db.client().clone();
+    let repo = TempProjectRepo::new("proj");
+    let project_id = read_project_id_from_dbt_project(repo.project_dir(), true);
+    let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    bootstrap_remote_project_and_env_direct(
+        db.pool(),
+        repo.project_dir(),
+        &project_id,
+        "remote",
+        Some(commit_sha),
+    )
+    .await;
+
+    seed_environment_actual_state_with_manifest(
+        db.pool(),
+        &project_id,
+        "remote",
+        commit_sha,
+        &[
+            ("source.pkg.raw_orders", "source"),
+            ("model.pkg.orders", "model"),
+        ],
+        &[("source.pkg.raw_orders", "model.pkg.orders")],
+    )
+    .await;
+
+    // Create a source state event to trigger source_state_change planning
+    client
+        .environment_source_state_event_create(
+            &project_id,
+            "remote",
+            SourceStateEventCreateApiRequest {
+                source_key: "source.pkg.raw_orders".to_string(),
+                provider: "test".to_string(),
+                state_version: Some("v1".to_string()),
+                observed_at: Some(chrono::Utc::now()),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("create source event");
+
+    // Trigger reconciliation to create a source_state_change plan
+    client.reconcile_tick().await.expect("reconcile tick");
+
+    let plans = client
+        .environment_plan_list(&project_id, "remote")
+        .await
+        .expect("list plans")
+        .plans;
+    assert!(!plans.is_empty(), "should have a source_state_change plan");
+    let plan = &plans[0];
+    assert_eq!(plan.reason, "source_state_change");
+
+    // The reconcile tick auto-admits the plan (no resource conflicts)
+    // so the invocation is already created
+    let admitted_invocation_id: Uuid = sqlx::query_scalar(
+        "SELECT admitted_invocation_id FROM environment_run_plans WHERE plan_id = $1",
+    )
+    .bind(plan.plan_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("find admitted invocation");
+
+    let watermark: Option<Uuid> = sqlx::query_scalar(
+        "SELECT watermark_manifest_run_id FROM invocations WHERE invocation_id = $1",
+    )
+    .bind(admitted_invocation_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("query watermark");
+
+    // For source_state_change, the watermark should be the baseline_run_id
+    let baseline_run_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT baseline_run_id FROM environment_run_plans WHERE plan_id = $1")
+            .bind(plan.plan_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("query baseline_run_id");
+
+    assert_eq!(
+        watermark, baseline_run_id,
+        "source_state_change plan should use baseline_run_id as watermark"
+    );
+}

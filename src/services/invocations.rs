@@ -322,6 +322,88 @@ impl<'a> InvocationService<'a> {
     }
 }
 
+// --- Watermark manifest resolution ---
+
+/// Plan reason indicating the invocation was triggered by a source state change.
+const PLAN_REASON_SOURCE_STATE_CHANGE: &str = "source_state_change";
+
+/// Pre-fetched plan data used for watermark resolution.
+#[derive(Debug, Clone)]
+pub struct WatermarkPlanContext {
+    pub reason: String,
+    pub baseline_run_id: Option<Uuid>,
+    pub target_git_commit_sha: Option<String>,
+    pub metadata: Value,
+}
+
+/// The inputs needed to resolve a watermark manifest run_id.
+#[derive(Debug, Clone)]
+pub struct WatermarkResolutionInput {
+    pub command: String,
+    pub project_id: Option<i64>,
+    pub environment_id: Option<i64>,
+    pub plan: Option<WatermarkPlanContext>,
+    pub run_commit_sha: Option<String>,
+}
+
+/// The resolution strategy determined by the pure decision function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatermarkResolution {
+    /// Command is not watermarkable or no scope — no watermark.
+    None,
+    /// Use a specific known run_id directly.
+    Resolved(Option<Uuid>),
+    /// Look up the latest manifest for a specific commit.
+    LookupByCommit(String),
+    /// Fall back to the latest manifest for the environment.
+    LatestManifest,
+}
+
+/// Determines which watermark manifest to use based on pre-fetched context.
+///
+/// This is a pure function: all DB lookups happen before/after this call.
+/// Returns a `WatermarkResolution` indicating what the caller should do.
+pub fn resolve_watermark_strategy(input: &WatermarkResolutionInput) -> WatermarkResolution {
+    if !is_watermarkable_command(&input.command) {
+        return WatermarkResolution::None;
+    }
+    if input.project_id.is_none() || input.environment_id.is_none() {
+        return WatermarkResolution::None;
+    }
+
+    if let Some(plan) = &input.plan {
+        if plan.reason == PLAN_REASON_SOURCE_STATE_CHANGE {
+            return WatermarkResolution::Resolved(plan.baseline_run_id);
+        }
+        if let Some(run_id) = plan
+            .metadata
+            .get("target_manifest_run_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+        {
+            return WatermarkResolution::Resolved(Some(run_id));
+        }
+        if let Some(commit_sha) = &plan.target_git_commit_sha {
+            return WatermarkResolution::LookupByCommit(commit_sha.clone());
+        }
+        return WatermarkResolution::Resolved(plan.baseline_run_id);
+    }
+
+    if let Some(commit_sha) = &input.run_commit_sha {
+        return WatermarkResolution::LookupByCommit(commit_sha.clone());
+    }
+
+    WatermarkResolution::LatestManifest
+}
+
+/// Returns true if the command produces state that should be watermarked.
+pub fn is_watermarkable_command(command: &str) -> bool {
+    matches!(
+        command.split_whitespace().next().unwrap_or(""),
+        "build" | "run" | "test" | "seed"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +546,186 @@ mod tests {
         for (api_cmd, expected) in cases {
             let converted: InvocationCommand = api_cmd.into();
             assert_eq!(converted.as_str(), expected.as_str());
+        }
+    }
+
+    // --- Watermark resolution tests ---
+
+    fn base_input() -> WatermarkResolutionInput {
+        WatermarkResolutionInput {
+            command: "build".to_string(),
+            project_id: Some(1),
+            environment_id: Some(1),
+            plan: None,
+            run_commit_sha: None,
+        }
+    }
+
+    #[test]
+    fn watermark_non_watermarkable_command_returns_none() {
+        let input = WatermarkResolutionInput {
+            command: "ls".to_string(),
+            ..base_input()
+        };
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::None
+        );
+    }
+
+    #[test]
+    fn watermark_no_project_scope_returns_none() {
+        let input = WatermarkResolutionInput {
+            project_id: None,
+            ..base_input()
+        };
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::None
+        );
+    }
+
+    #[test]
+    fn watermark_no_environment_scope_returns_none() {
+        let input = WatermarkResolutionInput {
+            environment_id: None,
+            ..base_input()
+        };
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::None
+        );
+    }
+
+    #[test]
+    fn watermark_source_state_change_plan_uses_baseline() {
+        let baseline = Uuid::new_v4();
+        let input = WatermarkResolutionInput {
+            plan: Some(WatermarkPlanContext {
+                reason: "source_state_change".to_string(),
+                baseline_run_id: Some(baseline),
+                target_git_commit_sha: Some("abc123".to_string()),
+                metadata: Value::Null,
+            }),
+            ..base_input()
+        };
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::Resolved(Some(baseline))
+        );
+    }
+
+    #[test]
+    fn watermark_source_state_change_plan_without_baseline_returns_none() {
+        let input = WatermarkResolutionInput {
+            plan: Some(WatermarkPlanContext {
+                reason: "source_state_change".to_string(),
+                baseline_run_id: None,
+                target_git_commit_sha: None,
+                metadata: Value::Null,
+            }),
+            ..base_input()
+        };
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::Resolved(None)
+        );
+    }
+
+    #[test]
+    fn watermark_plan_with_target_manifest_run_id_in_metadata() {
+        let target_run = Uuid::new_v4();
+        let input = WatermarkResolutionInput {
+            plan: Some(WatermarkPlanContext {
+                reason: "code_change".to_string(),
+                baseline_run_id: Some(Uuid::new_v4()),
+                target_git_commit_sha: Some("abc123".to_string()),
+                metadata: serde_json::json!({
+                    "target_manifest_run_id": target_run.to_string()
+                }),
+            }),
+            ..base_input()
+        };
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::Resolved(Some(target_run))
+        );
+    }
+
+    #[test]
+    fn watermark_plan_without_metadata_uses_commit_lookup() {
+        let input = WatermarkResolutionInput {
+            plan: Some(WatermarkPlanContext {
+                reason: "code_change".to_string(),
+                baseline_run_id: Some(Uuid::new_v4()),
+                target_git_commit_sha: Some("deadbeef".to_string()),
+                metadata: Value::Null,
+            }),
+            ..base_input()
+        };
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::LookupByCommit("deadbeef".to_string())
+        );
+    }
+
+    #[test]
+    fn watermark_plan_without_commit_or_metadata_uses_baseline() {
+        let baseline = Uuid::new_v4();
+        let input = WatermarkResolutionInput {
+            plan: Some(WatermarkPlanContext {
+                reason: "code_change".to_string(),
+                baseline_run_id: Some(baseline),
+                target_git_commit_sha: None,
+                metadata: Value::Null,
+            }),
+            ..base_input()
+        };
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::Resolved(Some(baseline))
+        );
+    }
+
+    #[test]
+    fn watermark_run_commit_sha_triggers_commit_lookup() {
+        let input = WatermarkResolutionInput {
+            run_commit_sha: Some("cafebabe".to_string()),
+            ..base_input()
+        };
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::LookupByCommit("cafebabe".to_string())
+        );
+    }
+
+    #[test]
+    fn watermark_no_plan_no_run_falls_back_to_latest_manifest() {
+        let input = base_input();
+        assert_eq!(
+            resolve_watermark_strategy(&input),
+            WatermarkResolution::LatestManifest
+        );
+    }
+
+    #[test]
+    fn watermark_is_watermarkable_command_accepts_data_commands() {
+        for command in ["build", "run", "test", "seed"] {
+            assert!(is_watermarkable_command(command));
+        }
+    }
+
+    #[test]
+    fn watermark_is_watermarkable_command_uses_first_token() {
+        assert!(is_watermarkable_command("build --select orders+"));
+        assert!(is_watermarkable_command("run --full-refresh"));
+        assert!(!is_watermarkable_command("ls --select orders+"));
+    }
+
+    #[test]
+    fn watermark_is_watermarkable_command_rejects_non_data_commands() {
+        for command in ["", "ls", "release", "environment-validate"] {
+            assert!(!is_watermarkable_command(command));
         }
     }
 }
