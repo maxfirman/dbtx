@@ -230,4 +230,240 @@ impl<'a> InvocationService<'a> {
             environment_draft_id: None,
         })
     }
+
+    pub async fn prepare_local_execution(
+        &self,
+        run_id: Uuid,
+        command: InvocationCommand,
+        args: Vec<OsString>,
+        project: &ProjectRecord,
+        environment: &EnvironmentRecord,
+    ) -> AppResult<LocalExecutionPrepared> {
+        if matches!(command, InvocationCommand::Release) {
+            return Err(AppError::UnsupportedLocalExecution("release".to_string()));
+        }
+
+        let inject_json_logging = command.persists_state();
+        let ctx = InvocationContext::from_args(&args, inject_json_logging)?;
+
+        let reconstructed_manifest = self
+            .db
+            .load_reconstructed_manifest(project.id, environment.id)
+            .await?
+            .or(if ctx.wants_state_modified {
+                Some(
+                    ReconstructedManifest::write_empty_state(
+                        &project.project_name,
+                        &environment.adapter_type,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            });
+        let state_manifest = if let Some(reconstructed_manifest) = reconstructed_manifest.as_ref() {
+            let path = reconstructed_manifest.temp_dir.path().join("manifest.json");
+            let content = tokio::fs::read_to_string(path).await?;
+            Some(serde_json::from_str(&content)?)
+        } else {
+            None
+        };
+
+        let mut dbt_args = ctx.dbt_args;
+        if command.persists_state() {
+            dbt_args = append_invocation_id(dbt_args, run_id);
+        }
+
+        let persistence = if command.persists_state() {
+            let args_json = Value::Array(
+                dbt_args
+                    .iter()
+                    .map(|value| Value::String(value.to_string_lossy().into_owned()))
+                    .collect(),
+            );
+            let git_state = read_git_state(&ctx.project_dir);
+            self.db
+                .insert_run_started(RunStart {
+                    run_id,
+                    project,
+                    environment,
+                    subcommand: command.as_str(),
+                    args_json,
+                    is_full_graph_run: ctx.is_full_graph_run,
+                    execution_mode: ExecutionMode::Local,
+                    git_state: &git_state,
+                })
+                .await?;
+            Some(LocalExecutionPersistence {
+                run_id,
+                project_id: project.id,
+                environment_id: environment.id,
+                subcommand: command.as_str().to_string(),
+                promote_base_manifest: ctx.is_full_graph_run,
+                updates_actual_state: true,
+            })
+        } else {
+            None
+        };
+
+        Ok(LocalExecutionPrepared {
+            spec: PreparedExecutionSpec::Local(LocalExecutionSpec {
+                command,
+                args: dbt_args,
+                state_manifest,
+            }),
+            persistence,
+            worker_queue: environment.worker_queue.clone(),
+            project_id: Some(project.id),
+            environment_id: Some(environment.id),
+            project_draft_id: None,
+            environment_draft_id: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dbt_utils::append_invocation_id;
+
+    #[test]
+    fn release_command_does_not_persist_state() {
+        assert!(!InvocationCommand::Release.persists_state());
+    }
+
+    #[test]
+    fn ls_command_does_not_persist_state() {
+        assert!(!InvocationCommand::Ls.persists_state());
+    }
+
+    #[test]
+    fn build_command_persists_state() {
+        assert!(InvocationCommand::Build.persists_state());
+    }
+
+    #[test]
+    fn run_command_persists_state() {
+        assert!(InvocationCommand::Run.persists_state());
+    }
+
+    #[test]
+    fn test_command_persists_state() {
+        assert!(InvocationCommand::Test.persists_state());
+    }
+
+    #[test]
+    fn seed_command_persists_state() {
+        assert!(InvocationCommand::Seed.persists_state());
+    }
+
+    #[test]
+    fn append_invocation_id_adds_flag_to_args() {
+        let args = vec![OsString::from("--select"), OsString::from("orders")];
+        let run_id = Uuid::nil();
+        let result = append_invocation_id(args, run_id);
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[2], OsString::from("--invocation-id"));
+        assert_eq!(
+            result[3],
+            OsString::from("00000000-0000-0000-0000-000000000000")
+        );
+    }
+
+    #[test]
+    fn invocation_context_detects_full_graph_run() {
+        let args: Vec<OsString> = vec![];
+        let ctx = InvocationContext::from_args_in_dir(&args, false, Path::new("/tmp"))
+            .expect("parse context");
+        assert!(ctx.is_full_graph_run);
+    }
+
+    #[test]
+    fn invocation_context_detects_selective_run() {
+        let args = vec![OsString::from("--select"), OsString::from("orders+")];
+        let ctx = InvocationContext::from_args_in_dir(&args, false, Path::new("/tmp"))
+            .expect("parse context");
+        assert!(!ctx.is_full_graph_run);
+    }
+
+    #[test]
+    fn invocation_context_injects_json_logging_for_persisting_commands() {
+        let args: Vec<OsString> = vec![OsString::from("--select"), OsString::from("orders")];
+        let ctx = InvocationContext::from_args_in_dir(&args, true, Path::new("/tmp"))
+            .expect("parse context");
+        let args_str: Vec<String> = ctx
+            .dbt_args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args_str.contains(&"--log-format".to_string()));
+        assert!(args_str.contains(&"json".to_string()));
+        assert!(args_str.contains(&"--write-json".to_string()));
+    }
+
+    #[test]
+    fn invocation_context_skips_json_logging_for_non_persisting_commands() {
+        let args: Vec<OsString> = vec![OsString::from("--select"), OsString::from("orders")];
+        let ctx = InvocationContext::from_args_in_dir(&args, false, Path::new("/tmp"))
+            .expect("parse context");
+        let args_str: Vec<String> = ctx
+            .dbt_args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args_str.contains(&"--log-format".to_string()));
+    }
+
+    #[test]
+    fn invocation_context_rejects_user_state_flag() {
+        let args = vec![OsString::from("--state"), OsString::from("/tmp/state")];
+        let result = InvocationContext::from_args_in_dir(&args, false, Path::new("/tmp"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invocation_context_rejects_profiles_dir_flag() {
+        let args = vec![
+            OsString::from("--profiles-dir"),
+            OsString::from("/tmp/profiles"),
+        ];
+        let result = InvocationContext::from_args_in_dir(&args, false, Path::new("/tmp"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invocation_context_detects_state_modified_selector() {
+        let args = vec![
+            OsString::from("--select"),
+            OsString::from("state:modified+"),
+        ];
+        let ctx = InvocationContext::from_args_in_dir(&args, true, Path::new("/tmp"))
+            .expect("parse context");
+        assert!(ctx.wants_state_modified);
+    }
+
+    #[test]
+    fn invocation_context_no_state_modified_without_selector() {
+        let args = vec![OsString::from("--select"), OsString::from("orders+")];
+        let ctx = InvocationContext::from_args_in_dir(&args, true, Path::new("/tmp"))
+            .expect("parse context");
+        assert!(!ctx.wants_state_modified);
+    }
+
+    #[test]
+    fn command_from_api_roundtrip() {
+        use crate::api::InvocationCommandApi;
+        let cases = [
+            (InvocationCommandApi::Build, InvocationCommand::Build),
+            (InvocationCommandApi::Run, InvocationCommand::Run),
+            (InvocationCommandApi::Ls, InvocationCommand::Ls),
+            (InvocationCommandApi::Test, InvocationCommand::Test),
+            (InvocationCommandApi::Seed, InvocationCommand::Seed),
+            (InvocationCommandApi::Release, InvocationCommand::Release),
+        ];
+        for (api_cmd, expected) in cases {
+            let converted: InvocationCommand = api_cmd.into();
+            assert_eq!(converted.as_str(), expected.as_str());
+        }
+    }
 }

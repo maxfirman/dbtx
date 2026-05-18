@@ -55,6 +55,11 @@ impl LocalExecutionPrepared {
                     profiles_yml: spec.profiles_yml,
                 }
             }
+            PreparedExecutionSpec::Local(spec) => InvocationExecutionSpecApi::Local {
+                command,
+                args: os_args_to_strings(spec.args),
+                state_manifest: spec.state_manifest,
+            },
         };
         let execution_mode = InvocationExecutionModeApi::Server;
         let persistence = self.persistence.map(|p| InvocationPersistence {

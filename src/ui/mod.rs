@@ -1736,7 +1736,6 @@ fn environment_version_view(version: &EnvironmentVersionRecord) -> EnvironmentVe
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::catalog::parse_catalog_filter_query;
     use super::invocations::{
         InvocationFilterQuery, invocation_dynamic_option_views, invocation_filter_option_views,
@@ -1744,6 +1743,7 @@ mod tests {
     };
     use super::operators::{filter_queues, filter_workers, queue_key};
     use super::projects::{is_terminal_project_draft_status, render_project_draft_fragment};
+    use super::*;
     use crate::api::{InvocationCancelStateApi, InvocationExecutionModeApi};
     use chrono::Utc;
 

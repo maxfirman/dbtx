@@ -127,8 +127,16 @@ pub struct EnvironmentValidationSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct LocalExecutionSpec {
+    pub command: InvocationCommand,
+    pub args: Vec<OsString>,
+    pub state_manifest: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
 pub enum PreparedExecutionSpec {
     Remote(RemoteExecutionSpec),
+    Local(LocalExecutionSpec),
     ReleaseValidation(ReleaseValidationSpec),
     ProjectValidation(ProjectValidationSpec),
     EnvironmentPrepare(EnvironmentPrepareSpec),

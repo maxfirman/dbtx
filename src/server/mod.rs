@@ -25,7 +25,6 @@ use crate::db::{
     InvocationCancellationRecord, ProjectRecord, TimedOutInvocationRecord,
 };
 use crate::error::{AppError, AppResult};
-use crate::execution::ExecutionMode;
 use crate::execution::{
     ExecutionCompletion, ExecutionEvent, ExecutionEventKind, heartbeat_stale_timeout,
 };

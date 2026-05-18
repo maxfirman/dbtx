@@ -46,98 +46,44 @@ pub(super) async fn invocation_create(
     };
     let prepared = match derived_execution_mode {
         crate::api::InvocationExecutionModeApi::Local => {
-            if matches!(request.command, InvocationCommandApi::Release) {
-                return Err(ApiError(AppError::UnsupportedLocalExecution(
-                    "release".to_string(),
-                )));
-            }
-            let command = map_invocation_command(request.command);
-            let inject_json_logging = command.persists_state();
-            let ctx = crate::config::InvocationContext::from_args(
-                &request
-                    .args
-                    .iter()
-                    .cloned()
-                    .map(Into::into)
-                    .collect::<Vec<std::ffi::OsString>>(),
-                inject_json_logging,
-            )?;
-            let run_id = invocation_id;
-            let reconstructed_manifest = db
-                .load_reconstructed_manifest(project.id, environment.id)
-                .await?
-                .or(if ctx.wants_state_modified {
-                    Some(
-                        crate::manifest::ReconstructedManifest::write_empty_state(
-                            &project.project_name,
-                            &environment.adapter_type,
-                        )
-                        .await?,
-                    )
-                } else {
-                    None
-                });
-            let state_manifest =
-                if let Some(reconstructed_manifest) = reconstructed_manifest.as_ref() {
-                    let path = reconstructed_manifest.temp_dir.path().join("manifest.json");
-                    let content = tokio::fs::read_to_string(path)
-                        .await
-                        .map_err(|e| AppError::Internal(e.to_string()))?;
-                    Some(
-                        serde_json::from_str(&content)
-                            .map_err(|e| AppError::Internal(e.to_string()))?,
-                    )
-                } else {
-                    None
-                };
-            let mut dbt_args: Vec<std::ffi::OsString> =
-                request.args.iter().cloned().map(Into::into).collect();
-            if command.persists_state() {
-                dbt_args = crate::dbt_utils::append_invocation_id(dbt_args, run_id);
-            }
-            let persistence = if command.persists_state() {
-                let args_json = serde_json::Value::Array(
-                    dbt_args
-                        .iter()
-                        .map(|v| serde_json::Value::String(v.to_string_lossy().into_owned()))
-                        .collect(),
-                );
-                let git_state = crate::dbt_utils::read_git_state(&ctx.project_dir);
-                db.insert_run_started(crate::db::RunStart {
-                    run_id,
-                    project: &project,
-                    environment: &environment,
-                    subcommand: command.as_str(),
-                    args_json,
-                    is_full_graph_run: ctx.is_full_graph_run,
-                    execution_mode: ExecutionMode::Local,
-                    git_state: &git_state,
-                })
+            let prepared = service
+                .prepare_local_execution(
+                    invocation_id,
+                    map_invocation_command(request.command),
+                    request.args.iter().cloned().map(Into::into).collect(),
+                    &project,
+                    &environment,
+                )
                 .await?;
-                Some(InvocationPersistence {
-                    run_id,
-                    project_id: project.id,
-                    environment_id: environment.id,
-                    promote_base_manifest: ctx.is_full_graph_run,
-                    updates_actual_state: true,
-                })
-            } else {
-                None
+            let execution_spec = match prepared.spec {
+                PreparedExecutionSpec::Local(spec) => InvocationExecutionSpecApi::Local {
+                    command: request.command,
+                    args: spec
+                        .args
+                        .into_iter()
+                        .map(|v| v.to_string_lossy().into_owned())
+                        .collect(),
+                    state_manifest: spec.state_manifest,
+                },
+                _ => {
+                    return Err(ApiError(AppError::Internal(
+                        "unexpected execution spec for local mode".to_string(),
+                    )));
+                }
             };
-            let execution_spec = InvocationExecutionSpecApi::Local {
-                command: request.command,
-                args: dbt_args
-                    .into_iter()
-                    .map(|v| v.to_string_lossy().into_owned())
-                    .collect(),
-                state_manifest,
-            };
+            let persistence = prepared.persistence.map(|p| InvocationPersistence {
+                run_id: p.run_id,
+                project_id: p.project_id,
+                environment_id: p.environment_id,
+                promote_base_manifest: p.promote_base_manifest,
+                updates_actual_state: p.updates_actual_state,
+            });
             PreparedInvocation {
                 execution_spec,
                 persistence,
-                worker_queue: environment.worker_queue.clone(),
-                project_id: Some(project.id),
-                environment_id: Some(environment.id),
+                worker_queue: prepared.worker_queue,
+                project_id: prepared.project_id,
+                environment_id: prepared.environment_id,
             }
         }
         crate::api::InvocationExecutionModeApi::Server => {
