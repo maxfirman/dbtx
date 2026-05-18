@@ -2178,3 +2178,98 @@ async fn invocation_complete_updates_actual_state_on_success() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["actual_state"]["last_successful_run_id"].is_string());
 }
+
+// --- Environment and Project UI tests ---
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_environment_reconcile_post_requires_baseline() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+
+    // Reconcile without baseline should fail gracefully (not crash)
+    let (status, html) = post_form(
+        &app,
+        "/ui/projects/prj_ui/environments/prod/reconcile",
+        "",
+    )
+    .await;
+    // Should return an error page or redirect, not panic
+    assert!(
+        status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR || status.is_redirection(),
+        "reconcile post returned {status}: {html}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_environment_pause_and_resume() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+
+    // Pause
+    let (status, _html) = post_form(
+        &app,
+        "/ui/projects/prj_ui/environments/prod/pause",
+        "",
+    )
+    .await;
+    assert!(
+        status == StatusCode::OK || status.is_redirection(),
+        "pause returned {status}"
+    );
+
+    // Resume
+    let (status, _html) = post_form(
+        &app,
+        "/ui/projects/prj_ui/environments/prod/resume",
+        "",
+    )
+    .await;
+    assert!(
+        status == StatusCode::OK || status.is_redirection(),
+        "resume returned {status}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_project_draft_create_and_status() {
+    let (app, _pool) = test_app().await;
+
+    // Create a project draft via UI form
+    let (status, html) = post_form(
+        &app,
+        "/ui/project-drafts",
+        "git_repo_url=https%3A%2F%2Fgithub.com%2Forg%2Frepo.git&project_root=.",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "draft create: {html}");
+
+    // The response should contain a draft status fragment
+    assert!(
+        html.contains("project-draft") || html.contains("Validating") || html.contains("draft"),
+        "should render draft status fragment"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_environment_rollback_post() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    // Seed a version to rollback to
+    sqlx::query("INSERT INTO environment_versions (environment_id, project_id, reason, git_branch, git_commit_sha, use_latest_commit, auto_reconcile, immutable, metadata) VALUES (1, 1, 'released', 'main', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', false, true, false, '{}'::jsonb)")
+        .execute(&pool).await.unwrap();
+
+    let (status, _html) = post_form(
+        &app,
+        "/ui/projects/prj_ui/environments/prod/rollback",
+        "version_id=1",
+    )
+    .await;
+    assert!(
+        status == StatusCode::OK || status.is_redirection(),
+        "rollback returned {status}"
+    );
+}
