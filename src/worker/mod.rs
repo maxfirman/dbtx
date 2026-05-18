@@ -1,7 +1,5 @@
 //! Worker execution runtime: dbt process management, git worktree materialization, and event streaming.
 
-mod dbt_execution;
-mod dbt_process;
 pub(crate) mod git;
 mod session;
 mod validation;
@@ -9,9 +7,8 @@ mod validation;
 use crate::api::{InvocationClaimResponse, InvocationCommandApi, InvocationExecutionSpecApi};
 use crate::client::DaemonClient;
 use crate::db::validate_remote_project_root;
+use crate::dbt_runner::complete_worker_dbt_invocation;
 use crate::error::{AppError, AppResult};
-use dbt_execution::complete_worker_dbt_invocation;
-use dbt_process::{command_persists_state, run_worker_dbt_process};
 use git::{ensure_git_worktree, git_cache_root, short_hash};
 use serde_yaml::Value as YamlValue;
 use session::WorkerInvocationSession;
@@ -115,17 +112,9 @@ pub async fn execute_claimed_invocation(
     }
 
     let command = map_command(command_name);
-    let exec_result = run_worker_dbt_process(
-        client,
-        &claim,
-        command,
-        &dbt_args,
-        &project_dir,
-        command_persists_state(command_name),
-    )
-    .await?;
+    let exec_result = run_worker_dbt_process(client, &claim, command, &dbt_args, &project_dir, command_name.persists_state()).await?;
 
-    let manifest = if command_persists_state(command_name) {
+    let manifest = if command_name.persists_state() {
         let manifest_path = project_dir.join("target").join("manifest.json");
         std::fs::read_to_string(&manifest_path)
             .ok()
@@ -157,6 +146,34 @@ async fn report_setup_failure(
     WorkerInvocationSession::new(client, claim)
         .complete_failed(error_message)
         .await
+}
+
+async fn run_worker_dbt_process(
+    client: &DaemonClient,
+    claim: &InvocationClaimResponse,
+    command: &str,
+    args: &[std::ffi::OsString],
+    project_dir: &Path,
+    parse_dbt_logs: bool,
+) -> AppResult<crate::dbt_runner::DbtExecutionResult> {
+    let dbt_path = crate::dbt_runner::dbt_path_from_env();
+    let dbt_child =
+        match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, args, project_dir) {
+            Ok(child) => child,
+            Err(err) => {
+                report_setup_failure(client, claim, &err.to_string()).await?;
+                return Err(err);
+            }
+        };
+    let session = WorkerInvocationSession::new(client, claim);
+    let exec_config = crate::dbt_runner::DbtExecutionConfig {
+        parse_dbt_logs,
+        pretty_terminal_output: claim.execution_mode
+            == crate::api::InvocationExecutionModeApi::Local,
+        invocation_id: claim.invocation_id,
+        worker_id: claim.worker_id.clone(),
+    };
+    crate::dbt_runner::run_dbt_execution(dbt_child, &session, &exec_config).await
 }
 
 fn emit_stream_output(
@@ -398,7 +415,7 @@ fn first_yaml_path(value: &YamlValue) -> Option<PathBuf> {
 }
 
 fn persists_state(command: InvocationCommandApi) -> bool {
-    command_persists_state(command)
+    command.persists_state()
 }
 
 fn map_command(command: InvocationCommandApi) -> &'static str {

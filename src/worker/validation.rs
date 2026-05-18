@@ -5,7 +5,7 @@ use super::git::{
     resolve_remote_default_branch, resolve_remote_git_target,
 };
 use super::{
-    dbt_process::run_worker_dbt_process, emit_stream_output, report_setup_failure, send_event,
+    emit_stream_output, report_setup_failure, run_worker_dbt_process, send_event,
     session::WorkerInvocationSession, write_profiles_dir,
 };
 use crate::api::{InvocationClaimResponse, InvocationExecutionModeApi, InvocationExecutionSpecApi};

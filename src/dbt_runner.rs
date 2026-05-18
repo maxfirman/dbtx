@@ -271,6 +271,63 @@ fn emit_stream_output(config: &DbtExecutionConfig, stream: &str, line: &str) {
     );
 }
 
+// --- Worker completion mapping ---
+
+/// Result of mapping a `DbtChildResult` to an invocation completion.
+pub(crate) struct WorkerDbtCompletion {
+    pub(crate) exit_code: i32,
+    pub(crate) completion: crate::execution::ExecutionCompletion,
+}
+
+impl WorkerDbtCompletion {
+    pub(crate) fn as_result(&self) -> crate::error::AppResult<()> {
+        if self.completion.status == crate::api::InvocationLifecycleStatus::Canceled {
+            Err(crate::error::AppError::InvocationCanceled)
+        } else if self.exit_code == 0 {
+            Ok(())
+        } else {
+            Err(crate::error::AppError::DbtFailed(self.exit_code))
+        }
+    }
+}
+
+/// Map a completed Dbt process result to a typed invocation completion.
+pub(crate) fn complete_worker_dbt_invocation(
+    result: DbtChildResult,
+    cancel_requested: bool,
+    dbt_version: Option<String>,
+    manifest: Option<serde_json::Value>,
+) -> WorkerDbtCompletion {
+    let exit_code = if cancel_requested {
+        130
+    } else {
+        result.exit_code
+    };
+    WorkerDbtCompletion {
+        exit_code,
+        completion: crate::execution::ExecutionCompletion {
+            status: if cancel_requested {
+                crate::api::InvocationLifecycleStatus::Canceled
+            } else if exit_code != 0 {
+                crate::api::InvocationLifecycleStatus::Failed
+            } else {
+                crate::api::InvocationLifecycleStatus::Succeeded
+            },
+            exit_code,
+            error: if cancel_requested {
+                Some("invocation canceled".to_string())
+            } else if exit_code == 0 {
+                None
+            } else {
+                Some(format!("dbt invocation failed with exit code {exit_code}"))
+            },
+            dbt_version,
+            manifest,
+            result: None,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,5 +495,56 @@ mod tests {
         while child.stdout_lines.next_line().await.unwrap().is_some() {}
         let result = child.wait().await.unwrap();
         assert_ne!(result.exit_code, 0);
+    }
+
+    // --- Completion mapping tests ---
+
+    fn dbt_result(exit_code: i32) -> DbtChildResult {
+        DbtChildResult {
+            exit_code,
+            stderr_lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn successful_completion_maps_to_succeeded() {
+        let completion =
+            super::complete_worker_dbt_invocation(dbt_result(0), false, None, None);
+        assert_eq!(completion.exit_code, 0);
+        assert_eq!(
+            completion.completion.status,
+            crate::api::InvocationLifecycleStatus::Succeeded
+        );
+        assert!(completion.completion.error.is_none());
+        assert!(completion.as_result().is_ok());
+    }
+
+    #[test]
+    fn failed_completion_maps_to_dbt_failed() {
+        let completion =
+            super::complete_worker_dbt_invocation(dbt_result(2), false, None, None);
+        assert_eq!(
+            completion.completion.status,
+            crate::api::InvocationLifecycleStatus::Failed
+        );
+        assert!(matches!(
+            completion.as_result(),
+            Err(crate::error::AppError::DbtFailed(2))
+        ));
+    }
+
+    #[test]
+    fn canceled_completion_overrides_exit_code() {
+        let completion =
+            super::complete_worker_dbt_invocation(dbt_result(0), true, None, None);
+        assert_eq!(completion.exit_code, 130);
+        assert_eq!(
+            completion.completion.status,
+            crate::api::InvocationLifecycleStatus::Canceled
+        );
+        assert!(matches!(
+            completion.as_result(),
+            Err(crate::error::AppError::InvocationCanceled)
+        ));
     }
 }
