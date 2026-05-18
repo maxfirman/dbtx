@@ -1,5 +1,251 @@
 use super::*;
 
+// --- Catalog view structs ---
+
+pub(super) struct ModelTabView {
+    pub(super) label: &'static str,
+    pub(super) url: String,
+    pub(super) partial_url: String,
+    pub(super) active: bool,
+}
+
+pub(super) struct ModelColumnView {
+    pub(super) name: String,
+    pub(super) data_type: String,
+    pub(super) description: String,
+}
+
+pub(super) struct ModelExecView {
+    pub(super) invocation_id: String,
+    pub(super) invocation_url: String,
+    pub(super) command: String,
+    pub(super) status: String,
+    pub(super) status_class: String,
+    pub(super) started_at: String,
+    pub(super) duration: String,
+    pub(super) git_commit_sha: String,
+}
+
+pub(super) struct ModelTestView {
+    pub(super) index: usize,
+    pub(super) unique_id: String,
+    pub(super) name: String,
+    pub(super) test_type: String,
+    pub(super) status: String,
+    pub(super) status_class: String,
+    pub(super) finished_at: String,
+    pub(super) history_url: String,
+    pub(super) detail_url: String,
+}
+
+pub(super) struct ModelHistoryEntryView {
+    pub(super) index: usize,
+    pub(super) git_commit_sha: String,
+    pub(super) git_url: String,
+    pub(super) started_at: String,
+    pub(super) checksum_short: String,
+    pub(super) prev_checksum: String,
+    pub(super) prev_checksum_short: String,
+    pub(super) diff_url: String,
+}
+
+#[allow(dead_code)]
+pub(super) struct OverviewLineageNodeView {
+    pub(super) name: String,
+    pub(super) resource_type: String,
+    pub(super) status: String,
+    pub(super) status_class: String,
+    pub(super) detail_url: String,
+}
+
+pub(super) struct OverviewLineageView {
+    pub(super) parents: Vec<OverviewLineageNodeView>,
+    pub(super) current: OverviewLineageNodeView,
+    pub(super) children: Vec<OverviewLineageNodeView>,
+    pub(super) has_lineage: bool,
+}
+
+impl Default for OverviewLineageView {
+    fn default() -> Self {
+        Self {
+            parents: Vec::new(),
+            current: OverviewLineageNodeView {
+                name: String::new(),
+                resource_type: String::new(),
+                status: String::new(),
+                status_class: String::new(),
+                detail_url: String::new(),
+            },
+            children: Vec::new(),
+            has_lineage: false,
+        }
+    }
+}
+
+pub(super) struct TestDependsOnView {
+    pub(super) name: String,
+    pub(super) unique_id: String,
+    pub(super) detail_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/show.html")]
+pub(super) struct ModelDetailTemplate {
+    pub(super) title: &'static str,
+    pub(super) project_id: String,
+    pub(super) project_name: String,
+    pub(super) environment_slug: String,
+    pub(super) model_name: String,
+    pub(super) unique_id: String,
+    pub(super) resource_type: String,
+    pub(super) has_remote_execution: bool,
+    pub(super) tabs: Vec<ModelTabView>,
+    pub(super) tab_content_html: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview.html")]
+pub(super) struct ModelOverviewTemplate {
+    pub(super) description: String,
+    pub(super) materialized: String,
+    pub(super) database: String,
+    pub(super) schema: String,
+    pub(super) alias: String,
+    pub(super) file_path: String,
+    pub(super) package_name: String,
+    pub(super) tags: Vec<String>,
+    pub(super) status: String,
+    pub(super) status_class: String,
+    pub(super) columns: Vec<ModelColumnView>,
+    pub(super) promoted_raw_code: String,
+    pub(super) is_stale: bool,
+    pub(super) poll_url: String,
+    pub(super) lineage: OverviewLineageView,
+}
+
+#[derive(Template)]
+#[template(path = "models/_code.html")]
+pub(super) struct ModelCodeTemplate {
+    pub(super) raw_code: String,
+    pub(super) compiled_code: String,
+    pub(super) raw_code_html: String,
+    pub(super) compiled_code_html: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_invocations.html")]
+pub(super) struct ModelInvocationsTemplate {
+    pub(super) executions: Vec<ModelExecView>,
+}
+
+#[derive(Template)]
+#[template(path = "models/_lineage.html")]
+pub(super) struct ModelLineageTemplate {
+    pub(super) lineage_json: String,
+    pub(super) depth_options: Vec<(i32, bool)>,
+    pub(super) direction: String,
+    pub(super) partial_url: String,
+    pub(super) node_count: usize,
+    pub(super) project_id: String,
+    pub(super) environment_slug: String,
+    pub(super) model_selector: String,
+    pub(super) has_remote_execution: bool,
+}
+
+#[derive(Template)]
+#[template(path = "models/_tests.html")]
+pub(super) struct ModelTestsTemplate {
+    pub(super) tests: Vec<ModelTestView>,
+    pub(super) project_id: String,
+    pub(super) environment_slug: String,
+    pub(super) has_remote_execution: bool,
+    pub(super) all_test_selector: String,
+    pub(super) test_count: usize,
+}
+
+#[derive(Template)]
+#[template(path = "models/_test_history.html")]
+pub(super) struct ModelTestHistoryTemplate {
+    pub(super) executions: Vec<ModelExecView>,
+}
+
+#[derive(Template)]
+#[template(path = "models/_history.html")]
+pub(super) struct ModelHistoryTemplate {
+    pub(super) entries: Vec<ModelHistoryEntryView>,
+}
+
+#[derive(Template)]
+#[template(path = "models/_history_diff.html")]
+pub(super) struct ModelHistoryDiffTemplate {
+    pub(super) diff_lines: Vec<DiffLineView>,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview_source.html")]
+pub(super) struct SourceOverviewTemplate {
+    pub(super) description: String,
+    pub(super) database: String,
+    pub(super) schema: String,
+    pub(super) loader: String,
+    pub(super) identifier: String,
+    pub(super) freshness: String,
+    pub(super) columns: Vec<ModelColumnView>,
+    pub(super) status: String,
+    pub(super) status_class: String,
+    pub(super) lineage: OverviewLineageView,
+    pub(super) poll_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview_seed.html")]
+pub(super) struct SeedOverviewTemplate {
+    pub(super) description: String,
+    pub(super) file_path: String,
+    pub(super) package_name: String,
+    pub(super) database: String,
+    pub(super) schema: String,
+    pub(super) alias: String,
+    pub(super) columns: Vec<ModelColumnView>,
+    pub(super) status: String,
+    pub(super) status_class: String,
+    pub(super) lineage: OverviewLineageView,
+    pub(super) poll_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview_test.html")]
+pub(super) struct TestOverviewTemplate {
+    pub(super) description: String,
+    pub(super) test_type: String,
+    pub(super) severity: String,
+    pub(super) depends_on: Vec<TestDependsOnView>,
+    pub(super) status: String,
+    pub(super) status_class: String,
+    pub(super) poll_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "models/_overview_snapshot.html")]
+pub(super) struct SnapshotOverviewTemplate {
+    pub(super) description: String,
+    pub(super) strategy: String,
+    pub(super) unique_key: String,
+    pub(super) updated_at_col: String,
+    pub(super) database: String,
+    pub(super) schema: String,
+    pub(super) alias: String,
+    pub(super) file_path: String,
+    pub(super) package_name: String,
+    pub(super) columns: Vec<ModelColumnView>,
+    pub(super) raw_code: String,
+    pub(super) status: String,
+    pub(super) status_class: String,
+    pub(super) lineage: OverviewLineageView,
+    pub(super) poll_url: String,
+}
+
+// --- Catalog handlers ---
 #[derive(Debug, Default)]
 pub(super) struct ModelListQuery {
     pub(super) project_id: Option<String>,
