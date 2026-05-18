@@ -753,4 +753,71 @@ mod tests {
     fn parse_sse_frame_returns_none_for_data_only_whitespace() {
         assert!(parse_sse_frame("data: \n\n").unwrap().is_none());
     }
+
+    #[test]
+    fn error_from_response_body_maps_400_to_bad_request() {
+        use super::error_from_response_body;
+        use reqwest::StatusCode;
+        let err = error_from_response_body(
+            StatusCode::BAD_REQUEST,
+            r#"{"error": "invalid input: missing field"}"#,
+        );
+        assert!(
+            matches!(err, crate::error::AppError::BadRequest(ref msg) if msg.contains("invalid input")),
+            "expected BadRequest, got: {err}"
+        );
+    }
+
+    #[test]
+    fn error_from_response_body_maps_422_to_bad_request() {
+        use super::error_from_response_body;
+        use reqwest::StatusCode;
+        let err = error_from_response_body(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            r#"{"error": "reconciliation requires a baseline"}"#,
+        );
+        assert!(
+            matches!(err, crate::error::AppError::BadRequest(ref msg) if msg.contains("baseline")),
+            "expected BadRequest for 422, got: {err}"
+        );
+    }
+
+    #[test]
+    fn error_from_response_body_maps_503_to_service_unavailable() {
+        use super::error_from_response_body;
+        use reqwest::StatusCode;
+        let err = error_from_response_body(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error": "server is shutting down"}"#,
+        );
+        assert!(
+            matches!(err, crate::error::AppError::ServiceUnavailable(ref msg) if msg.contains("shutting down")),
+            "expected ServiceUnavailable, got: {err}"
+        );
+    }
+
+    #[test]
+    fn error_from_response_body_falls_back_to_raw_body_for_non_json() {
+        use super::error_from_response_body;
+        use reqwest::StatusCode;
+        let err = error_from_response_body(StatusCode::NOT_FOUND, "plain text error");
+        assert!(
+            matches!(err, crate::error::AppError::NotFound(ref msg) if msg == "plain text error"),
+            "expected raw body as message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn error_from_response_body_maps_500_to_internal() {
+        use super::error_from_response_body;
+        use reqwest::StatusCode;
+        let err = error_from_response_body(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error": "unexpected failure"}"#,
+        );
+        assert!(
+            matches!(err, crate::error::AppError::Internal(ref msg) if msg.contains("unexpected failure")),
+            "expected Internal, got: {err}"
+        );
+    }
 }

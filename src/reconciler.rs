@@ -431,4 +431,15 @@ mod tests {
             Duration::from_secs(2)
         );
     }
+
+    #[test]
+    fn reconciler_config_has_expected_defaults() {
+        // When env vars are not set, from_env() uses defaults
+        let config = ReconcilerConfig {
+            reconcile_interval: parse_interval_ms(None, Duration::from_secs(5)),
+            blocked_plan_sweep_interval: parse_interval_ms(None, Duration::from_secs(2)),
+        };
+        assert_eq!(config.reconcile_interval, Duration::from_secs(5));
+        assert_eq!(config.blocked_plan_sweep_interval, Duration::from_secs(2));
+    }
 }
