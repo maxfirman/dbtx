@@ -271,6 +271,7 @@ struct ReleaseTargetRequest {
     git_ref: Option<String>,
 }
 
+mod admission;
 mod environments;
 mod invocations;
 mod planning;
@@ -279,7 +280,8 @@ mod projects;
 mod reconcile_identity;
 pub(crate) mod source_state;
 
-pub use environments::{EnvironmentPlanAdmitPrepared, EnvironmentService};
+pub use admission::EnvironmentPlanAdmitPrepared;
+pub use environments::EnvironmentService;
 pub use invocations::InvocationService;
 pub use invocations::{
     WatermarkPlanContext, WatermarkResolution, WatermarkResolutionInput, is_watermarkable_command,

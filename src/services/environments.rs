@@ -6,13 +6,6 @@ pub struct EnvironmentService<'a> {
     db: &'a Db,
 }
 
-#[derive(Debug, Clone)]
-pub struct EnvironmentPlanAdmitPrepared {
-    pub plan: EnvironmentRunPlanRecord,
-    pub invocation_id: Option<Uuid>,
-    pub prepared: Option<LocalExecutionPrepared>,
-}
-
 impl<'a> EnvironmentService<'a> {
     pub fn new(db: &'a Db) -> Self {
         Self { db }
@@ -301,73 +294,7 @@ impl<'a> EnvironmentService<'a> {
         invocation_id: Uuid,
         plan_id: Uuid,
     ) -> AppResult<EnvironmentPlanAdmitPrepared> {
-        let plan = self.db.get_environment_run_plan(plan_id).await?;
-        let environment_id = plan.environment_id;
-        let lease_owner = format!("admit:{}", invocation_id);
-        self.acquire_reconcile_lease(environment_id, &lease_owner)
-            .await?;
-        let result = async {
-            if !plan.status.is_admissible() {
-                return Err(AppError::PlanNotAdmissible(
-                    plan_id.to_string(),
-                    plan.status.to_string(),
-                ));
-            }
-            let plan = crate::services::planning::replan_pending_plan(self.db, plan).await?;
-            if plan.status == PlanStatus::Completed {
-                return Ok(EnvironmentPlanAdmitPrepared {
-                    plan,
-                    invocation_id: None,
-                    prepared: None,
-                });
-            }
-            let blockers = self.db.list_active_conflicting_invocations(plan_id).await?;
-            if let Some(blocking_invocation_id) = blockers.first().copied() {
-                let blocked = self
-                    .db
-                    .mark_environment_run_plan_blocked(
-                        plan_id,
-                        Some(blocking_invocation_id),
-                        "plan is blocked by active resource overlap",
-                    )
-                    .await?;
-                return Ok(EnvironmentPlanAdmitPrepared {
-                    plan: blocked,
-                    invocation_id: None,
-                    prepared: None,
-                });
-            }
-
-            let project = self.db.get_project_by_id(plan.project_id).await?;
-            let environment = self.db.get_environment_by_id(plan.environment_id).await?;
-            let mut args: Vec<OsString> = Vec::new();
-            if !plan.selected_resources.is_empty() {
-                args.push("--select".into());
-                for resource in &plan.selected_resources {
-                    args.push(resource.into());
-                }
-            }
-            let prepared = InvocationService::new(self.db)
-                .prepare_remote_execution(
-                    invocation_id,
-                    InvocationCommand::Build,
-                    args,
-                    &project.project_id,
-                    &environment.slug,
-                )
-                .await?;
-            Ok(EnvironmentPlanAdmitPrepared {
-                plan,
-                invocation_id: Some(invocation_id),
-                prepared: Some(prepared),
-            })
-        }
-        .await;
-        let _ = self
-            .db
-            .release_environment_reconcile_lease(environment_id, &lease_owner)
-            .await;
-        result
+        crate::services::admission::admit_plan(self.db, invocation_id, plan_id).await
     }
 
     /// Admit a plan and start its invocation in one call.
