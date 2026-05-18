@@ -1840,3 +1840,147 @@ async fn execution_mode_derived_from_environment_commit_sha() {
     assert_eq!(status, StatusCode::OK, "local invocation: {body}");
     assert_eq!(body["execution_mode"], "local");
 }
+
+// --- Catalog UI tests ---
+
+async fn seed_catalog_data(pool: &PgPool) {
+    seed_ui_test_data(pool).await;
+    // Add a run
+    sqlx::query(
+        "INSERT INTO runs (run_id, project_id, environment_id, command, args, terminal_status) VALUES ('11111111-1111-1111-1111-111111111111', 1, 1, 'build', '[]'::jsonb, 'success')"
+    ).execute(pool).await.unwrap();
+    // Add manifest snapshot (required FK for manifest_nodes)
+    sqlx::query(
+        "INSERT INTO manifest_snapshots (run_id, manifest, manifest_size_bytes) VALUES ('11111111-1111-1111-1111-111111111111', '{}'::jsonb, 100)"
+    ).execute(pool).await.unwrap();
+    // Add manifest nodes
+    sqlx::query(
+        "INSERT INTO manifest_nodes (run_id, unique_id, name, resource_type, package_name, original_file_path, tags, fqn, config, checksum) VALUES ('11111111-1111-1111-1111-111111111111', 'model.pkg.orders', 'orders', 'model', 'pkg', 'models/orders.sql', '[]'::jsonb, '[\"pkg\",\"orders\"]'::jsonb, '{\"materialized\": \"table\"}'::jsonb, 'abc123')"
+    ).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO manifest_nodes (run_id, unique_id, name, resource_type, package_name, original_file_path, tags, fqn, config, checksum) VALUES ('11111111-1111-1111-1111-111111111111', 'source.pkg.raw_orders', 'raw_orders', 'source', 'pkg', 'models/sources.yml', '[]'::jsonb, '[\"pkg\",\"raw_orders\"]'::jsonb, '{}'::jsonb, 'def456')"
+    ).execute(pool).await.unwrap();
+    // Add current_node_state entries
+    sqlx::query(
+        "INSERT INTO current_node_state (project_id, environment_id, unique_id, last_run_id, node_name, node_path, resource_type, status, materialized) VALUES (1, 1, 'model.pkg.orders', '11111111-1111-1111-1111-111111111111', 'orders', 'models/orders.sql', 'model', 'success', 'table')"
+    ).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO current_node_state (project_id, environment_id, unique_id, last_run_id, node_name, node_path, resource_type, status, materialized) VALUES (1, 1, 'source.pkg.raw_orders', '11111111-1111-1111-1111-111111111111', 'raw_orders', 'models/sources.yml', 'source', 'success', NULL)"
+    ).execute(pool).await.unwrap();
+    // Add promoted manifest nodes
+    sqlx::query(
+        "INSERT INTO promoted_manifest_nodes (project_id, environment_id, unique_id, source_run_id, checksum, raw_node) VALUES (1, 1, 'model.pkg.orders', '11111111-1111-1111-1111-111111111111', 'abc123', '{\"name\": \"orders\", \"unique_id\": \"model.pkg.orders\", \"resource_type\": \"model\", \"raw_code\": \"SELECT 1\", \"compiled_code\": \"SELECT 1\", \"description\": \"Orders model\", \"depends_on\": {\"nodes\": []}}'::jsonb)"
+    ).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO promoted_manifest_nodes (project_id, environment_id, unique_id, source_run_id, checksum, raw_node) VALUES (1, 1, 'source.pkg.raw_orders', '11111111-1111-1111-1111-111111111111', 'def456', '{\"name\": \"raw_orders\", \"unique_id\": \"source.pkg.raw_orders\", \"resource_type\": \"source\", \"description\": \"Raw orders source\", \"depends_on\": {\"nodes\": []}}'::jsonb)"
+    ).execute(pool).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_index_renders_models() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("orders"), "catalog should list the orders model");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_filters_by_resource_type() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog?resource_type=source&project_id=prj_ui&environment_slug=prod").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("raw_orders"), "should show source");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_model_detail_renders() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/model.pkg.orders").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("orders"), "detail page should show model name");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_model_tab_overview() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/model.pkg.orders/tab?tab=overview").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!html.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_model_tab_code() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/model.pkg.orders/tab?tab=code").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!html.is_empty(), "code tab should render content");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_model_tab_lineage() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/model.pkg.orders/tab?tab=lineage&depth=2&direction=both").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!html.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_model_tab_history() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/model.pkg.orders/tab?tab=history").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!html.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_model_tab_invocations() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/model.pkg.orders/tab?tab=invocations").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!html.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_model_tab_tests() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/model.pkg.orders/tab?tab=tests").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!html.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_source_detail_renders() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/source.pkg.raw_orders").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("raw_orders"), "source detail should show source name");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_nonexistent_project_returns_error() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    let (status, _html) = get_html(&app, "/ui/catalog/prj_nonexistent/prod/model.pkg.orders").await;
+    assert_ne!(status, StatusCode::OK);
+}
