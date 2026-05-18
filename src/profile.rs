@@ -677,4 +677,226 @@ mod tests {
         let err = crate::error::AppError::MissingSecretKey;
         assert!(err.to_string().contains("DBTX_SECRET_KEY"));
     }
+
+    #[test]
+    fn validate_duckdb_full_config() {
+        super::validate_environment_profile(
+            "duckdb",
+            "main",
+            Some(4),
+            &json!({"path": "warehouse.duckdb"}),
+            &json!({}),
+            false,
+        )
+        .expect("valid duckdb config");
+    }
+
+    #[test]
+    fn validate_duckdb_partial_config() {
+        super::validate_environment_profile(
+            "duckdb",
+            "main",
+            None,
+            &json!({}),
+            &json!({}),
+            true,
+        )
+        .expect("valid partial duckdb config");
+    }
+
+    #[test]
+    fn validate_postgres_full_config() {
+        super::validate_environment_profile(
+            "postgres",
+            "public",
+            Some(4),
+            &json!({"host": "localhost", "user": "admin", "port": 5432, "dbname": "mydb"}),
+            &json!({"password": "secret"}),
+            false,
+        )
+        .expect("valid postgres config");
+    }
+
+    #[test]
+    fn validate_postgres_partial_config() {
+        super::validate_environment_profile(
+            "postgres",
+            "public",
+            None,
+            &json!({"host": "localhost"}),
+            &json!({}),
+            true,
+        )
+        .expect("valid partial postgres config");
+    }
+
+    #[test]
+    fn validate_postgres_missing_host_fails() {
+        let result = super::validate_environment_profile(
+            "postgres",
+            "public",
+            None,
+            &json!({"user": "admin", "port": 5432, "dbname": "mydb"}),
+            &json!({"password": "secret"}),
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_snowflake_full_config() {
+        super::validate_environment_profile(
+            "snowflake",
+            "analytics",
+            Some(8),
+            &json!({"account": "xy12345", "user": "admin", "database": "PROD", "warehouse": "COMPUTE_WH"}),
+            &json!({"password": "secret"}),
+            false,
+        )
+        .expect("valid snowflake config");
+    }
+
+    #[test]
+    fn validate_snowflake_partial_config() {
+        super::validate_environment_profile(
+            "snowflake",
+            "analytics",
+            None,
+            &json!({"account": "xy12345"}),
+            &json!({}),
+            true,
+        )
+        .expect("valid partial snowflake config");
+    }
+
+    #[test]
+    fn validate_unsupported_adapter_fails() {
+        let result = super::validate_environment_profile(
+            "bigquery",
+            "dataset",
+            None,
+            &json!({}),
+            &json!({}),
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_empty_schema_fails() {
+        let result = super::validate_environment_profile(
+            "duckdb",
+            "",
+            None,
+            &json!({"path": "w.duckdb"}),
+            &json!({}),
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_negative_threads_fails() {
+        let result = super::validate_environment_profile(
+            "duckdb",
+            "main",
+            Some(-1),
+            &json!({"path": "w.duckdb"}),
+            &json!({}),
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_resolved_duckdb_profile() {
+        super::validate_resolved_profile(
+            "duckdb",
+            &json!({"type": "duckdb", "path": "w.duckdb", "schema": "main"}),
+        )
+        .expect("valid resolved duckdb");
+    }
+
+    #[test]
+    fn validate_resolved_postgres_profile() {
+        super::validate_resolved_profile(
+            "postgres",
+            &json!({"type": "postgres", "host": "localhost", "user": "admin", "password": "secret", "port": 5432, "dbname": "mydb", "schema": "public"}),
+        )
+        .expect("valid resolved postgres");
+    }
+
+    #[test]
+    fn validate_resolved_snowflake_profile() {
+        super::validate_resolved_profile(
+            "snowflake",
+            &json!({"type": "snowflake", "account": "xy12345", "user": "admin", "password": "secret", "database": "PROD", "warehouse": "COMPUTE_WH", "schema": "analytics"}),
+        )
+        .expect("valid resolved snowflake");
+    }
+
+    #[test]
+    fn validate_resolved_unsupported_adapter_fails() {
+        let result = super::validate_resolved_profile("bigquery", &json!({"type": "bigquery"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_runtime_profile_postgres() {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
+        let secrets = super::encrypt_json(&json!({"password": "s3cr3t"})).expect("encrypt");
+        let resolved = super::resolve_runtime_profile(
+            "analytics",
+            "prod",
+            &EnvironmentProfileRecord {
+                adapter_type: "postgres".to_string(),
+                schema_name: "public".to_string(),
+                threads: Some(8),
+                profile_config: json!({"host": "db.example.com", "user": "app", "port": 5432, "dbname": "analytics"}),
+                profile_secrets: secrets,
+            },
+        )
+        .expect("resolve postgres");
+        assert_eq!(resolved.final_config["type"], "postgres");
+        assert_eq!(resolved.final_config["schema"], "public");
+        assert_eq!(resolved.final_config["host"], "db.example.com");
+        assert_eq!(resolved.final_config["password"], "s3cr3t");
+        assert_eq!(resolved.final_config["threads"], 8);
+    }
+
+    #[test]
+    fn resolve_runtime_profile_snowflake() {
+        unsafe { std::env::set_var("DBTX_SECRET_KEY", "test-key") };
+        let secrets = super::encrypt_json(&json!({"password": "snow_pass"})).expect("encrypt");
+        let resolved = super::resolve_runtime_profile(
+            "analytics",
+            "prod",
+            &EnvironmentProfileRecord {
+                adapter_type: "snowflake".to_string(),
+                schema_name: "RAW".to_string(),
+                threads: None,
+                profile_config: json!({"account": "xy12345", "user": "loader", "database": "PROD", "warehouse": "LOAD_WH"}),
+                profile_secrets: secrets,
+            },
+        )
+        .expect("resolve snowflake");
+        assert_eq!(resolved.final_config["type"], "snowflake");
+        assert_eq!(resolved.final_config["schema"], "RAW");
+        assert_eq!(resolved.final_config["account"], "xy12345");
+        assert_eq!(resolved.final_config["password"], "snow_pass");
+    }
+
+    #[test]
+    fn generate_profiles_writes_yaml_file() {
+        let resolved = super::ResolvedProfile {
+            profile_name: "test".to_string(),
+            target_name: "dev".to_string(),
+            final_config: json!({"type": "duckdb", "path": "w.duckdb", "schema": "main"}),
+        };
+        let generated = resolved.generate().expect("generate");
+        let content = std::fs::read_to_string(generated.temp_dir.path().join("profiles.yml"))
+            .expect("read profiles.yml");
+        assert!(content.contains("test"));
+        assert!(content.contains("dev"));
+    }
 }
