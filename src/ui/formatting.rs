@@ -171,23 +171,7 @@ pub(super) fn plan_status_class(status: PlanStatus) -> &'static str {
 }
 
 pub(super) fn invocation_display_status(invocation: &InvocationStatusResponse) -> &'static str {
-    match invocation.status {
-        crate::api::InvocationLifecycleStatus::Running if invocation.claimed_by.is_none() => {
-            "queued"
-        }
-        crate::api::InvocationLifecycleStatus::Running
-            if !matches!(
-                invocation.cancel_state,
-                crate::api::InvocationCancelStateApi::None
-            ) =>
-        {
-            "cancelling"
-        }
-        crate::api::InvocationLifecycleStatus::Running => "running",
-        crate::api::InvocationLifecycleStatus::Succeeded => "succeeded",
-        crate::api::InvocationLifecycleStatus::Failed => "failed",
-        crate::api::InvocationLifecycleStatus::Canceled => "canceled",
-    }
+    crate::invocation_read_model::InvocationDisplayStatus::from_invocation(invocation).as_str()
 }
 
 pub(super) fn invocation_mode_value(value: &InvocationExecutionModeApi) -> &'static str {

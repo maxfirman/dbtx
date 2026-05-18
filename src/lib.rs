@@ -12,6 +12,7 @@ pub mod dbt_utils;
 pub mod error;
 pub mod event;
 pub mod execution;
+pub mod invocation_read_model;
 pub mod invocation_runtime;
 pub mod manifest;
 pub(crate) mod manifest_preparation;

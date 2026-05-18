@@ -1,4 +1,5 @@
 use super::*;
+use crate::invocation_read_model::InvocationDisplayStatus;
 
 const INVOCATIONS_PAGE_SIZE: usize = 50;
 
@@ -44,18 +45,21 @@ fn normalize_filter_values(values: &[String]) -> Vec<String> {
 fn parse_display_status_filters(values: &[String]) -> AppResult<Vec<String>> {
     let mut display_statuses = Vec::new();
     for value in normalize_filter_values(values) {
-        match value.as_str() {
-            "queued" | "running" | "cancelling" | "succeeded" | "failed" | "canceled" => {
-                display_statuses.push(value)
-            }
-            other => {
-                return Err(AppError::InvalidInput(format!(
-                    "invalid invocation status filter: {other}"
-                )));
-            }
-        }
+        let Some(status) = InvocationDisplayStatus::parse(&value) else {
+            return Err(AppError::InvalidInput(format!(
+                "invalid invocation status filter: {value}"
+            )));
+        };
+        display_statuses.push(status.as_str().to_string());
     }
     Ok(display_statuses)
+}
+
+fn invocation_display_status_options() -> Vec<(&'static str, &'static str)> {
+    InvocationDisplayStatus::ALL
+        .iter()
+        .map(|status| (status.as_str(), status.label()))
+        .collect()
 }
 
 fn parse_execution_mode_filters(values: &[String]) -> AppResult<Vec<String>> {
@@ -227,14 +231,7 @@ pub(super) async fn invocations_index(
         filters: InvocationFilterView {
             status: invocation_filter_option_views(
                 &normalize_filter_values(&query.status),
-                &[
-                    ("queued", "Queued"),
-                    ("running", "Running"),
-                    ("cancelling", "Cancelling"),
-                    ("succeeded", "Succeeded"),
-                    ("failed", "Failed"),
-                    ("canceled", "Canceled"),
-                ],
+                &invocation_display_status_options(),
             ),
             execution_mode: invocation_filter_option_views(
                 &normalize_filter_values(&query.execution_mode),
