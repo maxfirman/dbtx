@@ -8,14 +8,14 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root)
-            VALUES ($1, $2, $3, COALESCE($4, 'main'), $5)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
         .bind(&input.git_repo_url)
-        .bind(input.default_branch.as_deref())
+        .bind(&input.default_branch)
         .bind(&input.project_root)
         .fetch_one(&self.pool)
         .await?;
@@ -29,7 +29,7 @@ impl Db {
             UPDATE projects
             SET project_name = $2,
                 git_repo_url = $3,
-                default_branch = COALESCE($4, 'main'),
+                default_branch = $4,
                 project_root = $5
             WHERE project_id = $1
             RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
@@ -38,7 +38,7 @@ impl Db {
         .bind(&input.project_id)
         .bind(&input.project_name)
         .bind(&input.git_repo_url)
-        .bind(input.default_branch.as_deref())
+        .bind(&input.default_branch)
         .bind(&input.project_root)
         .fetch_optional(&self.pool)
         .await?
@@ -51,7 +51,7 @@ impl Db {
         let row = sqlx::query(
             r#"
             INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root)
-            VALUES ($1, $2, $3, COALESCE($4, 'main'), $5)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (project_id) DO UPDATE
             SET project_name = EXCLUDED.project_name,
                 git_repo_url = EXCLUDED.git_repo_url,
@@ -63,7 +63,7 @@ impl Db {
         .bind(&input.project_id)
         .bind(&input.project_name)
         .bind(&input.git_repo_url)
-        .bind(input.default_branch.as_deref())
+        .bind(&input.default_branch)
         .bind(&input.project_root)
         .fetch_one(&self.pool)
         .await?;
@@ -104,7 +104,7 @@ impl Db {
             SET project_id = $2,
                 project_name = $3,
                 git_repo_url = $4,
-                default_branch = COALESCE($5, 'main'),
+                default_branch = $5,
                 project_root = $6
             WHERE id = $1
             RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
@@ -114,7 +114,7 @@ impl Db {
         .bind(&input.project_id)
         .bind(&input.project_name)
         .bind(&input.git_repo_url)
-        .bind(input.default_branch.as_deref())
+        .bind(&input.default_branch)
         .bind(&input.project_root)
         .fetch_one(&mut *tx)
         .await?;
@@ -459,7 +459,7 @@ impl Db {
             project_id,
             project_name,
             git_repo_url: draft.git_repo_url,
-            default_branch: Some(default_branch),
+            default_branch,
             project_root: draft.project_root,
         })
         .await

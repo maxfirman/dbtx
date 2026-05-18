@@ -11,7 +11,9 @@ DROP COLUMN IF EXISTS mode;
 -- Backfill any NULL values before adding NOT NULL constraints.
 UPDATE projects SET git_repo_url = '' WHERE git_repo_url IS NULL;
 UPDATE projects SET project_root = '.' WHERE project_root IS NULL;
+UPDATE projects SET default_branch = 'main' WHERE default_branch IS NULL;
 
 ALTER TABLE projects
 ALTER COLUMN git_repo_url SET NOT NULL,
-ALTER COLUMN project_root SET NOT NULL;
+ALTER COLUMN project_root SET NOT NULL,
+ALTER COLUMN default_branch SET NOT NULL;

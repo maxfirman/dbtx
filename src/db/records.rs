@@ -247,7 +247,7 @@ pub struct ProjectRecord {
     pub project_id: String,
     pub project_name: String,
     pub git_repo_url: String,
-    pub default_branch: Option<String>,
+    pub default_branch: String,
     pub project_root: String,
     pub metadata: Value,
 }
@@ -428,7 +428,7 @@ pub struct CreateProjectInput {
     pub project_id: String,
     pub project_name: String,
     pub git_repo_url: String,
-    pub default_branch: Option<String>,
+    pub default_branch: String,
     pub project_root: String,
 }
 

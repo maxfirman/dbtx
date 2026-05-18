@@ -35,7 +35,7 @@ impl<'a> EnvironmentService<'a> {
         self.db
             .create_environment_draft(CreateEnvironmentDraftInput {
                 project_id: project.id,
-                default_branch: project.default_branch,
+                default_branch: Some(project.default_branch),
             })
             .await
     }

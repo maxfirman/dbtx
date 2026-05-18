@@ -232,7 +232,7 @@ pub fn print_project(project: &ProjectRecord) {
         project.project_id,
         project.project_name,
         project.git_repo_url,
-        project.default_branch.as_deref().unwrap_or(""),
+        project.default_branch,
         project.project_root,
         project.metadata,
     );

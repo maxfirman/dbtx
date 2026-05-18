@@ -621,7 +621,7 @@ mod tests {
             project_id: "prj_remote_example".to_string(),
             project_name: "example".to_string(),
             git_repo_url: "git@github.com:example/repo.git".to_string(),
-            default_branch: Some("main".to_string()),
+            default_branch: "main".to_string(),
             project_root: ".".to_string(),
             metadata: json!({}),
         }
