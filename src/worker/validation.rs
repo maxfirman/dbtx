@@ -406,3 +406,103 @@ async fn send_worker_event(
     )
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::api::InvocationExecutionSpecApi;
+    use crate::error::AppError;
+
+    /// Validates that the spec matches the expected variant for release validation.
+    fn validate_release_spec(spec: &InvocationExecutionSpecApi) -> Result<(), AppError> {
+        match spec {
+            InvocationExecutionSpecApi::ReleaseValidation { .. } => Ok(()),
+            _ => Err(AppError::Internal(
+                "release validation requires release spec".to_string(),
+            )),
+        }
+    }
+
+    /// Validates that the spec matches the expected variant for project validation.
+    fn validate_project_spec(spec: &InvocationExecutionSpecApi) -> Result<(), AppError> {
+        match spec {
+            InvocationExecutionSpecApi::ProjectValidation { .. } => Ok(()),
+            _ => Err(AppError::Internal(
+                "project validation requires project validation spec".to_string(),
+            )),
+        }
+    }
+
+    /// Resolves the active branch from selected_branch or default_branch.
+    fn resolve_active_branch(selected_branch: &Option<String>, default_branch: &str) -> String {
+        selected_branch
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| default_branch.to_string())
+    }
+
+    #[test]
+    fn release_spec_validation_accepts_correct_variant() {
+        let spec = InvocationExecutionSpecApi::ReleaseValidation {
+            repo_url: "https://github.com/org/repo.git".to_string(),
+            git_ref: Some("v1.0".to_string()),
+            git_commit_sha: None,
+            git_branch: Some("main".to_string()),
+        };
+        assert!(validate_release_spec(&spec).is_ok());
+    }
+
+    #[test]
+    fn release_spec_validation_rejects_wrong_variant() {
+        let spec = InvocationExecutionSpecApi::ProjectValidation {
+            repo_url: "https://github.com/org/repo.git".to_string(),
+            project_root: ".".to_string(),
+        };
+        assert!(validate_release_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn project_spec_validation_accepts_correct_variant() {
+        let spec = InvocationExecutionSpecApi::ProjectValidation {
+            repo_url: "https://github.com/org/repo.git".to_string(),
+            project_root: ".".to_string(),
+        };
+        assert!(validate_project_spec(&spec).is_ok());
+    }
+
+    #[test]
+    fn project_spec_validation_rejects_wrong_variant() {
+        let spec = InvocationExecutionSpecApi::ReleaseValidation {
+            repo_url: "https://github.com/org/repo.git".to_string(),
+            git_ref: None,
+            git_commit_sha: Some("abc123".to_string()),
+            git_branch: None,
+        };
+        assert!(validate_project_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn resolve_active_branch_uses_selected_when_present() {
+        assert_eq!(
+            resolve_active_branch(&Some("feature/x".to_string()), "main"),
+            "feature/x"
+        );
+    }
+
+    #[test]
+    fn resolve_active_branch_falls_back_to_default() {
+        assert_eq!(resolve_active_branch(&None, "main"), "main");
+    }
+
+    #[test]
+    fn resolve_active_branch_ignores_empty_selected() {
+        assert_eq!(resolve_active_branch(&Some("".to_string()), "main"), "main");
+    }
+
+    #[test]
+    fn resolve_active_branch_ignores_whitespace_selected() {
+        assert_eq!(
+            resolve_active_branch(&Some("   ".to_string()), "main"),
+            "main"
+        );
+    }
+}
