@@ -5,8 +5,8 @@ use super::git::{
     resolve_remote_default_branch, resolve_remote_git_target,
 };
 use super::{
-    emit_stream_output, report_setup_failure, send_event, session::WorkerInvocationSession,
-    write_profiles_dir,
+    dbt_process::run_worker_dbt_process, emit_stream_output, report_setup_failure, send_event,
+    session::WorkerInvocationSession, write_profiles_dir,
 };
 use crate::api::{InvocationClaimResponse, InvocationExecutionModeApi, InvocationExecutionSpecApi};
 use crate::client::DaemonClient;
@@ -341,24 +341,9 @@ async fn run_validation_command(
         OsString::from("--profiles-dir"),
         profiles_dir.as_os_str().to_os_string(),
     ];
-    let dbt_path = crate::dbt_runner::dbt_path_from_env();
-    let dbt_child = match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, &args, project_dir)
-    {
-        Ok(child) => child,
-        Err(err) => {
-            report_setup_failure(client, claim, &err.to_string()).await?;
-            return Err(err);
-        }
-    };
     let session = WorkerInvocationSession::new(client, claim);
-    let exec_config = crate::dbt_runner::DbtExecutionConfig {
-        parse_dbt_logs: false,
-        pretty_terminal_output: claim.execution_mode == InvocationExecutionModeApi::Local,
-        invocation_id: claim.invocation_id,
-        worker_id: claim.worker_id.clone(),
-    };
     let exec_result =
-        crate::dbt_runner::run_dbt_execution(dbt_child, &session, &exec_config).await?;
+        run_worker_dbt_process(client, claim, command, &args, project_dir, false).await?;
 
     if exec_result.cancel_requested {
         session.complete_canceled().await?;
