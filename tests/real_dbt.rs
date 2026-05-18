@@ -2,7 +2,6 @@
 
 use dbtx::api::{InvocationCommandApi, InvocationCreateApiRequest, InvocationLifecycleStatus};
 use dbtx::client::DaemonClient;
-use dbtx::services::infer_remote_project_defaults;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -898,9 +897,25 @@ impl RealProject {
     }
 
     fn remote_project_id(&self) -> String {
-        infer_remote_project_defaults(self.path(), None, None, None)
-            .expect("infer remote project")
-            .project_id
+        use dbtx::db::remote_project_id;
+        use dbtx::services::read_dbt_project_name_from_root;
+        let project_name = read_dbt_project_name_from_root(self.path()).expect("read project name");
+        let repo_url = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(self.path())
+            .output()
+            .expect("git remote get-url")
+            .stdout;
+        let repo_url = String::from_utf8(repo_url).expect("utf8").trim().to_string();
+        let repo_root_output = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(self.path())
+            .output()
+            .expect("git rev-parse --show-toplevel")
+            .stdout;
+        let repo_root = PathBuf::from(String::from_utf8(repo_root_output).expect("utf8").trim().to_string());
+        let project_root = dbtx::services::relative_project_root(&repo_root, &self.path().canonicalize().expect("canonicalize"));
+        remote_project_id(&repo_url, &project_root, &project_name)
     }
 
     fn head_sha(&self) -> String {
@@ -961,11 +976,10 @@ async fn bootstrap_remote_project_and_env(
 
     let project_row = sqlx::query(
         r#"
-        INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata)
-        VALUES ($1, $2, 'remote', $3, 'main', '.', '{}'::jsonb)
+        INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root, metadata)
+        VALUES ($1, $2, $3, 'main', '.', '{}'::jsonb)
         ON CONFLICT (project_id) DO UPDATE
         SET project_name = EXCLUDED.project_name,
-            mode = EXCLUDED.mode,
             git_repo_url = EXCLUDED.git_repo_url,
             default_branch = EXCLUDED.default_branch,
             project_root = EXCLUDED.project_root
@@ -1034,11 +1048,10 @@ async fn bootstrap_registered_project(pool: &PgPool, project: &RealProject) -> S
 
     sqlx::query(
         r#"
-        INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata)
-        VALUES ($1, $2, 'remote', $3, 'main', '.', '{}'::jsonb)
+        INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root, metadata)
+        VALUES ($1, $2, $3, 'main', '.', '{}'::jsonb)
         ON CONFLICT (project_id) DO UPDATE
         SET project_name = EXCLUDED.project_name,
-            mode = EXCLUDED.mode,
             git_repo_url = EXCLUDED.git_repo_url,
             default_branch = EXCLUDED.default_branch,
             project_root = EXCLUDED.project_root

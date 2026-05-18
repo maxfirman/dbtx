@@ -55,18 +55,8 @@ impl<'a> InvocationService<'a> {
             .get_environment(project_id, environment_slug)
             .await?;
 
-        if project.mode != "remote" {
-            return Err(AppError::RemoteExecutionRequiresRemoteProject(
-                project.project_id.clone(),
-                project.mode.clone(),
-            ));
-        }
-        let repo_url = project.git_repo_url.clone().ok_or_else(|| {
-            AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone())
-        })?;
-        let project_root = project.project_root.clone().ok_or_else(|| {
-            AppError::RemoteExecutionRequiresProjectRoot(project.project_id.clone())
-        })?;
+        let repo_url = project.git_repo_url.clone();
+        let project_root = project.project_root.clone();
         let commit_sha = environment.git_commit_sha.clone().ok_or_else(|| {
             AppError::RemoteExecutionRequiresCommitSha(
                 project.project_id.clone(),
@@ -204,15 +194,7 @@ impl<'a> InvocationService<'a> {
             .get_environment(project_id, environment_slug)
             .await?;
 
-        if project.mode != "remote" {
-            return Err(AppError::RemoteExecutionRequiresRemoteProject(
-                project.project_id.clone(),
-                project.mode.clone(),
-            ));
-        }
-        let repo_url = project.git_repo_url.clone().ok_or_else(|| {
-            AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone())
-        })?;
+        let repo_url = project.git_repo_url.clone();
         let target = parse_release_target_args(&args)?;
 
         Ok(LocalExecutionPrepared {

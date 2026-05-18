@@ -148,8 +148,6 @@ pub enum AppError {
     RemoteExecutionRequiresEnvironmentSlug,
     #[error("remote project registration requires a git repository")]
     RemoteProjectRequiresGitRepo,
-    #[error("project '{0}' has mode '{1}' but remote execution requires mode 'remote'")]
-    RemoteExecutionRequiresRemoteProject(String, String),
     #[error("project '{0}' is missing git_repo_url required for remote execution")]
     RemoteExecutionRequiresGitRepoUrl(String),
     #[error("project '{0}' is missing project_root required for remote execution")]
@@ -162,8 +160,6 @@ pub enum AppError {
     RemoteExecutionRequiresCommitSha(String, String),
 
     // --- Validation errors ---
-    #[error("invalid project mode '{0}'")]
-    InvalidProjectMode(String),
     #[error("invalid environment status '{0}'")]
     InvalidEnvironmentStatus(String),
     #[error("invalid database value for {0}: '{1}'")]

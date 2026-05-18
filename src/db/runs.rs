@@ -29,9 +29,9 @@ impl Db {
             run.git_state
                 .repo_url
                 .as_deref()
-                .or(run.project.git_repo_url.as_deref()),
+                .unwrap_or(&run.project.git_repo_url),
         )
-        .bind(run.project.project_root.as_deref())
+        .bind(run.project.project_root.as_str())
         .bind(&run.project.project_name)
         .bind(&run.project.project_id)
         .execute(&self.pool)

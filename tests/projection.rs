@@ -17,7 +17,7 @@ use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use dbtx::process_state::ProcessState;
 use dbtx::server::router;
 use dbtx::services::{
-    code_change_input_fingerprint, infer_local_project_defaults, infer_remote_project_defaults,
+    code_change_input_fingerprint,
     source_state_change_input_fingerprint, target_manifest_input_fingerprint,
 };
 use sqlx::{PgPool, Row};
@@ -5356,14 +5356,13 @@ async fn project_draft_api_round_trip_and_confirms_validated_draft() {
         .project_draft_confirm(created.draft.id)
         .await
         .expect("confirm validated project draft");
-    assert_eq!(confirmed.project.mode, "remote");
     assert_eq!(
-        confirmed.project.git_repo_url.as_deref(),
-        Some("https://example.com/repo.git")
+        confirmed.project.git_repo_url.as_str(),
+        "https://example.com/repo.git"
     );
     assert_eq!(
-        confirmed.project.project_root.as_deref(),
-        Some(project_root.as_str())
+        confirmed.project.project_root.as_str(),
+        project_root.as_str()
     );
     assert_eq!(confirmed.project.project_name, project_name);
 }
@@ -5815,16 +5814,26 @@ impl TempProjectRepo {
     }
 }
 
-fn read_project_id_from_dbt_project(project_dir: &Path, remote: bool) -> String {
-    if remote {
-        infer_remote_project_defaults(project_dir, None, None, None)
-            .expect("infer remote project")
-            .project_id
-    } else {
-        infer_local_project_defaults(project_dir, None, None, None)
-            .expect("infer local project")
-            .project_id
-    }
+fn read_project_id_from_dbt_project(project_dir: &Path, _remote: bool) -> String {
+    use dbtx::db::remote_project_id;
+    use dbtx::services::read_dbt_project_name_from_root;
+    let project_name = read_dbt_project_name_from_root(project_dir).expect("read project name");
+    let repo_url = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(project_dir)
+        .output()
+        .expect("git remote get-url")
+        .stdout;
+    let repo_url = String::from_utf8(repo_url).expect("utf8").trim().to_string();
+    let repo_root_output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(project_dir)
+        .output()
+        .expect("git rev-parse --show-toplevel")
+        .stdout;
+    let repo_root = PathBuf::from(String::from_utf8(repo_root_output).expect("utf8").trim().to_string());
+    let project_root = dbtx::services::relative_project_root(&repo_root, &project_dir.canonicalize().expect("canonicalize"));
+    remote_project_id(&repo_url, &project_root, &project_name)
 }
 
 fn git(args: &[&str], cwd: &Path) {
@@ -5882,11 +5891,10 @@ async fn bootstrap_remote_project_only(pool: &PgPool, project_dir: &Path, projec
 
     sqlx::query(
         r#"
-        INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata)
-        VALUES ($1, $2, 'remote', 'https://example.com/repo.git', 'main', $3, '{}'::jsonb)
+        INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root, metadata)
+        VALUES ($1, $2, 'https://example.com/repo.git', 'main', $3, '{}'::jsonb)
         ON CONFLICT (project_id) DO UPDATE
         SET project_name = EXCLUDED.project_name,
-            mode = EXCLUDED.mode,
             git_repo_url = EXCLUDED.git_repo_url,
             default_branch = EXCLUDED.default_branch,
             project_root = EXCLUDED.project_root
@@ -6313,11 +6321,10 @@ async fn bootstrap_remote_project_and_env_direct(
 
     let project_row = sqlx::query(
         r#"
-        INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata)
-        VALUES ($1, $2, 'remote', 'https://example.com/repo.git', 'main', $3, '{}'::jsonb)
+        INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root, metadata)
+        VALUES ($1, $2, 'https://example.com/repo.git', 'main', $3, '{}'::jsonb)
         ON CONFLICT (project_id) DO UPDATE
         SET project_name = EXCLUDED.project_name,
-            mode = EXCLUDED.mode,
             git_repo_url = EXCLUDED.git_repo_url,
             default_branch = EXCLUDED.default_branch,
             project_root = EXCLUDED.project_root

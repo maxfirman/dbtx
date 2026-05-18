@@ -134,7 +134,7 @@ pub(super) async fn model_detail(
         model_name,
         unique_id,
         resource_type: resource_type.to_string(),
-        project_mode: project.mode.clone(),
+        has_remote_execution: env.git_commit_sha.is_some(),
         tabs,
         tab_content_html,
     })
@@ -627,7 +627,7 @@ async fn render_lineage_tab(
             .filter_map(|n| n.get("id").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join(" "),
-        project_mode: project.mode.clone(),
+        has_remote_execution: env.git_commit_sha.is_some(),
     }
     .render()
     .map_err(|e| UiError(AppError::Internal(e.to_string())))
@@ -674,7 +674,7 @@ async fn render_tests_tab(
         tests,
         project_id: project.project_id.clone(),
         environment_slug: env.slug.clone(),
-        project_mode: project.mode.clone(),
+        has_remote_execution: env.git_commit_sha.is_some(),
         all_test_selector,
         test_count,
     }

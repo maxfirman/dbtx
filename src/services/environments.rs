@@ -32,12 +32,6 @@ impl<'a> EnvironmentService<'a> {
 
     pub async fn create_draft(&self, project: String) -> AppResult<EnvironmentDraftRecord> {
         let project = self.db.get_project_by_project_id(&project).await?;
-        if project.mode != "remote" {
-            return Err(AppError::RemoteExecutionRequiresRemoteProject(
-                project.project_id,
-                project.mode,
-            ));
-        }
         self.db
             .create_environment_draft(CreateEnvironmentDraftInput {
                 project_id: project.id,
@@ -78,9 +72,7 @@ impl<'a> EnvironmentService<'a> {
         let invocation_id = Uuid::new_v4();
         let draft = self.db.mark_environment_draft_loading_git(draft_id).await?;
         let project = self.db.get_project_by_id(draft.project_id).await?;
-        let repo_url = project.git_repo_url.ok_or_else(|| {
-            AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone())
-        })?;
+        let repo_url = project.git_repo_url.clone();
         Ok(EnvironmentDraftCreatePrepared {
             draft,
             invocation_id,
@@ -101,9 +93,7 @@ impl<'a> EnvironmentService<'a> {
         let invocation_id = Uuid::new_v4();
         let draft = self.db.mark_environment_draft_loading_git(draft.id).await?;
         let project = self.db.get_project_by_id(draft.project_id).await?;
-        let repo_url = project.git_repo_url.ok_or_else(|| {
-            AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone())
-        })?;
+        let repo_url = project.git_repo_url.clone();
         Ok(EnvironmentDraftCreatePrepared {
             draft: draft.clone(),
             invocation_id,
@@ -132,12 +122,8 @@ impl<'a> EnvironmentService<'a> {
         let invocation_id = Uuid::new_v4();
         let draft = self.db.mark_environment_draft_validating(draft.id).await?;
         let project = self.db.get_project_by_id(draft.project_id).await?;
-        let repo_url = project.git_repo_url.ok_or_else(|| {
-            AppError::RemoteExecutionRequiresGitRepoUrl(project.project_id.clone())
-        })?;
-        let project_root = project.project_root.ok_or_else(|| {
-            AppError::RemoteExecutionRequiresProjectRoot(project.project_id.clone())
-        })?;
+        let repo_url = project.git_repo_url.clone();
+        let project_root = project.project_root.clone();
         let profile_record = EnvironmentProfileRecord {
             adapter_type: draft.adapter_type.clone().ok_or_else(|| {
                 AppError::InvalidProfileConfig("adapter type is required".to_string())
@@ -180,12 +166,6 @@ impl<'a> EnvironmentService<'a> {
         request: EnvironmentReleaseRequest,
     ) -> AppResult<EnvironmentRecord> {
         let project = self.db.get_project_by_project_id(&request.project).await?;
-        if project.mode != "remote" {
-            return Err(AppError::RemoteExecutionRequiresRemoteProject(
-                project.project_id,
-                project.mode,
-            ));
-        }
         let git_commit_sha = request.git_commit_sha.ok_or_else(|| {
             AppError::InvalidReleaseTarget(
                 "public release API requires git_commit_sha; use worker-validated release flow to resolve refs"
@@ -206,15 +186,8 @@ impl<'a> EnvironmentService<'a> {
         &self,
         request: EnvironmentRollbackRequest,
     ) -> AppResult<EnvironmentRecord> {
-        let project = self.db.get_project_by_project_id(&request.project).await?;
-        if project.mode != "remote" {
-            return Err(AppError::RemoteExecutionRequiresRemoteProject(
-                project.project_id,
-                project.mode,
-            ));
-        }
         self.db
-            .rollback_environment_to_version(&project.project_id, &request.slug, request.version_id)
+            .rollback_environment_to_version(&request.project, &request.slug, request.version_id)
             .await
     }
 

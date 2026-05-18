@@ -4,45 +4,42 @@ use super::*;
 
 impl Db {
     pub async fn create_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
-        validate_project_input(&input.mode, input.project_root.as_deref())?;
+        validate_project_root(&input.project_root)?;
         let row = sqlx::query(
             r#"
-            INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root)
-            VALUES ($1, $2, $3, $4, COALESCE($5, 'main'), $6)
-            RETURNING id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata
+            INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root)
+            VALUES ($1, $2, $3, COALESCE($4, 'main'), $5)
+            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
-        .bind(&input.mode)
-        .bind(input.git_repo_url.as_deref())
+        .bind(&input.git_repo_url)
         .bind(input.default_branch.as_deref())
-        .bind(input.project_root.as_deref())
+        .bind(&input.project_root)
         .fetch_one(&self.pool)
         .await?;
         Ok(project_record_from_row(&row))
     }
 
     pub async fn update_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
-        validate_project_input(&input.mode, input.project_root.as_deref())?;
+        validate_project_root(&input.project_root)?;
         let row = sqlx::query(
             r#"
             UPDATE projects
             SET project_name = $2,
-                mode = $3,
-                git_repo_url = $4,
-                default_branch = COALESCE($5, 'main'),
-                project_root = $6
+                git_repo_url = $3,
+                default_branch = COALESCE($4, 'main'),
+                project_root = $5
             WHERE project_id = $1
-            RETURNING id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata
+            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
-        .bind(&input.mode)
-        .bind(input.git_repo_url.as_deref())
+        .bind(&input.git_repo_url)
         .bind(input.default_branch.as_deref())
-        .bind(input.project_root.as_deref())
+        .bind(&input.project_root)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::ProjectIdNotFound(input.project_id.clone()))?;
@@ -50,26 +47,24 @@ impl Db {
     }
 
     pub async fn upsert_project(&self, input: CreateProjectInput) -> AppResult<ProjectRecord> {
-        validate_project_input(&input.mode, input.project_root.as_deref())?;
+        validate_project_root(&input.project_root)?;
         let row = sqlx::query(
             r#"
-            INSERT INTO projects (project_id, project_name, mode, git_repo_url, default_branch, project_root)
-            VALUES ($1, $2, $3, $4, COALESCE($5, 'main'), $6)
+            INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root)
+            VALUES ($1, $2, $3, COALESCE($4, 'main'), $5)
             ON CONFLICT (project_id) DO UPDATE
             SET project_name = EXCLUDED.project_name,
-                mode = EXCLUDED.mode,
                 git_repo_url = EXCLUDED.git_repo_url,
                 default_branch = EXCLUDED.default_branch,
                 project_root = EXCLUDED.project_root
-            RETURNING id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata
+            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(&input.project_id)
         .bind(&input.project_name)
-        .bind(&input.mode)
-        .bind(input.git_repo_url.as_deref())
+        .bind(&input.git_repo_url)
         .bind(input.default_branch.as_deref())
-        .bind(input.project_root.as_deref())
+        .bind(&input.project_root)
         .fetch_one(&self.pool)
         .await?;
         Ok(project_record_from_row(&row))
@@ -80,7 +75,7 @@ impl Db {
         existing_project_id: &str,
         input: CreateProjectInput,
     ) -> AppResult<ProjectRecord> {
-        validate_project_input(&input.mode, input.project_root.as_deref())?;
+        validate_project_root(&input.project_root)?;
         let mut tx = self.pool.begin().await?;
         let existing_row = sqlx::query("SELECT id FROM projects WHERE project_id = $1")
             .bind(existing_project_id)
@@ -108,21 +103,19 @@ impl Db {
             UPDATE projects
             SET project_id = $2,
                 project_name = $3,
-                mode = $4,
-                git_repo_url = $5,
-                default_branch = COALESCE($6, 'main'),
-                project_root = $7
+                git_repo_url = $4,
+                default_branch = COALESCE($5, 'main'),
+                project_root = $6
             WHERE id = $1
-            RETURNING id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata
+            RETURNING id, project_id, project_name, git_repo_url, default_branch, project_root, metadata
             "#,
         )
         .bind(project_pk)
         .bind(&input.project_id)
         .bind(&input.project_name)
-        .bind(&input.mode)
-        .bind(input.git_repo_url.as_deref())
+        .bind(&input.git_repo_url)
         .bind(input.default_branch.as_deref())
-        .bind(input.project_root.as_deref())
+        .bind(&input.project_root)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -132,7 +125,7 @@ impl Db {
 
     pub async fn list_projects(&self) -> AppResult<Vec<ProjectRecord>> {
         let rows = sqlx::query(
-            "SELECT id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata FROM projects ORDER BY project_name",
+            "SELECT id, project_id, project_name, git_repo_url, default_branch, project_root, metadata FROM projects ORDER BY project_name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -465,17 +458,16 @@ impl Db {
         self.upsert_project(CreateProjectInput {
             project_id,
             project_name,
-            mode: "remote".to_string(),
-            git_repo_url: Some(draft.git_repo_url),
+            git_repo_url: draft.git_repo_url,
             default_branch: Some(default_branch),
-            project_root: Some(draft.project_root),
+            project_root: draft.project_root,
         })
         .await
     }
 
     pub async fn get_project_by_project_id(&self, project_id: &str) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
-            "SELECT id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1",
+            "SELECT id, project_id, project_name, git_repo_url, default_branch, project_root, metadata FROM projects WHERE project_id = $1",
         )
         .bind(project_id)
         .fetch_optional(&self.pool)
@@ -490,7 +482,7 @@ impl Db {
         project_root: &str,
     ) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
-            "SELECT id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata FROM projects WHERE git_repo_url = $1 AND project_root = $2",
+            "SELECT id, project_id, project_name, git_repo_url, default_branch, project_root, metadata FROM projects WHERE git_repo_url = $1 AND project_root = $2",
         )
         .bind(git_repo_url)
         .bind(project_root)
@@ -502,7 +494,7 @@ impl Db {
 
     pub async fn get_project_by_id(&self, id: i64) -> AppResult<ProjectRecord> {
         let row = sqlx::query(
-            "SELECT id, project_id, project_name, mode, git_repo_url, default_branch, project_root, metadata FROM projects WHERE id = $1",
+            "SELECT id, project_id, project_name, git_repo_url, default_branch, project_root, metadata FROM projects WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)

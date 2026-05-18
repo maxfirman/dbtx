@@ -601,7 +601,6 @@ impl IntoResponse for ApiError {
             AppError::ProjectIdMissing
             | AppError::RemoteExecutionRequiresProjectId
             | AppError::RemoteExecutionRequiresEnvironmentSlug
-            | AppError::RemoteExecutionRequiresRemoteProject(_, _)
             | AppError::RemoteExecutionRequiresGitRepoUrl(_)
             | AppError::RemoteExecutionRequiresProjectRoot(_)
             | AppError::RemoteExecutionRequiresCommitSha(_, _)
@@ -609,7 +608,6 @@ impl IntoResponse for ApiError {
             | AppError::UserStateNotAllowed
             | AppError::UserTargetNotAllowed
             | AppError::UserProfilesDirNotAllowed
-            | AppError::InvalidProjectMode(_)
             | AppError::InvalidEnvironmentStatus(_)
             | AppError::InvalidReleaseTarget(_)
             | AppError::RemoteProjectEnvironmentRequiresSha(_, _)
@@ -770,9 +768,6 @@ mod tests {
         use axum::response::IntoResponse;
 
         let resp = ApiError(AppError::UserStateNotAllowed).into_response();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-        let resp = ApiError(AppError::InvalidProjectMode("bad".to_string())).into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 

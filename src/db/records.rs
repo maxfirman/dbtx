@@ -246,10 +246,9 @@ pub struct ProjectRecord {
     pub id: i64,
     pub project_id: String,
     pub project_name: String,
-    pub mode: String,
-    pub git_repo_url: Option<String>,
+    pub git_repo_url: String,
     pub default_branch: Option<String>,
-    pub project_root: Option<String>,
+    pub project_root: String,
     pub metadata: Value,
 }
 
@@ -428,10 +427,9 @@ pub struct EnvironmentActiveResourceRecord {
 pub struct CreateProjectInput {
     pub project_id: String,
     pub project_name: String,
-    pub mode: String,
-    pub git_repo_url: Option<String>,
+    pub git_repo_url: String,
     pub default_branch: Option<String>,
-    pub project_root: Option<String>,
+    pub project_root: String,
 }
 
 #[derive(Debug, Clone)]

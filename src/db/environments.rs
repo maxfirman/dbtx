@@ -262,7 +262,7 @@ impl Db {
         &self,
     ) -> AppResult<Vec<EnvironmentRecord>> {
         let query = environment_query(
-            "WHERE p.mode = 'remote' AND e.auto_reconcile = TRUE AND e.status = 'active' ORDER BY p.project_id ASC, e.slug ASC",
+            "WHERE e.git_commit_sha IS NOT NULL AND e.auto_reconcile = TRUE AND e.status = 'active' ORDER BY p.project_id ASC, e.slug ASC",
         );
         let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
         rows.iter().map(environment_record_from_row).collect()

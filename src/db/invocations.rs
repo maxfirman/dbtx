@@ -404,12 +404,11 @@ impl Db {
             r#"
             SELECT DISTINCT
                 CASE
-                    WHEN p.mode = 'remote' THEN 'server'
+                    WHEN e.git_commit_sha IS NOT NULL THEN 'server'
                     ELSE 'local'
                 END AS execution_mode,
                 e.worker_queue
             FROM environments e
-            JOIN projects p ON p.id = e.project_id
             ORDER BY execution_mode ASC, e.worker_queue ASC
             "#,
         )

@@ -139,22 +139,8 @@ fn is_promotable_status(status: &str) -> bool {
     NodeExecutionStatus::parse(status).is_some_and(|s| s.is_promotable())
 }
 
-fn validate_project_mode(mode: &str) -> AppResult<()> {
-    if matches!(mode, "local" | "remote") {
-        Ok(())
-    } else {
-        Err(AppError::InvalidProjectMode(mode.to_string()))
-    }
-}
-
-fn validate_project_input(mode: &str, project_root: Option<&str>) -> AppResult<()> {
-    validate_project_mode(mode)?;
-    if mode == "remote" {
-        let project_root =
-            project_root.ok_or_else(|| AppError::InvalidRemoteProjectRoot(String::new()))?;
-        validate_remote_project_root_value(project_root)?;
-    }
-    Ok(())
+fn validate_project_root(project_root: &str) -> AppResult<()> {
+    validate_remote_project_root_value(project_root)
 }
 
 fn validate_remote_project_root_value(project_root: &str) -> AppResult<()> {
@@ -174,7 +160,7 @@ pub(crate) fn validate_remote_project_root(project_root: &str) -> AppResult<()> 
     validate_remote_project_root_value(project_root)
 }
 
-pub(crate) fn remote_project_id(repo_url: &str, project_root: &str, project_name: &str) -> String {
+pub fn remote_project_id(repo_url: &str, project_root: &str, project_name: &str) -> String {
     let digest = md5::compute(format!(
         "{}\u{1f}{}\u{1f}{}",
         repo_url.trim(),
@@ -190,10 +176,6 @@ fn validate_environment_git_metadata(
     environment_slug: &str,
     git_commit_sha: Option<&str>,
 ) -> AppResult<()> {
-    validate_project_mode(&project.mode)?;
-    if project.mode != "remote" {
-        return Ok(());
-    }
     let git_commit_sha = git_commit_sha.ok_or_else(|| {
         AppError::RemoteProjectEnvironmentRequiresSha(
             project.project_id.clone(),
@@ -228,7 +210,6 @@ fn project_record_from_row(row: &sqlx::postgres::PgRow) -> ProjectRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
         project_name: row.get("project_name"),
-        mode: row.get("mode"),
         git_repo_url: row.get("git_repo_url"),
         default_branch: row.get("default_branch"),
         project_root: row.get("project_root"),
@@ -639,10 +620,9 @@ mod tests {
             id: 1,
             project_id: "prj_remote_example".to_string(),
             project_name: "example".to_string(),
-            mode: "remote".to_string(),
-            git_repo_url: Some("git@github.com:example/repo.git".to_string()),
+            git_repo_url: "git@github.com:example/repo.git".to_string(),
             default_branch: Some("main".to_string()),
-            project_root: Some(".".to_string()),
+            project_root: ".".to_string(),
             metadata: json!({}),
         }
     }
@@ -822,34 +802,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_project_mode_accepts_local_and_remote() {
-        use super::validate_project_mode;
-        assert!(validate_project_mode("local").is_ok());
-        assert!(validate_project_mode("remote").is_ok());
-    }
-
-    #[test]
-    fn validate_project_mode_rejects_unknown() {
-        use super::validate_project_mode;
-        assert!(matches!(
-            validate_project_mode("hybrid"),
-            Err(AppError::InvalidProjectMode(m)) if m == "hybrid"
-        ));
-    }
-
-    #[test]
-    fn validate_project_input_requires_project_root_for_remote() {
-        use super::validate_project_input;
-        assert!(validate_project_input("remote", None).is_err());
-        assert!(validate_project_input("remote", Some(".")).is_ok());
-        assert!(validate_project_input("local", None).is_ok());
-    }
-
-    #[test]
-    fn validate_project_input_rejects_absolute_remote_root() {
-        use super::validate_project_input;
-        assert!(validate_project_input("remote", Some("/tmp/proj")).is_err());
-        assert!(validate_project_input("remote", Some("../proj")).is_err());
+    fn validate_project_root_rejects_absolute_path() {
+        use super::validate_project_root;
+        assert!(validate_project_root("/tmp/proj").is_err());
+        assert!(validate_project_root("../proj").is_err());
+        assert!(validate_project_root(".").is_ok());
+        assert!(validate_project_root("analytics").is_ok());
     }
 
     #[test]
@@ -871,14 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_environment_git_metadata_skips_local_projects() {
-        let mut project = remote_project();
-        project.mode = "local".to_string();
-        assert!(validate_environment_git_metadata(&project, "dev", None).is_ok());
-    }
-
-    #[test]
-    fn validate_environment_git_metadata_requires_sha_for_remote() {
+    fn validate_environment_git_metadata_requires_sha() {
         let project = remote_project();
         assert!(validate_environment_git_metadata(&project, "dev", None).is_err());
         assert!(validate_environment_git_metadata(&project, "dev", Some("deadbeef")).is_ok());

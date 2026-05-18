@@ -17,7 +17,7 @@
       <h1 class="text-3xl font-semibold tracking-tight">{{ model_name }}</h1>
       <p class="mt-1 font-mono text-sm text-slate-500">{{ unique_id }}</p>
     </div>
-    {% if project_mode == "remote" && resource_type != "source" %}
+    {% if has_remote_execution && resource_type != "source" %}
     <div class="relative" x-data="{ open: false, loading: false }">
       <div class="flex">
         <button

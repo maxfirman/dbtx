@@ -174,7 +174,7 @@ async fn project_crud() {
 
     // Seed a project directly
     sqlx::query(
-        "INSERT INTO projects (project_id, project_name, mode, git_repo_url, project_root, metadata) VALUES ($1, $2, 'remote', 'https://example.com/repo.git', '.', '{}'::jsonb)"
+        "INSERT INTO projects (project_id, project_name, git_repo_url, project_root, metadata) VALUES ($1, $2, 'https://example.com/repo.git', '.', '{}'::jsonb)"
     )
     .bind("prj_test_1")
     .bind("test_project")
@@ -340,7 +340,7 @@ async fn post_form(app: &axum::Router, path: &str, form: &str) -> (StatusCode, S
 
 /// Seed a project + environment + invocation for UI tests
 async fn seed_ui_test_data(pool: &PgPool) {
-    sqlx::query("INSERT INTO projects (project_id, project_name, mode, git_repo_url, project_root, metadata) VALUES ('prj_ui', 'ui_project', 'remote', 'https://example.com/repo.git', '.', '{}'::jsonb)")
+    sqlx::query("INSERT INTO projects (project_id, project_name, git_repo_url, project_root, metadata) VALUES ('prj_ui', 'ui_project', 'https://example.com/repo.git', '.', '{}'::jsonb)")
         .execute(pool).await.unwrap();
     sqlx::query("INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, git_branch, git_commit_sha, use_latest_commit, auto_reconcile, immutable, profile_config, profile_secrets, metadata) VALUES (1, 'prod', 'ui_project', 'prod', 'duckdb', 'generic', 'main', 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', true, true, false, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)")
         .execute(pool).await.unwrap();
@@ -1262,7 +1262,7 @@ async fn manifest_backfill_populates_sources_in_current_node_state() {
 
 /// Helper: create a local invocation, claim it, return (invocation_id, worker_id, lease_token, worker_queue).
 async fn seed_local_project(pool: &sqlx::PgPool) {
-    sqlx::query("INSERT INTO projects (project_id, project_name, mode, metadata) VALUES ('prj_local_1', 'demo', 'local', '{}'::jsonb) ON CONFLICT DO NOTHING").execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO projects (project_id, project_name, metadata) VALUES ('prj_local_1', 'demo', '{}'::jsonb) ON CONFLICT DO NOTHING").execute(pool).await.unwrap();
     sqlx::query("INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, profile_config, profile_secrets, metadata) VALUES (1, 'dev', 'demo', 'dev', 'duckdb', 'generic', 'main', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb) ON CONFLICT DO NOTHING").execute(pool).await.unwrap();
 }
 
@@ -1727,7 +1727,7 @@ async fn reconcile_nonexistent_environment_returns_error() {
 async fn project_resolve_returns_project_by_repo_url() {
     let (app, pool) = test_app().await;
     sqlx::query(
-        "INSERT INTO projects (project_id, project_name, mode, git_repo_url, project_root, metadata) VALUES ('prj_remote_abc', 'analytics', 'remote', 'git@github.com:org/repo.git', 'analytics', '{}'::jsonb)"
+        "INSERT INTO projects (project_id, project_name, git_repo_url, project_root, metadata) VALUES ('prj_remote_abc', 'analytics', 'git@github.com:org/repo.git', 'analytics', '{}'::jsonb)"
     ).execute(&pool).await.unwrap();
 
     let (status, body) = get_json(
@@ -1758,7 +1758,7 @@ async fn project_resolve_returns_404_for_unknown_repo() {
 async fn local_environment_upsert_creates_and_returns_environment() {
     let (app, pool) = test_app().await;
     sqlx::query(
-        "INSERT INTO projects (project_id, project_name, mode, git_repo_url, project_root, metadata) VALUES ('prj_remote_xyz', 'demo', 'remote', 'https://example.com/repo.git', '.', '{}'::jsonb)"
+        "INSERT INTO projects (project_id, project_name, git_repo_url, project_root, metadata) VALUES ('prj_remote_xyz', 'demo', 'https://example.com/repo.git', '.', '{}'::jsonb)"
     ).execute(&pool).await.unwrap();
 
     let (status, body) = post_json(

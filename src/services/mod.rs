@@ -9,7 +9,7 @@ use crate::db::{
     UpdateEnvironmentDraftInput,
 };
 use crate::dbt_utils::{
-    append_invocation_id, build_generated_profiles, git_repo_root, read_git_state,
+    append_invocation_id, build_generated_profiles, read_git_state,
 };
 use crate::error::{AppError, AppResult};
 use crate::execution::ExecutionMode;
@@ -18,7 +18,6 @@ use crate::profile::{
     EnvironmentProfileRecord, resolve_runtime_profile, validate_environment_profile,
 };
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Component;
@@ -288,16 +287,6 @@ struct ReleaseTargetRequest {
     git_ref: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct InferredProjectInput {
-    pub project_id: String,
-    pub project_name: String,
-    pub mode: String,
-    pub git_repo_url: Option<String>,
-    pub default_branch: Option<String>,
-    pub project_root: Option<String>,
-}
-
 mod environments;
 mod invocations;
 mod planning;
@@ -314,61 +303,6 @@ pub use invocations::{
     target_manifest_input_fingerprint,
 };
 pub use projects::ProjectService;
-
-pub fn infer_local_project_defaults(
-    current_dir: &Path,
-    git_repo_url: Option<&str>,
-    project_root: Option<&str>,
-    default_branch: Option<&str>,
-) -> AppResult<InferredProjectInput> {
-    let project_name = read_dbt_project_name_from_root(current_dir)?;
-    let canonical_project_dir = current_dir.canonicalize()?;
-    let identity_hash = infer_local_identity_hash(current_dir, &project_name)?;
-    let project_id = format!("prj_local_{identity_hash}");
-    let git_state = read_git_state(current_dir);
-
-    Ok(InferredProjectInput {
-        project_id,
-        project_name,
-        mode: "local".to_string(),
-        git_repo_url: git_repo_url.map(ToString::to_string).or(git_state.repo_url),
-        default_branch: default_branch.map(ToString::to_string),
-        project_root: project_root
-            .map(ToString::to_string)
-            .or_else(|| Some(canonical_project_dir.display().to_string())),
-    })
-}
-
-pub fn infer_remote_project_defaults(
-    current_dir: &Path,
-    git_repo_url: Option<&str>,
-    project_root: Option<&str>,
-    default_branch: Option<&str>,
-) -> AppResult<InferredProjectInput> {
-    let project_name = read_dbt_project_name_from_root(current_dir)?;
-    let canonical_project_dir = current_dir.canonicalize()?;
-    let git_state = read_git_state(current_dir);
-    let repo_url = git_repo_url
-        .map(ToString::to_string)
-        .or(git_state.repo_url)
-        .ok_or(AppError::RemoteProjectRequiresGitRepo)?;
-    let repo_root =
-        git_repo_root(current_dir).map_err(|_| AppError::RemoteProjectRequiresGitRepo)?;
-    let inferred_project_root = project_root
-        .map(ToString::to_string)
-        .unwrap_or_else(|| relative_project_root(&repo_root, &canonical_project_dir));
-    validate_remote_project_root(&inferred_project_root)?;
-    let project_id = crate::db::remote_project_id(&repo_url, &inferred_project_root, &project_name);
-
-    Ok(InferredProjectInput {
-        project_id,
-        project_name,
-        mode: "remote".to_string(),
-        git_repo_url: Some(repo_url),
-        default_branch: default_branch.map(ToString::to_string),
-        project_root: Some(inferred_project_root),
-    })
-}
 
 pub fn read_dbt_project_name_from_root(project_root: &Path) -> AppResult<String> {
     let yaml = read_dbt_project_yaml(project_root)?;
@@ -519,20 +453,6 @@ fn validation_worker_queue_from_env(value: Option<&str>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("generic")
         .to_string()
-}
-
-fn infer_local_identity_hash(current_dir: &Path, project_name: &str) -> AppResult<String> {
-    let canonical_project_dir = current_dir.canonicalize()?;
-    let machine_scope = local_machine_scope()?;
-    Ok(short_hash(&format!(
-        "{machine_scope}\n{}\n{project_name}",
-        canonical_project_dir.display()
-    )))
-}
-
-fn short_hash(input: &str) -> String {
-    let digest = Sha256::digest(input.as_bytes());
-    format!("{digest:x}").chars().take(20).collect()
 }
 
 #[cfg(test)]

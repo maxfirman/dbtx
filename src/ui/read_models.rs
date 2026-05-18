@@ -60,7 +60,7 @@ pub(super) async fn load_environment_panel(
             .collect(),
         plans: plan_views,
         versions: history.iter().map(environment_version_view).collect(),
-        is_remote: project.mode == "remote",
+        is_remote: true,
         panel_url: format!("/ui/projects/{project_id}/environments/{slug}/panel"),
         reconcile_url: format!("/ui/projects/{project_id}/environments/{slug}/reconcile"),
         pause_url: format!("/ui/projects/{project_id}/environments/{slug}/pause"),

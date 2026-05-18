@@ -2,7 +2,7 @@
 <div class="py-12 text-center text-sm text-slate-500">No tests associated with this model.</div>
 {% else %}
 <div class="space-y-4">
-  {% if project_mode == "remote" %}
+  {% if has_remote_execution %}
   <div class="flex justify-end">
     <button
       type="button"
@@ -34,7 +34,7 @@
           <td class="px-5 py-3 text-slate-600">{{ test.finished_at }}</td>
           <td class="px-5 py-3 text-right">
             <div class="flex items-center justify-end gap-2">
-              {% if project_mode == "remote" %}
+              {% if has_remote_execution %}
               <button
                 type="button"
                 x-data="{ loading: false }"

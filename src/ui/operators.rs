@@ -88,12 +88,12 @@ pub(super) async fn configured_queue_keys(db: &crate::db::Db) -> Result<HashSet<
     let projects = db.list_projects().await?;
     let mut keys = HashSet::new();
     for project in projects {
-        let execution_mode = if project.mode == "remote" {
-            "server"
-        } else {
-            "local"
-        };
         for environment in db.list_environments(&project.project_id).await? {
+            let execution_mode = if environment.git_commit_sha.is_some() {
+                "server"
+            } else {
+                "local"
+            };
             keys.insert(queue_key(execution_mode, &environment.worker_queue));
         }
     }

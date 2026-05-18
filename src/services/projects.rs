@@ -46,24 +46,13 @@ impl<'a> ProjectService<'a> {
 
     pub async fn update(&self, request: ProjectUpdateRequest) -> AppResult<ProjectRecord> {
         let existing = self.db.get_project_by_project_id(&request.project).await?;
-        if existing.mode != "remote" {
-            return Err(AppError::RemoteExecutionRequiresRemoteProject(
-                existing.project_id.clone(),
-                existing.mode,
-            ));
-        }
-        let git_repo_url = request.git_repo_url.or(existing.git_repo_url.clone());
-        let project_root = request.project_root.or(existing.project_root.clone());
-        validate_remote_project_root(
-            project_root
-                .as_deref()
-                .ok_or_else(|| AppError::InvalidRemoteProjectRoot(String::new()))?,
-        )?;
+        let git_repo_url = request.git_repo_url.unwrap_or(existing.git_repo_url.clone());
+        let project_root = request.project_root.unwrap_or(existing.project_root.clone());
+        validate_remote_project_root(&project_root)?;
         self.db
             .update_project(CreateProjectInput {
                 project_id: existing.project_id.clone(),
                 project_name: existing.project_name,
-                mode: "remote".to_string(),
                 git_repo_url,
                 default_branch: existing.default_branch,
                 project_root,

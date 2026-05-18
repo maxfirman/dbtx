@@ -334,7 +334,6 @@ fn environment_draft_update_request(
 struct ProjectSummaryView {
     project_id: String,
     project_name: String,
-    mode: String,
     git_repo_url: String,
     project_root: String,
     delete_url: String,
@@ -998,7 +997,7 @@ struct ModelDetailTemplate {
     model_name: String,
     unique_id: String,
     resource_type: String,
-    project_mode: String,
+    has_remote_execution: bool,
     tabs: Vec<ModelTabView>,
     tab_content_html: String,
 }
@@ -1049,7 +1048,7 @@ struct ModelLineageTemplate {
     project_id: String,
     environment_slug: String,
     model_selector: String,
-    project_mode: String,
+    has_remote_execution: bool,
 }
 
 #[derive(Template)]
@@ -1058,7 +1057,7 @@ struct ModelTestsTemplate {
     tests: Vec<ModelTestView>,
     project_id: String,
     environment_slug: String,
-    project_mode: String,
+    has_remote_execution: bool,
     all_test_selector: String,
     test_count: usize,
 }
@@ -1151,9 +1150,8 @@ fn project_summary_view(project: &ProjectRecord) -> ProjectSummaryView {
     ProjectSummaryView {
         project_id: project.project_id.clone(),
         project_name: project.project_name.clone(),
-        mode: project.mode.clone(),
-        git_repo_url: project.git_repo_url.clone().unwrap_or_default(),
-        project_root: project.project_root.clone().unwrap_or_default(),
+        git_repo_url: project.git_repo_url.clone(),
+        project_root: project.project_root.clone(),
         delete_url: format!("/ui/projects/{}/delete", project.project_id),
         create_environment_url: format!("/ui/projects/{}/environments/new", project.project_id),
     }
@@ -2242,7 +2240,6 @@ mod tests {
             project: ProjectSummaryView {
                 project_id: "prj_123".to_string(),
                 project_name: "analytics".to_string(),
-                mode: "remote".to_string(),
                 git_repo_url: "https://example.com/repo.git".to_string(),
                 project_root: ".".to_string(),
                 delete_url: "/ui/projects/prj_123/delete".to_string(),

@@ -227,14 +227,13 @@ pub fn print_release_failure(project: &str, slug: &str, error: &str) {
 
 pub fn print_project(project: &ProjectRecord) {
     println!(
-        "project id={} project_id={} project_name={} mode={} git_repo_url={} default_branch={} project_root={} metadata={}",
+        "project id={} project_id={} project_name={} git_repo_url={} default_branch={} project_root={} metadata={}",
         project.id,
         project.project_id,
         project.project_name,
-        project.mode,
-        project.git_repo_url.as_deref().unwrap_or(""),
+        project.git_repo_url,
         project.default_branch.as_deref().unwrap_or(""),
-        project.project_root.as_deref().unwrap_or(""),
+        project.project_root,
         project.metadata,
     );
 }

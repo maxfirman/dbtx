@@ -24,7 +24,7 @@
         </select>
       </div>
     </form>
-    {% if project_mode == "remote" && node_count > 0 %}
+    {% if has_remote_execution && node_count > 0 %}
     <div class="relative" x-data="{ open: false, loading: false }">
       <div class="flex">
         <button
