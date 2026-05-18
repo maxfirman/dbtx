@@ -6,36 +6,6 @@ pub struct InvocationService<'a> {
     db: &'a Db,
 }
 
-pub fn target_manifest_input_fingerprint(target_git_commit_sha: &str) -> String {
-    format!("target_manifest:{target_git_commit_sha}")
-}
-
-pub fn code_change_input_fingerprint_for_baseline(
-    desired_commit_sha: &str,
-    baseline_run_id: Option<Uuid>,
-) -> String {
-    match baseline_run_id {
-        Some(baseline_run_id) => code_change_input_fingerprint(desired_commit_sha, baseline_run_id),
-        None => format!("code_change:{desired_commit_sha}:initial"),
-    }
-}
-
-pub fn code_change_input_fingerprint(desired_commit_sha: &str, baseline_run_id: Uuid) -> String {
-    format!("code_change:{desired_commit_sha}:{baseline_run_id}")
-}
-
-pub fn source_state_change_input_fingerprint(source_event_ids: &[i64]) -> String {
-    let mut event_ids = source_event_ids.to_vec();
-    event_ids.sort_unstable();
-    event_ids.dedup();
-    let joined = event_ids
-        .into_iter()
-        .map(|id| id.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("source_state_change:{joined}")
-}
-
 impl<'a> InvocationService<'a> {
     pub fn new(db: &'a Db) -> Self {
         Self { db }
@@ -306,9 +276,6 @@ impl<'a> InvocationService<'a> {
 
 // --- Watermark manifest resolution ---
 
-/// Plan reason indicating the invocation was triggered by a source state change.
-const PLAN_REASON_SOURCE_STATE_CHANGE: &str = "source_state_change";
-
 /// Pre-fetched plan data used for watermark resolution.
 #[derive(Debug, Clone)]
 pub struct WatermarkPlanContext {
@@ -354,7 +321,7 @@ pub fn resolve_watermark_strategy(input: &WatermarkResolutionInput) -> Watermark
     }
 
     if let Some(plan) = &input.plan {
-        if plan.reason == PLAN_REASON_SOURCE_STATE_CHANGE {
+        if ReconcileReason::parse(&plan.reason) == Some(ReconcileReason::SourceStateChange) {
             return WatermarkResolution::Resolved(plan.baseline_run_id);
         }
         if let Some(run_id) = plan

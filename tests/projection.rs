@@ -17,8 +17,8 @@ use dbtx::execution::{ExecutionCompletion, ExecutionEvent, ExecutionEventKind};
 use dbtx::process_state::ProcessState;
 use dbtx::server::router;
 use dbtx::services::{
-    code_change_input_fingerprint,
-    source_state_change_input_fingerprint, target_manifest_input_fingerprint,
+    code_change_input_fingerprint, source_state_change_input_fingerprint,
+    target_manifest_input_fingerprint,
 };
 use sqlx::{PgPool, Row};
 use std::fs;
@@ -5824,15 +5824,26 @@ fn read_project_id_from_dbt_project(project_dir: &Path, _remote: bool) -> String
         .output()
         .expect("git remote get-url")
         .stdout;
-    let repo_url = String::from_utf8(repo_url).expect("utf8").trim().to_string();
+    let repo_url = String::from_utf8(repo_url)
+        .expect("utf8")
+        .trim()
+        .to_string();
     let repo_root_output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(project_dir)
         .output()
         .expect("git rev-parse --show-toplevel")
         .stdout;
-    let repo_root = PathBuf::from(String::from_utf8(repo_root_output).expect("utf8").trim().to_string());
-    let project_root = dbtx::services::relative_project_root(&repo_root, &project_dir.canonicalize().expect("canonicalize"));
+    let repo_root = PathBuf::from(
+        String::from_utf8(repo_root_output)
+            .expect("utf8")
+            .trim()
+            .to_string(),
+    );
+    let project_root = dbtx::services::relative_project_root(
+        &repo_root,
+        &project_dir.canonicalize().expect("canonicalize"),
+    );
     remote_project_id(&repo_url, &project_root, &project_name)
 }
 

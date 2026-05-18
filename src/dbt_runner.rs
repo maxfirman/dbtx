@@ -99,9 +99,7 @@ impl DbtChild {
 /// Provides heartbeat (cancel detection) and event streaming to the control plane.
 pub(crate) trait DbtExecutionSession {
     /// Send a heartbeat and return whether cancellation was requested.
-    fn heartbeat(
-        &self,
-    ) -> impl std::future::Future<Output = AppResult<bool>> + Send;
+    fn heartbeat(&self) -> impl std::future::Future<Output = AppResult<bool>> + Send;
 
     /// Send an execution event to the control plane.
     fn send_event(
@@ -276,8 +274,8 @@ fn emit_stream_output(config: &DbtExecutionConfig, stream: &str, line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Mock session for testing the execution loop without HTTP.
     struct MockSession {
@@ -327,7 +325,11 @@ mod tests {
         assert_eq!(result.child_result.exit_code, 0);
         assert!(!result.cancel_requested);
         let events = session.events.lock().await;
-        assert!(events.iter().any(|e| matches!(e.kind, ExecutionEventKind::StdoutLine)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.kind, ExecutionEventKind::StdoutLine))
+        );
     }
 
     #[tokio::test]
@@ -349,7 +351,11 @@ mod tests {
         let result = run_dbt_execution(child, &session, &config).await.unwrap();
         assert_eq!(result.child_result.exit_code, 0);
         let events = session.events.lock().await;
-        assert!(events.iter().any(|e| matches!(e.kind, ExecutionEventKind::StderrLine)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.kind, ExecutionEventKind::StderrLine))
+        );
     }
 
     #[tokio::test]

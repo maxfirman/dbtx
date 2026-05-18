@@ -2,10 +2,7 @@
 use crate::db::{EnvironmentRecord, PlanStatus, PreparationStatus, SourceStateEventRecord};
 use crate::error::{AppError, AppResult};
 use crate::process_state::ProcessState;
-use crate::services::{
-    EnvironmentService, code_change_input_fingerprint_for_baseline,
-    source_state_change_input_fingerprint, target_manifest_input_fingerprint,
-};
+use crate::services::{EnvironmentService, PreparationKind, ReconcileInputIdentity};
 use chrono::Utc;
 use std::time::Duration;
 use tracing::{error, info};
@@ -170,13 +167,13 @@ async fn automatic_reconcile_backoff_until(
     last_successful_commit_sha: Option<&str>,
     source_events: &[SourceStateEventRecord],
 ) -> AppResult<Option<chrono::DateTime<Utc>>> {
-    let current_code_change_fingerprint =
+    let current_code_change_identity =
         if environment.git_commit_sha.as_deref() != last_successful_commit_sha {
             environment
                 .git_commit_sha
                 .as_deref()
                 .map(|desired_commit_sha| {
-                    code_change_input_fingerprint_for_baseline(desired_commit_sha, baseline_run_id)
+                    ReconcileInputIdentity::code_change(desired_commit_sha, baseline_run_id)
                 })
         } else {
             None
@@ -185,12 +182,12 @@ async fn automatic_reconcile_backoff_until(
         .db()
         .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
         .await?
-        && preparation.kind == "target_manifest"
+        && preparation.kind == PreparationKind::TargetManifest.as_str()
         && preparation.status == PreparationStatus::Failed
         && preparation.input_fingerprint
-            == current_code_change_fingerprint
+            == current_code_change_identity
                 .as_ref()
-                .map(|fingerprint| target_manifest_input_fingerprint(fingerprint))
+                .map(ReconcileInputIdentity::target_manifest_preparation_fingerprint)
     {
         return Ok(preparation.next_attempt_at);
     }
@@ -204,18 +201,17 @@ async fn automatic_reconcile_backoff_until(
     let Some(plan) = latest_failed_plan else {
         return Ok(None);
     };
-    let should_apply = match plan.reason.as_str() {
-        "code_change" => plan.input_fingerprint == current_code_change_fingerprint,
-        "source_state_change" => {
+    let should_apply = match current_code_change_identity.as_ref() {
+        Some(identity) if identity.matches_plan(&plan) => true,
+        _ => {
             let current_event_ids = source_events
                 .iter()
                 .map(|event| event.id)
                 .collect::<Vec<_>>();
             !current_event_ids.is_empty()
-                && plan.input_fingerprint
-                    == Some(source_state_change_input_fingerprint(&current_event_ids))
+                && ReconcileInputIdentity::source_state_change(&current_event_ids)
+                    .matches_plan(&plan)
         }
-        _ => false,
     };
     Ok(if should_apply {
         plan.next_attempt_at

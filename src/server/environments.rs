@@ -51,7 +51,9 @@ pub(super) async fn environment_draft_create(
     let service = EnvironmentService::new(&state.db);
     let draft = service.create_draft(project_id).await?;
     let prepared = service.prepare_draft_git_metadata(draft.id).await?;
-    let invocation_id = state.start_environment_draft_prepare_invocation(prepared).await?;
+    let invocation_id = state
+        .start_environment_draft_prepare_invocation(prepared)
+        .await?;
     let draft = state.db.get_environment_draft(draft.id).await?;
     Ok(Json(EnvironmentDraftStartResponse {
         draft,
@@ -103,7 +105,9 @@ pub(super) async fn environment_draft_branch_refresh(
     let prepared = service
         .refresh_draft_branch(draft_id, environment_draft_update_request(request))
         .await?;
-    let invocation_id = state.start_environment_draft_prepare_invocation(prepared).await?;
+    let invocation_id = state
+        .start_environment_draft_prepare_invocation(prepared)
+        .await?;
     let draft = state.db.get_environment_draft(draft_id).await?;
     Ok(Json(EnvironmentDraftStartResponse {
         draft,
@@ -134,7 +138,9 @@ pub(super) async fn environment_draft_validate(
     let prepared = service
         .prepare_draft_validation(draft_id, environment_draft_update_request(request))
         .await?;
-    let invocation_id = state.start_environment_draft_validation_invocation(prepared).await?;
+    let invocation_id = state
+        .start_environment_draft_validation_invocation(prepared)
+        .await?;
     let draft = state.db.get_environment_draft(draft_id).await?;
     Ok(Json(EnvironmentDraftStartResponse {
         draft,
@@ -508,7 +514,9 @@ pub(super) async fn environment_reconcile(
     Path((project_id, slug)): Path<(String, String)>,
     Json(_request): Json<EnvironmentReconcileApiRequest>,
 ) -> Result<Json<EnvironmentRunPlanResponse>, ApiError> {
-    state.ensure_target_manifest_for_reconcile(&project_id, &slug).await?;
+    state
+        .ensure_target_manifest_for_reconcile(&project_id, &slug)
+        .await?;
     let service = EnvironmentService::new(&state.db);
     let plan = service.reconcile(project_id, slug).await?;
     Ok(Json(EnvironmentRunPlanResponse { plan }))

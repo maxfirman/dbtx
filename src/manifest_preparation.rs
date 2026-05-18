@@ -6,9 +6,7 @@
 use crate::api::InvocationCommandApi;
 use crate::db::{Db, EnvironmentRecord, PreparationStatus};
 use crate::error::{AppError, AppResult};
-use crate::services::{
-    InvocationService, code_change_input_fingerprint_for_baseline, target_manifest_input_fingerprint,
-};
+use crate::services::{InvocationService, PreparationKind, ReconcileInputIdentity};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -39,9 +37,8 @@ pub(crate) async fn ensure_manifest_preparation(
         .get_environment_actual_state(&environment.project_ref, &environment.slug)
         .await?
         .last_successful_run_id;
-    let input_fingerprint = target_manifest_input_fingerprint(
-        &code_change_input_fingerprint_for_baseline(&desired_commit_sha, baseline_run_id),
-    );
+    let identity = ReconcileInputIdentity::code_change(&desired_commit_sha, baseline_run_id);
+    let input_fingerprint = identity.target_manifest_preparation_fingerprint();
 
     // Already have a manifest for this commit
     if db
@@ -73,7 +70,7 @@ pub(crate) async fn ensure_manifest_preparation(
         .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
         .await?
         .filter(|preparation| {
-            preparation.kind == "target_manifest"
+            preparation.kind == PreparationKind::TargetManifest.as_str()
                 && preparation.input_fingerprint.as_deref() == Some(input_fingerprint.as_str())
                 && preparation.status == PreparationStatus::Failed
                 && preparation
@@ -89,15 +86,9 @@ pub(crate) async fn ensure_manifest_preparation(
     // Start a new manifest prepare invocation
     let invocation_id = Uuid::new_v4();
     let prepared = InvocationService::new(db)
-        .prepare_remote_manifest_capture(
-            invocation_id,
-            &environment.project_ref,
-            &environment.slug,
-        )
+        .prepare_remote_manifest_capture(invocation_id, &environment.project_ref, &environment.slug)
         .await?;
-    start_invocation
-        .start(invocation_id, prepared)
-        .await?;
+    start_invocation.start(invocation_id, prepared).await?;
     db.mark_manifest_prepare_running(
         environment.project_id,
         environment.id,

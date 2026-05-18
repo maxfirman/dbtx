@@ -60,9 +60,7 @@ pub struct ExecutionCompletion {
     pub result: Option<serde_json::Value>,
 }
 
-pub fn invocation_claim_deadline_at(
-    execution_mode: InvocationExecutionModeApi,
-) -> DateTime<Utc> {
+pub fn invocation_claim_deadline_at(execution_mode: InvocationExecutionModeApi) -> DateTime<Utc> {
     Utc::now()
         + chrono::Duration::from_std(claim_startup_timeout(execution_mode))
             .expect("timeout fits chrono duration")

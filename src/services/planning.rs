@@ -227,8 +227,7 @@ async fn derive_code_change_plan(
         .git_commit_sha
         .clone()
         .ok_or(AppError::ReconciliationRequiresCommitSha)?;
-    let input_fingerprint =
-        code_change_input_fingerprint_for_baseline(&desired_commit_sha, baseline_run_id);
+    let identity = ReconcileInputIdentity::code_change(&desired_commit_sha, baseline_run_id);
 
     if let Some(target_manifest_run_id) = db
         .latest_manifest_run_id_for_commit(
@@ -259,8 +258,8 @@ async fn derive_code_change_plan(
                 "state_modified_live_plus"
             };
             return Ok(EnvironmentPlanDraft {
-                reason: "code_change",
-                input_fingerprint,
+                reason: ReconcileReason::CodeChange.as_str(),
+                input_fingerprint: identity.fingerprint,
                 baseline_run_id: Some(baseline_run_id),
                 selection_spec: Some(selection_spec.to_string()),
                 selected_resources,
@@ -278,8 +277,8 @@ async fn derive_code_change_plan(
         }
 
         return Ok(EnvironmentPlanDraft {
-            reason: "code_change",
-            input_fingerprint,
+            reason: ReconcileReason::CodeChange.as_str(),
+            input_fingerprint: identity.fingerprint,
             baseline_run_id,
             selection_spec: Some("full_graph".to_string()),
             selected_resources: db
@@ -302,8 +301,8 @@ async fn derive_code_change_plan(
         return Err(AppError::ReconciliationRequiresBaseline);
     };
     Ok(EnvironmentPlanDraft {
-        reason: "code_change",
-        input_fingerprint,
+        reason: ReconcileReason::CodeChange.as_str(),
+        input_fingerprint: identity.fingerprint,
         baseline_run_id: Some(baseline_run_id),
         selection_spec: Some("full_graph".to_string()),
         selected_resources: db.list_manifest_node_unique_ids(baseline_run_id).await?,
@@ -331,11 +330,11 @@ async fn derive_source_state_change_plan(
         .map(|event| event.source_key.clone())
         .collect();
     let source_event_ids: Vec<i64> = source_events.iter().map(|event| event.id).collect();
-    let input_fingerprint = source_state_change_input_fingerprint(&source_event_ids);
+    let identity = ReconcileInputIdentity::source_state_change(&source_event_ids);
 
     Ok(EnvironmentPlanDraft {
-        reason: "source_state_change",
-        input_fingerprint,
+        reason: ReconcileReason::SourceStateChange.as_str(),
+        input_fingerprint: identity.fingerprint,
         baseline_run_id,
         selection_spec: Some("source_downstream_stale".to_string()),
         selected_resources: staleness
@@ -366,12 +365,14 @@ pub(super) async fn replan_pending_plan(
         return Ok(plan);
     };
 
-    match plan.reason.as_str() {
-        "code_change" => replan_code_change_plan(db, plan, baseline_run_id).await,
-        "source_state_change" => {
+    match ReconcileReason::parse(&plan.reason) {
+        Some(ReconcileReason::CodeChange) => {
+            replan_code_change_plan(db, plan, baseline_run_id).await
+        }
+        Some(ReconcileReason::SourceStateChange) => {
             replan_source_state_change_plan(db, db, plan, baseline_run_id).await
         }
-        _ => Ok(plan),
+        None => Ok(plan),
     }
 }
 

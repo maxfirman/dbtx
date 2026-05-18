@@ -906,15 +906,26 @@ impl RealProject {
             .output()
             .expect("git remote get-url")
             .stdout;
-        let repo_url = String::from_utf8(repo_url).expect("utf8").trim().to_string();
+        let repo_url = String::from_utf8(repo_url)
+            .expect("utf8")
+            .trim()
+            .to_string();
         let repo_root_output = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(self.path())
             .output()
             .expect("git rev-parse --show-toplevel")
             .stdout;
-        let repo_root = PathBuf::from(String::from_utf8(repo_root_output).expect("utf8").trim().to_string());
-        let project_root = dbtx::services::relative_project_root(&repo_root, &self.path().canonicalize().expect("canonicalize"));
+        let repo_root = PathBuf::from(
+            String::from_utf8(repo_root_output)
+                .expect("utf8")
+                .trim()
+                .to_string(),
+        );
+        let project_root = dbtx::services::relative_project_root(
+            &repo_root,
+            &self.path().canonicalize().expect("canonicalize"),
+        );
         remote_project_id(&repo_url, &project_root, &project_name)
     }
 

@@ -342,14 +342,14 @@ async fn run_validation_command(
         profiles_dir.as_os_str().to_os_string(),
     ];
     let dbt_path = crate::dbt_runner::dbt_path_from_env();
-    let dbt_child =
-        match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, &args, project_dir) {
-            Ok(child) => child,
-            Err(err) => {
-                report_setup_failure(client, claim, &err.to_string()).await?;
-                return Err(err);
-            }
-        };
+    let dbt_child = match crate::dbt_runner::DbtChild::spawn(&dbt_path, command, &args, project_dir)
+    {
+        Ok(child) => child,
+        Err(err) => {
+            report_setup_failure(client, claim, &err.to_string()).await?;
+            return Err(err);
+        }
+    };
     let session = WorkerInvocationSession::new(client, claim);
     let exec_config = crate::dbt_runner::DbtExecutionConfig {
         parse_dbt_logs: false,
@@ -357,7 +357,8 @@ async fn run_validation_command(
         invocation_id: claim.invocation_id,
         worker_id: claim.worker_id.clone(),
     };
-    let exec_result = crate::dbt_runner::run_dbt_execution(dbt_child, &session, &exec_config).await?;
+    let exec_result =
+        crate::dbt_runner::run_dbt_execution(dbt_child, &session, &exec_config).await?;
 
     if exec_result.cancel_requested {
         session.complete_canceled().await?;

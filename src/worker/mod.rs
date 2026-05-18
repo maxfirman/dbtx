@@ -134,7 +134,8 @@ pub async fn execute_claimed_invocation(
         invocation_id: claim.invocation_id,
         worker_id: claim.worker_id.clone(),
     };
-    let exec_result = crate::dbt_runner::run_dbt_execution(dbt_child, &session, &exec_config).await?;
+    let exec_result =
+        crate::dbt_runner::run_dbt_execution(dbt_child, &session, &exec_config).await?;
 
     let manifest = if persists_state(command_name) {
         let manifest_path = project_dir.join("target").join("manifest.json");

@@ -8,9 +8,7 @@ use crate::db::{
     ProjectRecord, RunStart, SourceStateEventCreateInput, SourceStateEventRecord,
     UpdateEnvironmentDraftInput,
 };
-use crate::dbt_utils::{
-    append_invocation_id, build_generated_profiles, read_git_state,
-};
+use crate::dbt_utils::{append_invocation_id, build_generated_profiles, read_git_state};
 use crate::error::{AppError, AppResult};
 use crate::execution::ExecutionMode;
 use crate::manifest::ReconstructedManifest;
@@ -26,7 +24,9 @@ use uuid::Uuid;
 
 const RECONCILE_LEASE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationCommand {
     Build,
@@ -276,17 +276,21 @@ mod invocations;
 mod planning;
 mod prepared_execution;
 mod projects;
+mod reconcile_identity;
 pub(crate) mod source_state;
 
 pub use environments::{EnvironmentPlanAdmitPrepared, EnvironmentService};
 pub use invocations::InvocationService;
 pub use invocations::{
-    WatermarkPlanContext, WatermarkResolution, WatermarkResolutionInput,
-    code_change_input_fingerprint, code_change_input_fingerprint_for_baseline,
-    is_watermarkable_command, resolve_watermark_strategy, source_state_change_input_fingerprint,
-    target_manifest_input_fingerprint,
+    WatermarkPlanContext, WatermarkResolution, WatermarkResolutionInput, is_watermarkable_command,
+    resolve_watermark_strategy,
 };
 pub use projects::ProjectService;
+pub use reconcile_identity::{
+    PreparationKind, ReconcileInputIdentity, ReconcileReason, code_change_input_fingerprint,
+    code_change_input_fingerprint_for_baseline, source_state_change_input_fingerprint,
+    target_manifest_input_fingerprint,
+};
 
 pub fn read_dbt_project_name_from_root(project_root: &Path) -> AppResult<String> {
     let yaml = read_dbt_project_yaml(project_root)?;
