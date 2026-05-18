@@ -1,5 +1,5 @@
 //! dbt log event parsing, normalization, and terminal rendering.
-use crate::db::NodeExecutionStatus;
+use crate::api::NodeExecutionStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

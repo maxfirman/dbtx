@@ -185,49 +185,7 @@ impl std::fmt::Display for PreparationStatus {
     }
 }
 
-/// Node execution status from dbt log events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeExecutionStatus {
-    Success,
-    Pass,
-    Created,
-    Error,
-    Fail,
-    Skipped,
-}
-
-impl NodeExecutionStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Pass => "pass",
-            Self::Created => "created",
-            Self::Error => "error",
-            Self::Fail => "fail",
-            Self::Skipped => "skipped",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "success" => Some(Self::Success),
-            "pass" => Some(Self::Pass),
-            "created" => Some(Self::Created),
-            "error" => Some(Self::Error),
-            "fail" | "failed" => Some(Self::Fail),
-            "skipped" => Some(Self::Skipped),
-            _ => None,
-        }
-    }
-
-    pub fn is_promotable(self) -> bool {
-        matches!(self, Self::Success | Self::Pass | Self::Created)
-    }
-
-    /// SQL literal list for use in queries that filter on promotable statuses.
-    pub const PROMOTABLE_SQL: &str = "'success', 'pass', 'created'";
-}
+pub use crate::api::NodeExecutionStatus;
 
 impl std::fmt::Display for NodeExecutionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

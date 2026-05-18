@@ -447,3 +447,47 @@ pub struct LocalEnvironmentUpsertApiResponse {
     pub environment_slug: String,
     pub worker_queue: String,
 }
+
+/// Execution status of a single dbt node (model, test, seed, snapshot).
+/// Used across presentation (event rendering, UI) and persistence layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeExecutionStatus {
+    Success,
+    Pass,
+    Created,
+    Error,
+    Fail,
+    Skipped,
+}
+
+impl NodeExecutionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Pass => "pass",
+            Self::Created => "created",
+            Self::Error => "error",
+            Self::Fail => "fail",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "success" => Some(Self::Success),
+            "pass" => Some(Self::Pass),
+            "created" => Some(Self::Created),
+            "error" => Some(Self::Error),
+            "fail" | "failed" => Some(Self::Fail),
+            "skipped" => Some(Self::Skipped),
+            _ => None,
+        }
+    }
+
+    pub fn is_promotable(self) -> bool {
+        matches!(self, Self::Success | Self::Pass | Self::Created)
+    }
+
+    /// SQL literal list for use in queries that filter on promotable statuses.
+    pub const PROMOTABLE_SQL: &str = "'success', 'pass', 'created'";
+}
