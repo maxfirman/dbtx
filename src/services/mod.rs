@@ -4,9 +4,9 @@ use crate::db::{
     CreateEnvironmentDraftInput, CreateEnvironmentRunPlanInput, CreateProjectDraftInput,
     CreateProjectInput, CurrentNodeStatePlanningRecord, Db, EnvironmentActualStateRecord,
     EnvironmentDraftRecord, EnvironmentRecord, EnvironmentReleaseInput, EnvironmentRunPlanRecord,
-    EquivalentPlanLookup, GitState, PlanStatus,
-    PlanningManifestNodeRecord, ProjectDraftRecord, ProjectRecord, RunStart,
-    SourceStateEventCreateInput, SourceStateEventRecord, UpdateEnvironmentDraftInput,
+    EquivalentPlanLookup, GitState, PlanStatus, PlanningManifestNodeRecord, ProjectDraftRecord,
+    ProjectRecord, RunStart, SourceStateEventCreateInput, SourceStateEventRecord,
+    UpdateEnvironmentDraftInput,
 };
 use crate::dbt_utils::{
     append_invocation_id, build_generated_profiles, git_repo_root, read_git_state,

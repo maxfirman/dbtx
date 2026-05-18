@@ -322,30 +322,25 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn reconcile_error_converts_to_app_error() {
         let cases: Vec<(ReconcileError, fn(&AppError) -> bool)> = vec![
-            (
-                ReconcileError::AlreadyReconciled,
-                |e| matches!(e, AppError::EnvironmentAlreadyReconciled),
-            ),
-            (
-                ReconcileError::InProgress,
-                |e| matches!(e, AppError::ReconciliationInProgress),
-            ),
+            (ReconcileError::AlreadyReconciled, |e| {
+                matches!(e, AppError::EnvironmentAlreadyReconciled)
+            }),
+            (ReconcileError::InProgress, |e| {
+                matches!(e, AppError::ReconciliationInProgress)
+            }),
             (
                 ReconcileError::PlanNotAdmissible("p1".into(), "done".into()),
                 |e| matches!(e, AppError::PlanNotAdmissible(p, s) if p == "p1" && s == "done"),
             ),
-            (
-                ReconcileError::RequiresBaseline,
-                |e| matches!(e, AppError::ReconciliationRequiresBaseline),
-            ),
-            (
-                ReconcileError::RequiresCommitSha,
-                |e| matches!(e, AppError::ReconciliationRequiresCommitSha),
-            ),
-            (
-                ReconcileError::EmptyPlan,
-                |e| matches!(e, AppError::ReconciliationEmptyPlan),
-            ),
+            (ReconcileError::RequiresBaseline, |e| {
+                matches!(e, AppError::ReconciliationRequiresBaseline)
+            }),
+            (ReconcileError::RequiresCommitSha, |e| {
+                matches!(e, AppError::ReconciliationRequiresCommitSha)
+            }),
+            (ReconcileError::EmptyPlan, |e| {
+                matches!(e, AppError::ReconciliationEmptyPlan)
+            }),
         ];
         for (reconcile_err, check) in cases {
             let app_err: AppError = reconcile_err.into();
@@ -357,14 +352,12 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn profile_error_converts_to_app_error() {
         let cases: Vec<(ProfileError, fn(&AppError) -> bool)> = vec![
-            (
-                ProfileError::MissingSecretKey,
-                |e| matches!(e, AppError::MissingSecretKey),
-            ),
-            (
-                ProfileError::MissingDbtProfile,
-                |e| matches!(e, AppError::MissingDbtProfile),
-            ),
+            (ProfileError::MissingSecretKey, |e| {
+                matches!(e, AppError::MissingSecretKey)
+            }),
+            (ProfileError::MissingDbtProfile, |e| {
+                matches!(e, AppError::MissingDbtProfile)
+            }),
             (
                 ProfileError::FileNotFound("/tmp/profiles.yml".into()),
                 |e| matches!(e, AppError::ProfilesFileNotFound(p) if p.contains("profiles.yml")),
@@ -377,10 +370,9 @@ mod tests {
                 ProfileError::TargetNotFound("default".into(), "prod".into()),
                 |e| matches!(e, AppError::ProfileTargetNotFound(p, t) if p == "default" && t == "prod"),
             ),
-            (
-                ProfileError::MissingAdapterType,
-                |e| matches!(e, AppError::MissingAdapterType),
-            ),
+            (ProfileError::MissingAdapterType, |e| {
+                matches!(e, AppError::MissingAdapterType)
+            }),
             (
                 ProfileError::UnsupportedAdapter("oracle".into()),
                 |e| matches!(e, AppError::UnsupportedAdapter(a) if a == "oracle"),

@@ -26,7 +26,10 @@ impl Db {
     /// - Manifest nodes and edges
     /// - Current node state for each node
     /// - Environment actual state pointing to this run
-    pub async fn seed_successful_deployment(&self, input: SeedDeploymentInput<'_>) -> AppResult<Uuid> {
+    pub async fn seed_successful_deployment(
+        &self,
+        input: SeedDeploymentInput<'_>,
+    ) -> AppResult<Uuid> {
         let row = sqlx::query(
             r#"
             SELECT p.id AS project_pk, p.project_name, p.project_root, p.git_repo_url,
