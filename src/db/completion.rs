@@ -3,6 +3,50 @@
 
 use super::*;
 
+fn completion_terminal_status(status: InvocationLifecycleStatus) -> &'static str {
+    match status {
+        InvocationLifecycleStatus::Succeeded => "success",
+        InvocationLifecycleStatus::Canceled => "canceled",
+        InvocationLifecycleStatus::Failed => "failed",
+        InvocationLifecycleStatus::Running => "running",
+    }
+}
+
+fn completion_close_reason(status: InvocationLifecycleStatus) -> &'static str {
+    match status {
+        InvocationLifecycleStatus::Succeeded => "invocation_succeeded",
+        InvocationLifecycleStatus::Failed => "invocation_failed",
+        InvocationLifecycleStatus::Canceled => "invocation_canceled",
+        InvocationLifecycleStatus::Running => "invocation_failed",
+    }
+}
+
+impl InvocationPersistenceRecord {
+    fn require_project_id(&self, context: &str) -> AppResult<i64> {
+        self.project_id.ok_or_else(|| {
+            AppError::Internal(format!("{context} invocation missing project scope"))
+        })
+    }
+
+    fn require_environment_id(&self, context: &str) -> AppResult<i64> {
+        self.environment_id.ok_or_else(|| {
+            AppError::Internal(format!("{context} invocation missing environment scope"))
+        })
+    }
+
+    fn require_project_draft_id(&self, context: &str) -> AppResult<Uuid> {
+        self.project_draft_id.ok_or_else(|| {
+            AppError::Internal(format!("{context} invocation missing draft scope"))
+        })
+    }
+
+    fn require_environment_draft_id(&self, context: &str) -> AppResult<Uuid> {
+        self.environment_draft_id.ok_or_else(|| {
+            AppError::Internal(format!("{context} invocation missing draft scope"))
+        })
+    }
+}
+
 impl Db {
     /// Dispatch completion side effects based on invocation command type.
     /// Called within the invocation completion transaction.
@@ -28,12 +72,7 @@ impl Db {
                     subcommand: &persistence.command,
                     dbt_version: completion.dbt_version.as_deref(),
                     exit_code: completion.exit_code,
-                    terminal_status: match completion.status {
-                        InvocationLifecycleStatus::Succeeded => "success",
-                        InvocationLifecycleStatus::Canceled => "canceled",
-                        InvocationLifecycleStatus::Failed => "failed",
-                        InvocationLifecycleStatus::Running => "running",
-                    },
+                    terminal_status: completion_terminal_status(completion.status),
                     manifest: manifest.as_ref(),
                     promote_base_manifest: persistence.promote_base_manifest
                         && matches!(completion.status, InvocationLifecycleStatus::Succeeded),
@@ -57,89 +96,58 @@ impl Db {
             }
         }
 
-        if persistence.command == "release"
-            && matches!(completion.status, InvocationLifecycleStatus::Succeeded)
-        {
-            self.apply_release_completion_in_tx(
-                tx,
-                persistence.project_id.ok_or_else(|| {
-                    AppError::Internal("release invocation missing project scope".to_string())
-                })?,
-                persistence.environment_id.ok_or_else(|| {
-                    AppError::Internal("release invocation missing environment scope".to_string())
-                })?,
-                completion.result.as_ref(),
-            )
-            .await?;
-        }
-
-        if persistence.command == "project_validate" {
-            self.apply_project_validation_completion_in_tx(
-                tx,
-                persistence.project_draft_id.ok_or_else(|| {
-                    AppError::Internal(
-                        "project validation invocation missing draft scope".to_string(),
-                    )
-                })?,
-                completion,
-            )
-            .await?;
-        }
-
-        if persistence.command == "environment_prepare" {
-            self.apply_environment_prepare_completion_in_tx(
-                tx,
-                persistence.environment_draft_id.ok_or_else(|| {
-                    AppError::Internal(
-                        "environment prepare invocation missing draft scope".to_string(),
-                    )
-                })?,
-                completion,
-            )
-            .await?;
-        }
-
-        if persistence.command == "environment_validate" {
-            self.apply_environment_validation_completion_in_tx(
-                tx,
-                persistence.environment_draft_id.ok_or_else(|| {
-                    AppError::Internal(
-                        "environment validation invocation missing draft scope".to_string(),
-                    )
-                })?,
-                completion,
-            )
-            .await?;
-        }
-
-        if persistence.command == "manifest_prepare" {
-            self.apply_manifest_prepare_completion_in_tx(
-                tx,
-                persistence.project_id.ok_or_else(|| {
-                    AppError::Internal(
-                        "manifest prepare invocation missing project scope".to_string(),
-                    )
-                })?,
-                persistence.environment_id.ok_or_else(|| {
-                    AppError::Internal(
-                        "manifest prepare invocation missing environment scope".to_string(),
-                    )
-                })?,
-                invocation_id,
-                completion,
-            )
-            .await?;
+        // Command-specific side effects
+        match persistence.command.as_str() {
+            "release" if matches!(completion.status, InvocationLifecycleStatus::Succeeded) => {
+                self.apply_release_completion_in_tx(
+                    tx,
+                    persistence.require_project_id("release")?,
+                    persistence.require_environment_id("release")?,
+                    completion.result.as_ref(),
+                )
+                .await?;
+            }
+            "project_validate" => {
+                self.apply_project_validation_completion_in_tx(
+                    tx,
+                    persistence.require_project_draft_id("project_validate")?,
+                    completion,
+                )
+                .await?;
+            }
+            "environment_prepare" => {
+                self.apply_environment_prepare_completion_in_tx(
+                    tx,
+                    persistence.require_environment_draft_id("environment_prepare")?,
+                    completion,
+                )
+                .await?;
+            }
+            "environment_validate" => {
+                self.apply_environment_validation_completion_in_tx(
+                    tx,
+                    persistence.require_environment_draft_id("environment_validate")?,
+                    completion,
+                )
+                .await?;
+            }
+            "manifest_prepare" => {
+                self.apply_manifest_prepare_completion_in_tx(
+                    tx,
+                    persistence.require_project_id("manifest_prepare")?,
+                    persistence.require_environment_id("manifest_prepare")?,
+                    invocation_id,
+                    completion,
+                )
+                .await?;
+            }
+            _ => {}
         }
 
         self.close_invocation_selected_resources_in_tx(
             tx,
             invocation_id,
-            match completion.status {
-                InvocationLifecycleStatus::Succeeded => "invocation_succeeded",
-                InvocationLifecycleStatus::Failed => "invocation_failed",
-                InvocationLifecycleStatus::Canceled => "invocation_canceled",
-                InvocationLifecycleStatus::Running => "invocation_failed",
-            },
+            completion_close_reason(completion.status),
         )
         .await?;
 
@@ -473,64 +481,75 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::api::InvocationLifecycleStatus;
-
-    /// The terminal_status mapping used in finalize_run_in_tx.
-    fn terminal_status_for_run(status: InvocationLifecycleStatus) -> &'static str {
-        match status {
-            InvocationLifecycleStatus::Succeeded => "success",
-            InvocationLifecycleStatus::Canceled => "canceled",
-            InvocationLifecycleStatus::Failed => "failed",
-            InvocationLifecycleStatus::Running => "running",
-        }
-    }
-
-    /// The close reason mapping used in close_invocation_selected_resources_in_tx.
-    fn selected_resource_close_reason(status: InvocationLifecycleStatus) -> &'static str {
-        match status {
-            InvocationLifecycleStatus::Succeeded => "invocation_succeeded",
-            InvocationLifecycleStatus::Failed => "invocation_failed",
-            InvocationLifecycleStatus::Canceled => "invocation_canceled",
-            InvocationLifecycleStatus::Running => "invocation_failed",
-        }
-    }
-
-    /// The manifest_prepare status mapping.
-    fn manifest_prepare_status(status: InvocationLifecycleStatus) -> &'static str {
-        match status {
-            InvocationLifecycleStatus::Succeeded => "succeeded",
-            InvocationLifecycleStatus::Failed | InvocationLifecycleStatus::Canceled => "failed",
-            InvocationLifecycleStatus::Running => "failed",
-        }
-    }
 
     #[test]
     fn terminal_status_maps_all_variants() {
-        assert_eq!(terminal_status_for_run(InvocationLifecycleStatus::Succeeded), "success");
-        assert_eq!(terminal_status_for_run(InvocationLifecycleStatus::Failed), "failed");
-        assert_eq!(terminal_status_for_run(InvocationLifecycleStatus::Canceled), "canceled");
-        assert_eq!(terminal_status_for_run(InvocationLifecycleStatus::Running), "running");
+        assert_eq!(completion_terminal_status(InvocationLifecycleStatus::Succeeded), "success");
+        assert_eq!(completion_terminal_status(InvocationLifecycleStatus::Failed), "failed");
+        assert_eq!(completion_terminal_status(InvocationLifecycleStatus::Canceled), "canceled");
+        assert_eq!(completion_terminal_status(InvocationLifecycleStatus::Running), "running");
     }
 
     #[test]
     fn close_reason_maps_all_variants() {
-        assert_eq!(selected_resource_close_reason(InvocationLifecycleStatus::Succeeded), "invocation_succeeded");
-        assert_eq!(selected_resource_close_reason(InvocationLifecycleStatus::Failed), "invocation_failed");
-        assert_eq!(selected_resource_close_reason(InvocationLifecycleStatus::Canceled), "invocation_canceled");
-        assert_eq!(selected_resource_close_reason(InvocationLifecycleStatus::Running), "invocation_failed");
+        assert_eq!(completion_close_reason(InvocationLifecycleStatus::Succeeded), "invocation_succeeded");
+        assert_eq!(completion_close_reason(InvocationLifecycleStatus::Failed), "invocation_failed");
+        assert_eq!(completion_close_reason(InvocationLifecycleStatus::Canceled), "invocation_canceled");
+        assert_eq!(completion_close_reason(InvocationLifecycleStatus::Running), "invocation_failed");
     }
 
     #[test]
-    fn manifest_prepare_status_maps_all_variants() {
-        assert_eq!(manifest_prepare_status(InvocationLifecycleStatus::Succeeded), "succeeded");
-        assert_eq!(manifest_prepare_status(InvocationLifecycleStatus::Failed), "failed");
-        assert_eq!(manifest_prepare_status(InvocationLifecycleStatus::Canceled), "failed");
-        assert_eq!(manifest_prepare_status(InvocationLifecycleStatus::Running), "failed");
+    fn require_project_id_returns_error_when_missing() {
+        let record = InvocationPersistenceRecord {
+            plan_id: None,
+            run_id: None,
+            project_id: None,
+            environment_id: None,
+            project_draft_id: None,
+            environment_draft_id: None,
+            command: "build".to_string(),
+            promote_base_manifest: false,
+            updates_actual_state: false,
+        };
+        assert!(record.require_project_id("test").is_err());
+    }
+
+    #[test]
+    fn require_project_id_returns_value_when_present() {
+        let record = InvocationPersistenceRecord {
+            plan_id: None,
+            run_id: None,
+            project_id: Some(42),
+            environment_id: None,
+            project_draft_id: None,
+            environment_draft_id: None,
+            command: "build".to_string(),
+            promote_base_manifest: false,
+            updates_actual_state: false,
+        };
+        assert_eq!(record.require_project_id("test").unwrap(), 42);
+    }
+
+    #[test]
+    fn require_environment_draft_id_returns_error_when_missing() {
+        let record = InvocationPersistenceRecord {
+            plan_id: None,
+            run_id: None,
+            project_id: None,
+            environment_id: None,
+            project_draft_id: None,
+            environment_draft_id: None,
+            command: "environment_validate".to_string(),
+            promote_base_manifest: false,
+            updates_actual_state: false,
+        };
+        assert!(record.require_environment_draft_id("environment_validate").is_err());
     }
 
     #[test]
     fn promote_base_manifest_only_on_success() {
-        // promote_base_manifest should only be true when both the flag is set AND status is Succeeded
         let flag = true;
         assert!(flag && matches!(InvocationLifecycleStatus::Succeeded, InvocationLifecycleStatus::Succeeded));
         assert!(!(flag && matches!(InvocationLifecycleStatus::Failed, InvocationLifecycleStatus::Succeeded)));
