@@ -1,10 +1,9 @@
 //! Automatic reconciliation daemon: drift detection, blocked-plan sweep, and manifest preparation.
-use crate::api::InvocationCommandApi;
 use crate::db::{EnvironmentRecord, PlanStatus, PreparationStatus, SourceStateEventRecord};
 use crate::error::{AppError, AppResult};
 use crate::process_state::ProcessState;
 use crate::services::{
-    EnvironmentService, InvocationService, code_change_input_fingerprint_for_baseline,
+    EnvironmentService, code_change_input_fingerprint_for_baseline,
     source_state_change_input_fingerprint, target_manifest_input_fingerprint,
 };
 use chrono::Utc;
@@ -229,81 +228,20 @@ async fn ensure_target_manifest_for_reconcile_async(
     state: &ProcessState,
     environment: &crate::db::EnvironmentRecord,
 ) -> AppResult<bool> {
-    let Some(desired_commit_sha) = environment.git_commit_sha.clone() else {
-        return Ok(false);
-    };
-    let baseline_run_id = state
-        .db()
-        .get_environment_actual_state(&environment.project_ref, &environment.slug)
-        .await?
-        .last_successful_run_id;
-    let input_fingerprint = target_manifest_input_fingerprint(
-        &code_change_input_fingerprint_for_baseline(&desired_commit_sha, baseline_run_id),
-    );
-    if state
-        .db()
-        .latest_manifest_run_id_for_commit(
-            environment.project_id,
-            environment.id,
-            &desired_commit_sha,
-        )
-        .await?
-        .is_some()
-    {
+    if environment.git_commit_sha.is_none() {
         return Ok(false);
     }
-    if state
-        .db()
-        .has_active_manifest_prepare_for_commit(
-            environment.project_id,
-            environment.id,
-            &desired_commit_sha,
-        )
-        .await?
-    {
-        return Ok(true);
+    let outcome = crate::manifest_preparation::ensure_manifest_preparation(
+        state.db(),
+        environment,
+        crate::manifest_preparation::ProcessStateStarter(state),
+    )
+    .await?;
+    match outcome {
+        crate::manifest_preparation::ManifestPreparationOutcome::AlreadyAvailable => Ok(false),
+        crate::manifest_preparation::ManifestPreparationOutcome::InProgress
+        | crate::manifest_preparation::ManifestPreparationOutcome::Started(_) => Ok(true),
     }
-    if state
-        .db()
-        .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
-        .await?
-        .filter(|preparation| {
-            preparation.kind == "target_manifest"
-                && preparation.input_fingerprint.as_deref() == Some(input_fingerprint.as_str())
-                && preparation.status == PreparationStatus::Failed
-                && preparation
-                    .next_attempt_at
-                    .map(|next_attempt_at| next_attempt_at > Utc::now())
-                    .unwrap_or(false)
-        })
-        .is_some()
-    {
-        return Ok(true);
-    }
-
-    let invocation_id = Uuid::new_v4();
-    let prepared = InvocationService::new(state.db())
-        .prepare_remote_manifest_capture(invocation_id, &environment.project_ref, &environment.slug)
-        .await?;
-    state
-        .start_prepared_invocation(
-            invocation_id,
-            InvocationCommandApi::ManifestPrepare,
-            None,
-            prepared,
-        )
-        .await?;
-    state
-        .db()
-        .mark_manifest_prepare_running(
-            environment.project_id,
-            environment.id,
-            &input_fingerprint,
-            &desired_commit_sha,
-            invocation_id,
-        )
-        .await?;
-    Ok(true)
 }
 
 pub async fn sweep_blocked_plans_once(state: &ProcessState) -> AppResult<usize> {

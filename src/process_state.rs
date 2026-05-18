@@ -1,18 +1,14 @@
 //! Shared process state used by both the server and reconciler binaries.
 use crate::api::{InvocationCommandApi, InvocationExecutionModeApi, InvocationExecutionSpecApi};
 use crate::config::RuntimeConfig;
-use crate::db::{CreateInvocationInput, Db, PreparationStatus};
+use crate::db::{CreateInvocationInput, Db};
 use crate::error::{AppError, AppResult};
 use crate::execution::{ExecutionCompletion, invocation_claim_deadline_at};
 use crate::invocation_runtime::{
     InvocationManager, InvocationPersistence, InvocationRecorder, started_invocation_event,
 };
 use crate::reconciler::auto_admit_blocked_plans_for_environment;
-use crate::services::{
-    InvocationCommand, InvocationService, code_change_input_fingerprint_for_baseline,
-    target_manifest_input_fingerprint,
-};
-use chrono::Utc;
+use crate::services::InvocationCommand;
 use tokio::time::{Instant, sleep};
 use tracing::info;
 use uuid::Uuid;
@@ -261,114 +257,58 @@ impl ProcessState {
             .db
             .get_environment(project_id, environment_slug)
             .await?;
-        let desired_commit_sha = environment
-            .git_commit_sha
-            .clone()
-            .ok_or(AppError::ReconciliationRequiresCommitSha)?;
-        let baseline_run_id = self
-            .db
-            .get_environment_actual_state(&environment.project_ref, &environment.slug)
-            .await?
-            .last_successful_run_id;
-        let input_fingerprint = target_manifest_input_fingerprint(
-            &code_change_input_fingerprint_for_baseline(&desired_commit_sha, baseline_run_id),
-        );
-        if self
-            .db
-            .latest_manifest_run_id_for_commit(
-                environment.project_id,
-                environment.id,
-                &desired_commit_sha,
-            )
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-        if self
-            .db
-            .has_active_manifest_prepare_for_commit(
-                environment.project_id,
-                environment.id,
-                &desired_commit_sha,
-            )
-            .await?
-        {
-            return Err(AppError::ReconciliationInProgress);
-        }
-        if self
-            .db
-            .get_environment_reconcile_preparation_by_scope(environment.project_id, environment.id)
-            .await?
-            .filter(|preparation| {
-                preparation.kind == "target_manifest"
-                    && preparation.input_fingerprint.as_deref()
-                        == Some(input_fingerprint.as_str())
-                    && preparation.status == PreparationStatus::Failed
-                    && preparation
-                        .next_attempt_at
-                        .map(|next_attempt_at| next_attempt_at > Utc::now())
-                        .unwrap_or(false)
-            })
-            .is_some()
-        {
-            return Err(AppError::ReconciliationInProgress);
-        }
-
-        let invocation_id = Uuid::new_v4();
-        let prepared = InvocationService::new(&self.db)
-            .prepare_remote_manifest_capture(invocation_id, project_id, environment_slug)
-            .await?;
-        self.start_prepared_invocation(
-            invocation_id,
-            InvocationCommandApi::ManifestPrepare,
-            None,
-            prepared,
+        let outcome = crate::manifest_preparation::ensure_manifest_preparation(
+            &self.db,
+            &environment,
+            crate::manifest_preparation::ProcessStateStarter(self),
         )
         .await?;
-        self.db
-            .mark_manifest_prepare_running(
-                environment.project_id,
-                environment.id,
-                &input_fingerprint,
-                &desired_commit_sha,
-                invocation_id,
-            )
-            .await?;
-        wait_for_terminal_invocation(self, invocation_id, std::time::Duration::from_secs(120))
-            .await?;
-        let status = self.db.get_invocation_status(invocation_id).await?;
-        match status.status {
-            crate::api::InvocationLifecycleStatus::Succeeded => {}
-            crate::api::InvocationLifecycleStatus::Failed
-            | crate::api::InvocationLifecycleStatus::Canceled => {
-                return Err(AppError::Internal(status.error.unwrap_or_else(|| {
-                    "manifest prepare invocation failed".to_string()
-                })));
+        match outcome {
+            crate::manifest_preparation::ManifestPreparationOutcome::AlreadyAvailable => Ok(()),
+            crate::manifest_preparation::ManifestPreparationOutcome::InProgress => {
+                Err(AppError::ReconciliationInProgress)
             }
-            crate::api::InvocationLifecycleStatus::Running => {
-                return Err(AppError::Internal(
-                    "manifest prepare invocation did not reach a terminal state".to_string(),
-                ));
+            crate::manifest_preparation::ManifestPreparationOutcome::Started(invocation_id) => {
+                wait_for_terminal_invocation(
+                    self,
+                    invocation_id,
+                    std::time::Duration::from_secs(120),
+                )
+                .await?;
+                let status = self.db.get_invocation_status(invocation_id).await?;
+                match status.status {
+                    crate::api::InvocationLifecycleStatus::Succeeded => {}
+                    crate::api::InvocationLifecycleStatus::Failed
+                    | crate::api::InvocationLifecycleStatus::Canceled => {
+                        return Err(AppError::Internal(status.error.unwrap_or_else(|| {
+                            "manifest prepare invocation failed".to_string()
+                        })));
+                    }
+                    crate::api::InvocationLifecycleStatus::Running => {
+                        return Err(AppError::Internal(
+                            "manifest prepare invocation did not reach a terminal state"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if self
+                    .db
+                    .latest_manifest_run_id_for_commit(
+                        environment.project_id,
+                        environment.id,
+                        environment.git_commit_sha.as_deref().unwrap_or_default(),
+                    )
+                    .await?
+                    .is_none()
+                {
+                    return Err(AppError::Internal(
+                        "manifest prepare finished without persisting a manifest snapshot"
+                            .to_string(),
+                    ));
+                }
+                Ok(())
             }
         }
-
-        if self
-            .db
-            .latest_manifest_run_id_for_commit(
-                environment.project_id,
-                environment.id,
-                &desired_commit_sha,
-            )
-            .await?
-            .is_none()
-        {
-            return Err(AppError::Internal(
-                "manifest prepare finished without persisting a manifest snapshot".to_string(),
-            ));
-        }
-
-        Ok(())
     }
 }
 

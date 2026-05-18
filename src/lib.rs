@@ -14,6 +14,7 @@ pub mod event;
 pub mod execution;
 pub mod invocation_runtime;
 pub mod manifest;
+pub(crate) mod manifest_preparation;
 pub mod process_state;
 pub mod profile;
 pub mod reconciler;
