@@ -102,32 +102,33 @@ impl InvocationLifecycle {
         let worker_queue = prepared.worker_queue.clone();
         let command_service = command;
         let start = prepared.into_invocation_start(command);
-        self.db
-            .create_invocation(CreateInvocationInput {
-                invocation_id,
-                plan_id,
-                run_id: start.persistence.as_ref().map(|p| p.run_id),
-                project_id,
-                environment_id,
-                project_draft_id,
-                environment_draft_id,
-                command: command_service.as_str().to_string(),
-                execution_mode: start.execution_mode,
-                worker_queue,
-                execution_spec: Some(start.execution_spec),
-                promote_base_manifest: start
-                    .persistence
-                    .as_ref()
-                    .map(|p| p.promote_base_manifest)
-                    .unwrap_or(false),
-                updates_actual_state: start
-                    .persistence
-                    .as_ref()
-                    .map(|p| p.updates_actual_state)
-                    .unwrap_or(false),
-                claim_deadline_at: Some(invocation_claim_deadline_at(start.execution_mode)),
-            })
-            .await?;
+        let mut input = CreateInvocationInput {
+            invocation_id,
+            plan_id,
+            run_id: start.persistence.as_ref().map(|p| p.run_id),
+            project_id,
+            environment_id,
+            project_draft_id,
+            environment_draft_id,
+            command: command_service.as_str().to_string(),
+            execution_mode: start.execution_mode,
+            worker_queue,
+            execution_spec: Some(start.execution_spec),
+            promote_base_manifest: start
+                .persistence
+                .as_ref()
+                .map(|p| p.promote_base_manifest)
+                .unwrap_or(false),
+            updates_actual_state: start
+                .persistence
+                .as_ref()
+                .map(|p| p.updates_actual_state)
+                .unwrap_or(false),
+            claim_deadline_at: Some(invocation_claim_deadline_at(start.execution_mode)),
+            watermark_manifest_run_id: None,
+        };
+        input.watermark_manifest_run_id = self.db.resolve_watermark_manifest_run_id(&input).await?;
+        self.db.create_invocation(input).await?;
         self.bootstrap_started(invocation_id, start.persistence)
             .await?;
         Ok(invocation_id)
@@ -220,6 +221,7 @@ impl InvocationLifecycle {
                 claim_deadline_at: Some(invocation_claim_deadline_at(
                     InvocationExecutionModeApi::Server,
                 )),
+                watermark_manifest_run_id: None,
             })
             .await?;
         match attachment {

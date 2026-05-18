@@ -557,6 +557,7 @@ pub(crate) struct CreateInvocationInput {
     pub(crate) promote_base_manifest: bool,
     pub(crate) updates_actual_state: bool,
     pub(crate) claim_deadline_at: Option<chrono::DateTime<Utc>>,
+    pub(crate) watermark_manifest_run_id: Option<Uuid>,
 }
 
 pub(crate) struct SourceStateEventCreateInput {

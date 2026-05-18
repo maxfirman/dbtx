@@ -7,9 +7,6 @@ impl Db {
         &self,
         input: CreateInvocationInput,
     ) -> AppResult<InvocationStatusResponse> {
-        let watermark_manifest_run_id = self
-            .resolve_invocation_watermark_manifest_run_id(&input)
-            .await?;
         let row = sqlx::query(
             r#"
             INSERT INTO invocations (
@@ -38,13 +35,15 @@ impl Db {
         .bind(input.promote_base_manifest)
         .bind(input.updates_actual_state)
         .bind(input.claim_deadline_at)
-        .bind(watermark_manifest_run_id)
+        .bind(input.watermark_manifest_run_id)
         .fetch_one(&self.pool)
         .await?;
         invocation_status_from_row(&row)
     }
 
-    async fn resolve_invocation_watermark_manifest_run_id(
+    /// Resolve the watermark manifest run_id for an invocation.
+    /// Called by the services layer before creating the invocation.
+    pub(crate) async fn resolve_watermark_manifest_run_id(
         &self,
         input: &CreateInvocationInput,
     ) -> AppResult<Option<Uuid>> {

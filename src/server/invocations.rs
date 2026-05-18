@@ -153,9 +153,7 @@ pub(super) async fn invocation_create(
             }
         }
     };
-    state
-        .db
-        .create_invocation(CreateInvocationInput {
+    let mut input = CreateInvocationInput {
             invocation_id,
             plan_id: None,
             run_id: prepared.persistence.as_ref().map(|p| p.run_id),
@@ -178,8 +176,10 @@ pub(super) async fn invocation_create(
                 .map(|p| p.updates_actual_state)
                 .unwrap_or(false),
             claim_deadline_at: Some(invocation_claim_deadline_at(derived_execution_mode)),
-        })
-        .await?;
+            watermark_manifest_run_id: None,
+        };
+    input.watermark_manifest_run_id = state.db.resolve_watermark_manifest_run_id(&input).await?;
+    state.db.create_invocation(input).await?;
     state
         .bootstrap_invocation_started(invocation_id, prepared.persistence)
         .await?;
