@@ -2273,3 +2273,43 @@ async fn ui_environment_rollback_post() {
         "rollback returned {status}"
     );
 }
+
+// --- Model query tests (db/models.rs) ---
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_model_with_node_executions() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+    // Add node execution data
+    sqlx::query(
+        "INSERT INTO node_executions (run_id, unique_id, status, started_at, finished_at, execution_time_seconds) VALUES ('11111111-1111-1111-1111-111111111111', 'model.pkg.orders', 'success', NOW() - INTERVAL '10 seconds', NOW(), 10.0)"
+    ).execute(&pool).await.unwrap();
+
+    // The invocations tab should render with execution history
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/model.pkg.orders/tab?tab=invocations").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!html.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_model_history_diff() {
+    let (app, pool) = test_app().await;
+    seed_catalog_data(&pool).await;
+
+    let (status, html) = get_html(&app, "/ui/catalog/prj_ui/prod/model.pkg.orders/history-diff?run_id=11111111-1111-1111-1111-111111111111").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!html.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn ui_catalog_empty_environment_renders() {
+    let (app, pool) = test_app().await;
+    seed_ui_test_data(&pool).await;
+    // No models seeded - catalog should still render
+    let (status, html) = get_html(&app, "/ui/catalog?project_id=prj_ui&environment_slug=prod").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Catalog"));
+}
