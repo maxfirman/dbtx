@@ -11,6 +11,36 @@ impl<'a> InvocationService<'a> {
         Self { db }
     }
 
+    /// Resolve the state manifest for an invocation.
+    /// Shared by both remote and local execution preparation.
+    async fn resolve_state_manifest(
+        &self,
+        project_id: i64,
+        environment_id: i64,
+        project_name: &str,
+        adapter_type: &str,
+        wants_state_modified: bool,
+    ) -> AppResult<Option<Value>> {
+        let reconstructed_manifest = self
+            .db
+            .load_reconstructed_manifest(project_id, environment_id)
+            .await?
+            .or(if wants_state_modified {
+                Some(
+                    ReconstructedManifest::write_empty_state(project_name, adapter_type).await?,
+                )
+            } else {
+                None
+            });
+        if let Some(reconstructed_manifest) = reconstructed_manifest.as_ref() {
+            let path = reconstructed_manifest.temp_dir.path().join("manifest.json");
+            let content = tokio::fs::read_to_string(path).await?;
+            Ok(Some(serde_json::from_str(&content)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn prepare_remote_execution(
         &self,
         run_id: Uuid,
@@ -40,28 +70,15 @@ impl<'a> InvocationService<'a> {
             InvocationContext::from_args_in_dir(&args, inject_json_logging, &fake_project_dir)?;
         let project_name = project.project_name.clone();
 
-        let reconstructed_manifest = self
-            .db
-            .load_reconstructed_manifest(project.id, environment.id)
-            .await?
-            .or(if ctx.wants_state_modified {
-                Some(
-                    ReconstructedManifest::write_empty_state(
-                        &project_name,
-                        &environment.adapter_type,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            });
-        let state_manifest = if let Some(reconstructed_manifest) = reconstructed_manifest.as_ref() {
-            let path = reconstructed_manifest.temp_dir.path().join("manifest.json");
-            let content = tokio::fs::read_to_string(path).await?;
-            Some(serde_json::from_str(&content)?)
-        } else {
-            None
-        };
+        let state_manifest = self
+            .resolve_state_manifest(
+                project.id,
+                environment.id,
+                &project_name,
+                &environment.adapter_type,
+                ctx.wants_state_modified,
+            )
+            .await?;
         let generated_profiles = build_generated_profiles(Path::new("."), &environment)?;
         let profiles_yml =
             tokio::fs::read_to_string(generated_profiles.temp_dir.path().join("profiles.yml"))
@@ -198,28 +215,15 @@ impl<'a> InvocationService<'a> {
         let inject_json_logging = command.persists_state();
         let ctx = InvocationContext::from_args(&args, inject_json_logging)?;
 
-        let reconstructed_manifest = self
-            .db
-            .load_reconstructed_manifest(project.id, environment.id)
-            .await?
-            .or(if ctx.wants_state_modified {
-                Some(
-                    ReconstructedManifest::write_empty_state(
-                        &project.project_name,
-                        &environment.adapter_type,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            });
-        let state_manifest = if let Some(reconstructed_manifest) = reconstructed_manifest.as_ref() {
-            let path = reconstructed_manifest.temp_dir.path().join("manifest.json");
-            let content = tokio::fs::read_to_string(path).await?;
-            Some(serde_json::from_str(&content)?)
-        } else {
-            None
-        };
+        let state_manifest = self
+            .resolve_state_manifest(
+                project.id,
+                environment.id,
+                &project.project_name,
+                &environment.adapter_type,
+                ctx.wants_state_modified,
+            )
+            .await?;
 
         let mut dbt_args = ctx.dbt_args;
         if command.persists_state() {
