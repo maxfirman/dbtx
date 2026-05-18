@@ -108,7 +108,7 @@ impl ProcessState {
         let project_draft_id = prepared.project_draft_id;
         let environment_draft_id = prepared.environment_draft_id;
         let worker_queue = prepared.worker_queue.clone();
-        let command_service: InvocationCommand = command.into();
+        let command_service = command;
         let start = prepared.into_invocation_start(command);
         self.db
             .create_invocation(CreateInvocationInput {

@@ -168,20 +168,8 @@ pub struct InvocationCreateApiRequest {
     pub environment_slug: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum InvocationCommandApi {
-    Build,
-    Run,
-    Ls,
-    Test,
-    Seed,
-    Release,
-    ProjectValidate,
-    EnvironmentPrepare,
-    EnvironmentValidate,
-    ManifestPrepare,
-}
+/// Invocation command type — type alias for the canonical `InvocationCommand`.
+pub type InvocationCommandApi = crate::services::InvocationCommand;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]

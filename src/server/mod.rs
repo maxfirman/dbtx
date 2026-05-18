@@ -563,7 +563,7 @@ struct PreparedInvocation {
 }
 
 fn map_invocation_command(command: InvocationCommandApi) -> InvocationCommand {
-    command.into()
+    command
 }
 
 fn normalize_worker_queues(worker_queues: &[String]) -> Result<Vec<String>, ApiError> {

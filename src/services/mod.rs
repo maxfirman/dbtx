@@ -26,7 +26,8 @@ use uuid::Uuid;
 
 const RECONCILE_LEASE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum InvocationCommand {
     Build,
     Run,
@@ -65,23 +66,6 @@ impl InvocationCommand {
                 | Self::EnvironmentPrepare
                 | Self::EnvironmentValidate
         )
-    }
-}
-
-impl From<crate::api::InvocationCommandApi> for InvocationCommand {
-    fn from(command: crate::api::InvocationCommandApi) -> Self {
-        match command {
-            crate::api::InvocationCommandApi::Build => Self::Build,
-            crate::api::InvocationCommandApi::Run => Self::Run,
-            crate::api::InvocationCommandApi::Ls => Self::Ls,
-            crate::api::InvocationCommandApi::Test => Self::Test,
-            crate::api::InvocationCommandApi::Seed => Self::Seed,
-            crate::api::InvocationCommandApi::Release => Self::Release,
-            crate::api::InvocationCommandApi::ProjectValidate => Self::ProjectValidate,
-            crate::api::InvocationCommandApi::EnvironmentPrepare => Self::EnvironmentPrepare,
-            crate::api::InvocationCommandApi::EnvironmentValidate => Self::EnvironmentValidate,
-            crate::api::InvocationCommandApi::ManifestPrepare => Self::ManifestPrepare,
-        }
     }
 }
 

@@ -514,23 +514,6 @@ mod tests {
         assert!(!ctx.wants_state_modified);
     }
 
-    #[test]
-    fn command_from_api_roundtrip() {
-        use crate::api::InvocationCommandApi;
-        let cases = [
-            (InvocationCommandApi::Build, InvocationCommand::Build),
-            (InvocationCommandApi::Run, InvocationCommand::Run),
-            (InvocationCommandApi::Ls, InvocationCommand::Ls),
-            (InvocationCommandApi::Test, InvocationCommand::Test),
-            (InvocationCommandApi::Seed, InvocationCommand::Seed),
-            (InvocationCommandApi::Release, InvocationCommand::Release),
-        ];
-        for (api_cmd, expected) in cases {
-            let converted: InvocationCommand = api_cmd.into();
-            assert_eq!(converted.as_str(), expected.as_str());
-        }
-    }
-
     // --- Watermark resolution tests ---
 
     fn base_input() -> WatermarkResolutionInput {

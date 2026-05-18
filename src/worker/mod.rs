@@ -500,14 +500,7 @@ fn first_yaml_path(value: &YamlValue) -> Option<PathBuf> {
 }
 
 fn persists_state(command: InvocationCommandApi) -> bool {
-    !matches!(
-        command,
-        InvocationCommandApi::Ls
-            | InvocationCommandApi::Release
-            | InvocationCommandApi::ProjectValidate
-            | InvocationCommandApi::EnvironmentPrepare
-            | InvocationCommandApi::EnvironmentValidate
-    )
+    command.persists_state()
 }
 
 fn map_command(command: InvocationCommandApi) -> &'static str {
