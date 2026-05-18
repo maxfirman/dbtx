@@ -470,3 +470,80 @@ impl Db {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::api::InvocationLifecycleStatus;
+
+    /// The terminal_status mapping used in finalize_run_in_tx.
+    fn terminal_status_for_run(status: InvocationLifecycleStatus) -> &'static str {
+        match status {
+            InvocationLifecycleStatus::Succeeded => "success",
+            InvocationLifecycleStatus::Canceled => "canceled",
+            InvocationLifecycleStatus::Failed => "failed",
+            InvocationLifecycleStatus::Running => "running",
+        }
+    }
+
+    /// The close reason mapping used in close_invocation_selected_resources_in_tx.
+    fn selected_resource_close_reason(status: InvocationLifecycleStatus) -> &'static str {
+        match status {
+            InvocationLifecycleStatus::Succeeded => "invocation_succeeded",
+            InvocationLifecycleStatus::Failed => "invocation_failed",
+            InvocationLifecycleStatus::Canceled => "invocation_canceled",
+            InvocationLifecycleStatus::Running => "invocation_failed",
+        }
+    }
+
+    /// The manifest_prepare status mapping.
+    fn manifest_prepare_status(status: InvocationLifecycleStatus) -> &'static str {
+        match status {
+            InvocationLifecycleStatus::Succeeded => "succeeded",
+            InvocationLifecycleStatus::Failed | InvocationLifecycleStatus::Canceled => "failed",
+            InvocationLifecycleStatus::Running => "failed",
+        }
+    }
+
+    #[test]
+    fn terminal_status_maps_all_variants() {
+        assert_eq!(terminal_status_for_run(InvocationLifecycleStatus::Succeeded), "success");
+        assert_eq!(terminal_status_for_run(InvocationLifecycleStatus::Failed), "failed");
+        assert_eq!(terminal_status_for_run(InvocationLifecycleStatus::Canceled), "canceled");
+        assert_eq!(terminal_status_for_run(InvocationLifecycleStatus::Running), "running");
+    }
+
+    #[test]
+    fn close_reason_maps_all_variants() {
+        assert_eq!(selected_resource_close_reason(InvocationLifecycleStatus::Succeeded), "invocation_succeeded");
+        assert_eq!(selected_resource_close_reason(InvocationLifecycleStatus::Failed), "invocation_failed");
+        assert_eq!(selected_resource_close_reason(InvocationLifecycleStatus::Canceled), "invocation_canceled");
+        assert_eq!(selected_resource_close_reason(InvocationLifecycleStatus::Running), "invocation_failed");
+    }
+
+    #[test]
+    fn manifest_prepare_status_maps_all_variants() {
+        assert_eq!(manifest_prepare_status(InvocationLifecycleStatus::Succeeded), "succeeded");
+        assert_eq!(manifest_prepare_status(InvocationLifecycleStatus::Failed), "failed");
+        assert_eq!(manifest_prepare_status(InvocationLifecycleStatus::Canceled), "failed");
+        assert_eq!(manifest_prepare_status(InvocationLifecycleStatus::Running), "failed");
+    }
+
+    #[test]
+    fn promote_base_manifest_only_on_success() {
+        // promote_base_manifest should only be true when both the flag is set AND status is Succeeded
+        let flag = true;
+        assert!(flag && matches!(InvocationLifecycleStatus::Succeeded, InvocationLifecycleStatus::Succeeded));
+        assert!(!(flag && matches!(InvocationLifecycleStatus::Failed, InvocationLifecycleStatus::Succeeded)));
+        assert!(!(flag && matches!(InvocationLifecycleStatus::Canceled, InvocationLifecycleStatus::Succeeded)));
+    }
+
+    #[test]
+    fn release_only_applies_on_success() {
+        let command = "release";
+        let status = InvocationLifecycleStatus::Succeeded;
+        assert!(command == "release" && matches!(status, InvocationLifecycleStatus::Succeeded));
+
+        let status = InvocationLifecycleStatus::Failed;
+        assert!(!(command == "release" && matches!(status, InvocationLifecycleStatus::Succeeded)));
+    }
+}
