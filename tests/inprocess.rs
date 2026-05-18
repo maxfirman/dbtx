@@ -1984,3 +1984,197 @@ async fn ui_catalog_nonexistent_project_returns_error() {
     let (status, _html) = get_html(&app, "/ui/catalog/prj_nonexistent/prod/model.pkg.orders").await;
     assert_ne!(status, StatusCode::OK);
 }
+
+// --- Completion side-effect tests ---
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn project_validation_completion_success_marks_draft_validated() {
+    let (app, _pool) = test_app().await;
+
+    // Create a project draft
+    let (status, body) = post_json(
+        &app,
+        "/v1/project-drafts",
+        json!({
+            "git_repo_url": "https://github.com/org/repo.git",
+            "project_root": "."
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let draft_id = body["draft"]["id"].as_str().unwrap().to_string();
+
+    // Trigger validation (creates an invocation)
+    let (status, body) = post_json(
+        &app,
+        &format!("/v1/project-drafts/{draft_id}/validate"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "validate response: {body}");
+    let inv_id = body["invocation_id"].as_str().unwrap().to_string();
+
+    // Claim the validation invocation
+    let (status, body) = post_json(
+        &app,
+        "/v1/invocations/claim-next",
+        json!({
+            "execution_mode": "server",
+            "worker_id": "validator-1",
+            "worker_queues": ["generic"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "claim response: {body}");
+    let worker_id = body["worker_id"].as_str().unwrap().to_string();
+    let lease_token = body["lease_token"].as_str().unwrap().to_string();
+
+    // Complete with success + project metadata
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/complete"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "completion": {
+                "status": "succeeded",
+                "exit_code": 0,
+                "result": {
+                    "project_name": "analytics",
+                    "default_branch": "main"
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Verify draft is now validated
+    let (status, body) = get_json(&app, &format!("/v1/project-drafts/{draft_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["draft"]["status"], "validated");
+    assert_eq!(body["draft"]["project_name"], "analytics");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn project_validation_completion_failure_marks_draft_failed() {
+    let (app, _pool) = test_app().await;
+
+    let (_, body) = post_json(
+        &app,
+        "/v1/project-drafts",
+        json!({
+            "git_repo_url": "https://github.com/org/bad-repo.git",
+            "project_root": "."
+        }),
+    )
+    .await;
+    let draft_id = body["draft"]["id"].as_str().unwrap().to_string();
+
+    let (_, body) = post_json(
+        &app,
+        &format!("/v1/project-drafts/{draft_id}/validate"),
+        json!({}),
+    )
+    .await;
+    let inv_id = body["invocation_id"].as_str().unwrap().to_string();
+
+    let (_, body) = post_json(
+        &app,
+        "/v1/invocations/claim-next",
+        json!({
+            "execution_mode": "server",
+            "worker_id": "validator-1",
+            "worker_queues": ["generic"]
+        }),
+    )
+    .await;
+    let worker_id = body["worker_id"].as_str().unwrap().to_string();
+    let lease_token = body["lease_token"].as_str().unwrap().to_string();
+
+    // Complete with failure
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/complete"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "completion": {
+                "status": "failed",
+                "exit_code": 1,
+                "error": "could not clone repository"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Verify draft is now failed
+    let (status, body) = get_json(&app, &format!("/v1/project-drafts/{draft_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["draft"]["status"], "failed");
+}
+
+#[tokio::test]
+#[ignore = "requires docker for postgres testcontainer"]
+async fn invocation_complete_updates_actual_state_on_success() {
+    let (app, pool) = test_app().await;
+    // Seed a remote project+environment (with git_commit_sha so it's server mode)
+    sqlx::query("INSERT INTO projects (project_id, project_name, git_repo_url, default_branch, project_root, metadata) VALUES ('prj_actual', 'actual_test', 'https://example.com/repo.git', 'main', '.', '{}'::jsonb)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO environments (project_id, slug, profile_name, target_name, adapter_type, worker_queue, schema_name, git_branch, git_commit_sha, use_latest_commit, auto_reconcile, immutable, profile_config, profile_secrets, metadata) VALUES (1, 'prod', 'actual_test', 'prod', 'duckdb', 'generic', 'main', 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', false, false, false, '{\"path\": \"warehouse.duckdb\"}'::jsonb, '{}'::jsonb, '{}'::jsonb)")
+        .execute(&pool).await.unwrap();
+
+    let (status, body) = post_json(
+        &app,
+        "/v1/invocations",
+        json!({
+            "command": "build",
+            "args": [],
+            "project_id": "prj_actual",
+            "environment_slug": "prod"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create invocation failed: {body}");
+    let inv_id = body["invocation_id"].as_str().expect("invocation_id").to_string();
+
+    let (status, body) = post_json(
+        &app,
+        "/v1/invocations/claim-next",
+        json!({
+            "execution_mode": "server",
+            "worker_id": "w1",
+            "worker_queues": ["generic"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "claim-next failed: {body}");
+    let worker_id = body["worker_id"].as_str().expect("worker_id in claim response").to_string();
+    let lease_token = body["lease_token"].as_str().expect("lease_token in claim response").to_string();
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/invocations/{inv_id}/complete"),
+        json!({
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "completion": {
+                "status": "succeeded",
+                "exit_code": 0
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Verify actual state was updated
+    let (status, body) = get_json(
+        &app,
+        "/v1/projects/prj_actual/environments/prod/actual-state",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["actual_state"]["last_successful_run_id"].is_string());
+}
